@@ -120,6 +120,8 @@ h1 span { color: var(--green); }
 .recognition-banner.is-estimate .recognition-dot { background: var(--orange); box-shadow: 0 0 0 3px rgba(220, 145, 103, .18); }
 .recognition-banner.is-file { border-color: #d3ddea; background: #f3f6fb; }
 .recognition-banner.is-file .recognition-dot { background: #5b7ba6; box-shadow: 0 0 0 3px rgba(91, 123, 166, .16); }
+.recognition-banner.is-mixed { border-color: #e6d8c0; background: #fdfaf3; }
+.recognition-banner.is-mixed .recognition-dot { background: #b98a3f; box-shadow: 0 0 0 3px rgba(185, 138, 63, .18); }
 
 /* 低置信度音符：左侧色条 + 琥珀底色；"只看待校对"筛选靠 [hidden] 隐藏行 */
 .note-row[hidden] { display: none; }
@@ -149,3 +151,23 @@ h1 span { color: var(--green); }
 .ghost-button[hidden] { display: none; }
 .ghost-button:hover { border-color: #c7d8c9; background: #f1f6f1; }
 .ghost-button.is-active { border-color: var(--orange); background: #fdf3ea; color: #a8643f; }
+
+/* 逐谱表识别进度 */
+.recognize-progress { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+.recognize-progress[hidden] { display: none; }
+.recognize-progress-track { height: 5px; border-radius: 3px; background: #e8ebe6; overflow: hidden; }
+.recognize-progress-track span { display: block; height: 100%; width: 0; border-radius: 3px; background: linear-gradient(90deg, #47715d, #6fa37f); transition: width .25s ease; }
+.recognize-progress-label { font-size: 10px; color: #5f6d64; }
+.cancel-recognize { margin-top: 8px; width: 100%; }
+.cancel-recognize[hidden] { display: none; }
+
+/* 整体移调 */
+.edit-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0 0; }
+.inline-field { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: #5f6d64; }
+.inline-field input { width: 52px; padding: 4px 6px; border: 1px solid #e4ebe4; border-radius: 5px; background: #fbfcfa; font-size: 11px; text-align: center; }
+.inline-field small { color: #8a968d; }
+
+/* 标题可直接编辑 */
+.imported-score h3[contenteditable] { cursor: text; border-radius: 5px; padding: 2px 4px; margin-left: -4px; transition: background .15s; }
+.imported-score h3[contenteditable]:hover { background: #f2f6f2; }
+.imported-score h3[contenteditable]:focus { outline: 2px solid var(--green); outline-offset: 1px; background: #fff; }

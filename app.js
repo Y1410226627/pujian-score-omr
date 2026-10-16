@@ -1,4 +1,8 @@
 import { parseMusicXmlText, readMusicXmlFile } from "./musicxml.js";
+import {
+  binarize, detectStaves, groupSystems, staffCropBox,
+  mergeSystemScores, transposeNotes, yForPitch, CLEF_BY_SIGN,
+} from "./staff.js";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -20,6 +24,9 @@ const els = {
   lowConfidenceButton: byId("lowConfidenceButton"),
   selectionBar: byId("selectionBar"), selectionLabel: byId("selectionLabel"),
   loopToggle: byId("loopToggle"), clearSelection: byId("clearSelection"), scoreLegend: byId("scoreLegend"),
+  recognizeProgress: byId("recognizeProgress"), recognizeProgressBar: byId("recognizeProgressBar"),
+  recognizeProgressLabel: byId("recognizeProgressLabel"), cancelRecognize: byId("cancelRecognize"),
+  transposeInput: byId("transposeInput"), resetTranspose: byId("resetTranspose"),
 };
 const state = {
   file: null, objectUrl: null, pdf: null, pageNumber: 1, pageCount: 1, notes: [], scoreInfo: null,
@@ -30,6 +37,8 @@ const state = {
   // 识别来源：engine=本机专业引擎 / estimate=浏览器粗略估算 / musicxml=直接导入的结构化乐谱
   recognitionSource: null,
   selection: null, loop: false, onlyLowConfidence: false,
+  // 逐谱表识别相关：谱表几何、进度、取消标志、整体移调量
+  staffBoxes: null, recognizeProgress: { done: 0, total: 0 }, cancelRecognize: false, transposeOffset: 0,
 };
 // 粗略估算得到的符头置信分低于此值即标为"待校对"
 const LOW_CONFIDENCE_THRESHOLD = 0.5;
@@ -99,6 +108,10 @@ function clearScore() {
   state.recognitionSource = null;
   state.selection = null;
   state.onlyLowConfidence = false;
+  state.staffBoxes = null;
+  state.transposeOffset = 0;
+  if (els.transposeInput) els.transposeInput.value = "0";
+  if (els.recognizeProgress) els.recognizeProgress.hidden = true;
   els.scoreInfo.hidden = true;
   updateVoiceOptions(true);
   els.staffSelect.replaceChildren();
@@ -133,6 +146,10 @@ function updateRecognitionBanner() {
     banner.className = "recognition-banner is-engine";
     els.recognitionSource.textContent = "本机专业识别引擎";
     els.recognitionDetail.textContent = `${state.notes.length} 个音符，已生成节奏与声部 · 结果仍需逐音校对`;
+  } else if (state.recognitionSource === "mixed") {
+    banner.className = "recognition-banner is-mixed";
+    els.recognitionSource.textContent = "专业引擎 + 部分粗略估算";
+    els.recognitionDetail.textContent = `${state.notes.length} 个音符 · 本机引擎整体可用，但有几行谱表未能识别，请优先校对来自估算的部分`;
   } else if (state.recognitionSource === "musicxml") {
     banner.className = "recognition-banner is-file";
     els.recognitionSource.textContent = "来自文件的结构化乐谱";
@@ -312,67 +329,7 @@ function removeCurrentFile() {
   clearScore();
 }
 
-function otsuThreshold(gray) {
-  const histogram = new Uint32Array(256);
-  for (let i = 0; i < gray.length; i++) histogram[gray[i]]++;
-  let sum = 0;
-  for (let t = 0; t < 256; t++) sum += t * histogram[t];
-  let sumBackground = 0, weightBackground = 0, best = -1, threshold = 170;
-  for (let t = 0; t < 256; t++) {
-    weightBackground += histogram[t];
-    if (!weightBackground) continue;
-    const weightForeground = gray.length - weightBackground;
-    if (!weightForeground) break;
-    sumBackground += t * histogram[t];
-    const meanBackground = sumBackground / weightBackground;
-    const meanForeground = (sum - sumBackground) / weightForeground;
-    const variance = weightBackground * weightForeground * (meanBackground - meanForeground) ** 2;
-    if (variance > best) { best = variance; threshold = t; }
-  }
-  return Math.max(90, Math.min(220, threshold));
-}
-function detectStaff(binary, width, height) {
-  const rowCounts = new Uint32Array(height);
-  for (let y = 0; y < height; y++) {
-    let count = 0, offset = y * width;
-    for (let x = 0; x < width; x++) count += binary[offset + x];
-    rowCounts[y] = count;
-  }
-  const coverage = Math.max(12, width * 0.32), centers = [];
-  let start = -1, last = -1;
-  for (let y = 0; y <= height; y++) {
-    if (y < height && rowCounts[y] >= coverage) {
-      if (start < 0) start = y;
-      last = y;
-    } else if (start >= 0 && (y - last > 2 || y === height)) {
-      let weighted = 0, strength = 0;
-      for (let row = start; row <= last; row++) {
-        weighted += row * rowCounts[row];
-        strength += rowCounts[row];
-      }
-      centers.push({ y: weighted / Math.max(1, strength), strength: strength / Math.max(1, last - start + 1) });
-      start = -1;
-    }
-  }
-  const candidates = [];
-  for (let i = 0; i + 4 < centers.length; i++) {
-    const lines = centers.slice(i, i + 5);
-    const gaps = lines.slice(1).map((line, j) => line.y - lines[j].y);
-    const spacing = gaps.reduce((a, b) => a + b, 0) / 4;
-    if (spacing < 4 || spacing > Math.min(55, height / 12)) continue;
-    if (Math.max(...gaps) - Math.min(...gaps) > Math.max(2.4, spacing * 0.29)) continue;
-    candidates.push({ lines, spacing, strength: lines.reduce((sum, line) => sum + line.strength, 0) / 5 });
-  }
-  candidates.sort((a, b) => b.strength - a.strength);
-  const unique = [];
-  for (const item of candidates) {
-    const overlap = unique.some((other) => item.lines.filter((line) =>
-      other.lines.some((candidate) => Math.abs(line.y - candidate.y) < item.spacing * 0.45)).length >= 3);
-    if (!overlap) unique.push(item);
-  }
-  unique.sort((a, b) => a.lines[0].y - b.lines[0].y);
-  return unique;
-}
+// 谱线检测、谱表分组与二值化已移到 staff.js（纯函数，可单元测试）。
 function naturalMidi(letter, octave) {
   const semitones = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
   return (octave + 1) * 12 + semitones[letter];
@@ -423,30 +380,37 @@ function hasStem(binary, width, height, x, y, spacing) {
   }
   return false;
 }
-function analyzeCanvas() {
-  const canvas = els.scoreCanvas, width = canvas.width, height = canvas.height;
+/** 读取当前画布并二值化——识别流程的公共前置步骤。 */
+function readPageBinary() {
+  const canvas = els.scoreCanvas;
+  const width = canvas.width, height = canvas.height;
   const pixels = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, width, height).data;
   const gray = new Uint8Array(width * height);
-  for (let i = 0, p = 0; i < gray.length; i++, p += 4) gray[i] = Math.round(pixels[p] * 0.299 + pixels[p + 1] * 0.587 + pixels[p + 2] * 0.114);
-  const threshold = otsuThreshold(gray), binary = new Uint8Array(gray.length);
-  for (let i = 0; i < gray.length; i++) binary[i] = gray[i] < threshold ? 1 : 0;
-  const staves = detectStaff(binary, width, height);
-  if (!staves.length) return { notes: [], staffFound: false };
-  const selectedStaff = Math.min(Number(els.staffSelect.value) || 0, staves.length - 1);
-  const staff = staves[selectedStaff], spacing = staff.spacing;
+  for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+    gray[i] = Math.round(pixels[p] * 0.299 + pixels[p + 1] * 0.587 + pixels[p + 2] * 0.114);
+  }
+  return { binary: binarize(gray), width, height };
+}
+/**
+ * 浏览器内的粗略估算：只针对**单行谱表**。
+ * 未安装专业引擎时用它兜底，结果带置信分，界面会标成"待校对"。
+ */
+function estimateStaffNotes(staff, binary, width, height, clef) {
+  const spacing = staff.spacing;
   const staffRows = new Set();
-  for (const line of staff.lines) for (let dy = -1; dy <= 1; dy++) staffRows.add(Math.round(line.y + dy));
-  const raw = [], bottomY = staff.lines[4].y, scanStep = Math.max(1, Math.round(spacing / 8));
+  for (const y of staff.lines) for (let dy = -1; dy <= 1; dy++) staffRows.add(Math.round(y + dy));
+  const raw = [], bottomY = staff.bottom, scanStep = Math.max(1, Math.round(spacing / 8));
+  const left = Math.max(0, Math.round(staff.left ?? 0));
+  const right = Math.min(width, Math.round(staff.right ?? width));
   for (let step = -8; step <= 19; step++) {
     const targetY = bottomY - step * spacing / 2;
     if (targetY < 0 || targetY >= height) continue;
     const hits = [];
-    for (let x = Math.round(width * 0.025); x < width * 0.975; x += scanStep) {
+    for (let x = left; x < right; x += scanStep) {
       let best = 0, bestY = targetY;
       for (let offset = -2; offset <= 2; offset++) {
-        const candidateY = targetY + offset;
-        const score = headScore(binary, width, height, x, candidateY, spacing, staffRows);
-        if (score > best) { best = score; bestY = candidateY; }
+        const score = headScore(binary, width, height, x, targetY + offset, spacing, staffRows);
+        if (score > best) { best = score; bestY = targetY + offset; }
       }
       if (best >= 0.34) hits.push({ x, y: bestY, score: best });
     }
@@ -458,7 +422,7 @@ function analyzeCanvas() {
     }
     for (const group of groups) {
       const best = group.reduce((a, b) => a.score >= b.score ? a : b);
-      const pitch = pitchForStaffStep(step, els.clefSelect.value);
+      const pitch = pitchForStaffStep(step, clef);
       const stem = hasStem(binary, width, height, best.x, best.y, spacing);
       const duration = !stem && best.score < 0.49 ? "whole" : (!stem && best.score < 0.55 ? "half" : "quarter");
       raw.push({ name: pitch.name, midi: pitch.midi, x: group.reduce((sum, h) => sum + h.x, 0) / group.length, y: best.y, duration, score: best.score });
@@ -479,17 +443,58 @@ function analyzeCanvas() {
     const eventLength = Math.max(...event.notes.map((note) => durationBeats[note.duration] || 1));
     event.notes.forEach((note) => notes.push({
       id: makeId(), eventId, pitch: note.name, midi: note.midi, duration: note.duration,
-      durationBeats: durationBeats[note.duration] || 1, startBeat, partName: "识别旋律", x: note.x, y: note.y,
+      durationBeats: durationBeats[note.duration] || 1, startBeat, x: note.x, y: note.y,
       // 符头打分直接带出来当作置信度，让用户能看出哪些音是"猜"的。
       confidence: Number.isFinite(note.score) ? note.score : Number.NaN,
     }));
     startBeat += eventLength;
   });
-  return { notes, staffFound: true, staffCount: staves.length };
+  return { notes, tempo: 84, measureCount: 0, warnings: [], clef: CLEF_NAME_TO_SIGN[clef] || "" };
 }
-function drawNoteOverlay(notes, focusedNoteId = null) {
+const CLEF_NAME_TO_SIGN = { treble: "G2", bass: "F4", alto: "C3", tenor: "C4" };
+function drawNoteOverlay(notes, focusedNoteId = null, staffBoxes = null) {
   clearOverlay();
   const ctx = els.overlayCanvas.getContext("2d");
+  const boxes = staffBoxes || state.staffBoxes;
+  const focusedNote = focusedNoteId ? notes.find((note) => note.id === focusedNoteId) : null;
+  const focusedStaff = focusedNote && boxes ? boxes[focusedNote.staffIndex] : null;
+  // 多行谱表时把每行谱表的识别区域画出来，便于确认切分是否正确、当前在看哪一行。
+  if (boxes && boxes.length > 1) {
+    boxes.forEach((staff, index) => {
+      const inThisStaff = focusedStaff === staff;
+      const left = Number.isFinite(staff.left) ? staff.left : 0;
+      const right = Number.isFinite(staff.right) ? staff.right : els.overlayCanvas.width;
+      ctx.beginPath();
+      ctx.rect(left, staff.top - 3, right - left, staff.bottom - staff.top + 6);
+      ctx.fillStyle = inThisStaff ? "rgba(71, 113, 93, .10)" : "rgba(71, 113, 93, .035)";
+      ctx.fill();
+      ctx.lineWidth = inThisStaff ? 1.6 : 1;
+      ctx.strokeStyle = inThisStaff ? "rgba(71, 113, 93, .55)" : "rgba(71, 113, 93, .16)";
+      ctx.stroke();
+    });
+  }
+  // 音符的纵坐标可以由音高精确推算（横坐标不能，所以不画点，改画一条音高基准线）。
+  if (focusedNote && focusedStaff && focusedNote.pitch) {
+    const match = /^([A-Ga-g])(?:\(([-+]?\d+(?:\.\d+)?)\)|(##|bb|#|b))?(-?\d{1,2})$/.exec(focusedNote.pitch.trim());
+    if (match) {
+      const y = yForPitch(match[1].toUpperCase(), Number(match[4]), focusedStaff, focusedNote.clefName || "treble");
+      const left = Number.isFinite(focusedStaff.left) ? focusedStaff.left : 0;
+      const right = Number.isFinite(focusedStaff.right) ? focusedStaff.right : els.overlayCanvas.width;
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(left, y);
+      ctx.lineTo(right, y);
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = "rgba(180, 92, 55, .85)";
+      ctx.stroke();
+      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(left + 10, y, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(180, 92, 55, .95)";
+      ctx.fill();
+    }
+  }
   for (const note of notes) {
     if (!Number.isFinite(note.x) || !Number.isFinite(note.y)) continue;
     const focused = note.id === focusedNoteId;
@@ -513,7 +518,24 @@ function focusNearestScoreNote(event) {
     const distance = Math.hypot(note.x - x, note.y - y);
     if (distance < nearestDistance) { nearest = note; nearestDistance = distance; }
   }
-  if (!nearest || nearestDistance > 42) return;
+  // 引擎结果没有音符坐标：改成按谱表行定位——点哪一行就跳到该行第一个音符。
+  if (!nearest || nearestDistance > 42) {
+    const boxes = state.staffBoxes;
+    if (!boxes) return;
+    let staffIndex = -1;
+    boxes.forEach((staff, index) => {
+      if (y >= staff.top - 8 && y <= staff.bottom + 8) staffIndex = index;
+    });
+    if (staffIndex < 0) return;
+    const first = state.notes.find((note) => note.staffIndex === staffIndex);
+    if (!first) return;
+    const row = Array.from(els.noteList.querySelectorAll(".note-row")).find((item) => item.dataset.noteId === first.id);
+    if (!row) return;
+    row.scrollIntoView({ block: "center" });
+    row.querySelector(".note-pitch")?.focus();
+    drawNoteOverlay(state.notes, first.id);
+    return;
+  }
   const row = Array.from(els.noteList.querySelectorAll(".note-row")).find((item) => item.dataset.noteId === nearest.id);
   if (!row) return;
   row.scrollIntoView({ block: "nearest" });
@@ -754,34 +776,70 @@ function addNote() {
   renderNotes();
   els.noteList.scrollTop = els.noteList.scrollHeight;
 }
-async function recognizeWithLocalHomr() {
-  if (typeof els.scoreCanvas.toBlob !== "function") return { unavailable: true };
-  const imageBlob = await new Promise((resolve) => els.scoreCanvas.toBlob(resolve, "image/jpeg", 0.92));
-  if (!imageBlob) return { unavailable: true };
+/** 整体移调：按增量应用到当前音符，这样已经手动校对过的音符不会被覆盖。 */
+function applyTranspose(nextSemitones) {
+  const value = Math.max(-12, Math.min(12, Math.round(Number(nextSemitones) || 0)));
+  els.transposeInput.value = String(value);
+  const delta = value - (state.transposeOffset || 0);
+  state.transposeOffset = value;
+  if (!delta || !state.notes.length) return;
+  state.notes = transposeNotes(state.notes, delta);
+  renderNotes();
+  drawNoteOverlay(state.notes);
+  showToast(`已整体移调 ${value > 0 ? "+" : ""}${value} 个半音。`);
+}
+/** 把一张图片交给本机引擎识别，返回解析后的乐谱。 */
+async function recognizeImageBlob(blob) {
   try {
     const response = await fetch("/api/omr/recognize", {
       method: "POST",
       headers: { "Content-Type": "image/jpeg" },
-      body: imageBlob,
+      body: blob,
     });
     const payload = await response.json();
     if (response.status === 503) return { unavailable: true };
+    // 整行没有符头（休止/声部未进入）是正常结果，不算故障。
+    if (payload.empty) return { empty: true };
     if (!response.ok) return { error: payload.error || "本机 OMR 引擎没有完成识谱。" };
     return { scoreInfo: parseMusicXmlText(payload.musicxml) };
   } catch (error) {
-    console.info("本机 OMR 未响应，改用浏览器基础检测。", error);
+    console.info("本机 OMR 未响应，改用浏览器粗略估算。", error);
     return { unavailable: true };
   }
 }
+
+/** 从画布裁出一块区域并转成 JPEG。 */
+function cropToBlob(box) {
+  const offscreen = document.createElement("canvas");
+  offscreen.width = box.width;
+  offscreen.height = box.height;
+  const ctx = offscreen.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, box.width, box.height);
+  ctx.drawImage(els.scoreCanvas, box.x, box.y, box.width, box.height, 0, 0, box.width, box.height);
+  return new Promise((resolve) => offscreen.toBlob(resolve, "image/jpeg", 0.95));
+}
+
+function setRecognizeProgress(done, total, label) {
+  state.recognizeProgress = { done, total };
+  if (!els.recognizeProgress) return;
+  els.recognizeProgress.hidden = total <= 0;
+  els.recognizeProgressBar.style.width = total ? `${Math.round((done / total) * 100)}%` : "0%";
+  els.recognizeProgressLabel.textContent = label || (total ? `已完成 ${done} / ${total} 行谱表` : "");
+}
+
+/**
+ * 逐谱表识别：把整页切成一行行谱表分别送去识别，再按"系统内并行、系统间顺序"拼回多声部。
+ * 这样可以绕开识别引擎把整页多行谱表压平成单一旋律的问题。
+ */
 async function recognizeScore() {
   if (!state.file || !els.scoreCanvas.width) return;
-  // 重入保护：识别期间再点（或改动谱号/谱表触发的自动重识别）直接忽略，
-  // 否则两次识别会互相覆盖 state.notes / 按钮状态，并让本机引擎被并发调用。
   if (state.isRecognizing) return;
   state.isRecognizing = true;
+  state.cancelRecognize = false;
   const token = ++state.recognizeToken;
   const fileToken = state.loadToken;
-  const superseded = () => token !== state.recognizeToken || fileToken !== state.loadToken;
+  const superseded = () => token !== state.recognizeToken || fileToken !== state.loadToken || state.cancelRecognize;
   stopPlayback();
   state.selection = null;
   els.processingOverlay.hidden = false;
@@ -789,58 +847,110 @@ async function recognizeScore() {
   els.recognizeLabel.textContent = "正在识别…";
   els.clefSelect.disabled = true;
   els.staffSelect.disabled = true;
+  els.cancelRecognize.hidden = false;
+  setRecognizeProgress(0, 0, "正在分析谱表…");
   els.scoreHint.textContent = homrAvailable === false
-    ? "未检测到专业引擎，正在做粗略估算"
-    : "正在尝试本机专业识别；若未安装则改用粗略估算";
+    ? "未检测到专业引擎，正在逐行做粗略估算"
+    : "正在逐行谱表识别（每行单独送引擎，避免多声部被压平）";
   await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 30)));
+
   try {
-    const homrResult = await recognizeWithLocalHomr();
-    if (superseded()) return;
-    // 引擎返回了结果但一个带音高音符都没有时，视为失败，继续走估算兜底。
-    const engineScore = homrResult.scoreInfo && homrResult.scoreInfo.notes.length ? homrResult.scoreInfo : null;
-    if (engineScore) {
-      for (const note of engineScore.notes) note.duration = durationFromBeats(note.durationBeats);
-      state.scoreInfo = engineScore;
-      state.notes = engineScore.notes;
-      state.recognitionSource = "engine";
-      updateVoiceOptions(true);
-      state.recognized = true;
-      els.clefSelect.disabled = true;
-      updateStaffOptions(0);
-      renderNotes();
-      drawNoteOverlay(engineScore.notes);
-      updateRecognitionBanner();
-      els.scoreHint.textContent = `本机专业引擎完成识别：${engineScore.notes.length} 个音符，已生成节奏与声部。`;
-      const warning = engineScore.warnings[0] ? ` ${engineScore.warnings[0]}` : "";
-      showToast(`识别到 ${engineScore.notes.length} 个音符，请逐音校对。${warning}`);
-      return;
+    const { binary, width, height } = readPageBinary();
+    const staves = detectStaves(binary, width, height);
+    if (!staves.length) throw new Error("没有检测到五线谱。请换一张更清晰、对比度更高的谱面图片。");
+    updateStaffOptions(staves.length);
+
+    const wanted = Number(els.staffSelect.value);
+    const targets = Number.isInteger(wanted) && wanted >= 0 && wanted < staves.length ? [wanted] : staves.map((_, index) => index);
+    const systems = targets.length === 1
+      ? [[targets[0]]]
+      : groupSystems(staves.filter((_, index) => targets.includes(index)))
+          .map((system) => system.map((staff) => staves.indexOf(staff)));
+
+    const results = new Map();
+    let done = 0;
+    let engineMissing = false;
+    let estimatedCount = 0;
+    let emptyCount = 0;
+    let failedCount = 0;
+    setRecognizeProgress(0, targets.length, "");
+
+    for (const index of targets) {
+      if (superseded()) return;
+      const staff = staves[index];
+      const box = staffCropBox(staff, width, height, staves[index - 1], staves[index + 1]);
+      setRecognizeProgress(done, targets.length, `正在识别第 ${done + 1} / ${targets.length} 行谱表`);
+
+      let result = null;
+      let clef = els.clefSelect.value;
+      if (!engineMissing && homrAvailable !== false) {
+        const blob = await cropToBlob(box);
+        if (superseded()) return;
+        const engineResult = blob ? await recognizeImageBlob(blob) : { unavailable: true };
+        if (superseded()) return;
+        if (engineResult.unavailable) {
+          engineMissing = true;
+        } else if (engineResult.empty) {
+          result = { notes: [], tempo: 84, measureCount: 0, warnings: [], clef: "", empty: true };
+          emptyCount++;
+        } else if (engineResult.scoreInfo) {
+          result = engineResult.scoreInfo;
+          clef = CLEF_BY_SIGN[result.clef] || clef;
+          if (!result.notes.length) {
+            result.empty = true;
+            emptyCount++;
+          }
+        } else {
+          // 这一行引擎确实失败了：如实标记，不用像素估算去"猜"（那只会产生假音符）。
+          result = { notes: [], tempo: 84, measureCount: 0, warnings: [], clef: "", error: engineResult.error };
+          failedCount++;
+        }
+      }
+      // 只有整台引擎都不可用时，才退回浏览器内的粗略估算。
+      if (!result) {
+        result = estimateStaffNotes(staff, binary, width, height, clef);
+        estimatedCount++;
+      }
+
+      // 本机引擎不返回音符在谱面上的坐标，这里不再尝试用像素检测去"反推"位置：
+      // 在真实雕版谱上（谱号涡卷、歌词、圆滑线）误检率很高，画出来的点反而会误导。
+      // 谱面导航改用"谱表框 + 行高亮 + 音高基准线"，这三者是 100% 可靠的。
+      result.staffIndex = index;
+      result.clefName = clef;
+      results.set(index, result);
+      done++;
+      setRecognizeProgress(done, targets.length, "");
     }
 
-    state.scoreInfo = null;
-    els.clefSelect.disabled = false;
-    const result = analyzeCanvas();
     if (superseded()) return;
-    state.notes = result.notes;
-    state.recognitionSource = result.notes.length ? "estimate" : null;
-    updateVoiceOptions(true);
-    state.recognized = result.staffFound;
-    updateStaffOptions(result.staffFound ? result.staffCount : 0);
-    renderNotes();
-    drawNoteOverlay(result.notes);
-    updateRecognitionBanner();
-    if (!result.staffFound) {
-      els.scoreHint.textContent = "未找到清晰的五线谱";
-      showToast("没能找到五线谱。请试试更清晰、对比度更高的谱面图片。");
-    } else if (!result.notes.length) {
-      els.scoreHint.textContent = "已找到谱表，暂未识别到音符";
-      showToast("找到谱表但没有提取到音符，可以点击“添加”手动录入旋律。");
-    } else {
-      els.scoreHint.textContent = "检测到 " + result.staffCount + " 行谱表，音符位置以圆点标记";
-      const fallbackReason = homrResult.error
-        ? "本机专业引擎未能完成，"
-        : homrResult.unavailable ? "未找到本机专业引擎，" : "";
-      showToast(fallbackReason + "粗略估算出 " + result.notes.length + " 个音符，请逐音校对音高与时值。");
+    const merged = mergeSystemScores(systems, results);
+    if (!merged.notes.length) {
+      throw new Error("逐行识别没有提取到音符，可点击“添加”手动录入。");
     }
+    for (const note of merged.notes) note.duration = durationFromBeats(note.durationBeats);
+
+    state.scoreInfo = merged;
+    state.notes = merged.notes;
+    state.staffBoxes = staves;
+    state.recognitionSource = estimatedCount === targets.length ? "estimate" : (estimatedCount ? "mixed" : "engine");
+    state.transposeOffset = 0;
+    els.transposeInput.value = "0";
+    updateVoiceOptions(true);
+    state.recognized = true;
+    els.clefSelect.disabled = false;
+    renderNotes();
+    drawNoteOverlay(merged.notes, null, staves);
+    updateRecognitionBanner();
+    const sourceLabel = state.recognitionSource === "engine"
+      ? "本机专业引擎"
+      : state.recognitionSource === "estimate" ? "粗略估算" : "专业引擎 + 部分估算";
+    const extra = [
+      emptyCount ? `${emptyCount} 行整行休止` : "",
+      failedCount ? `${failedCount} 行识别失败` : "",
+    ].filter(Boolean).join(" · ");
+    els.scoreHint.textContent = `逐行识别完成：${targets.length} 行谱表 · ${merged.notes.length} 个音符 · ${merged.systemCount} 个系统${extra ? " · " + extra : ""}`;
+    const warning = merged.warnings[0] ? ` ${merged.warnings[0]}` : "";
+    showToast(`${sourceLabel}识别到 ${merged.notes.length} 个音符（${targets.length} 行谱表），请逐音校对。${warning}`);
   } catch (error) {
     if (superseded()) return;
     console.error(error);
@@ -848,16 +958,22 @@ async function recognizeScore() {
     state.notes = [];
     state.scoreInfo = null;
     state.recognitionSource = null;
+    state.staffBoxes = null;
     state.recognized = false;
     renderNotes();
+
     clearOverlay();
     updateRecognitionBanner();
     showToast("识别时遇到问题，请换一张更清晰的图片再试。");
     els.scoreHint.textContent = "识别失败，已清空上一次的结果";
   } finally {
-    if (!superseded()) {
-      state.isRecognizing = false;
-      els.processingOverlay.hidden = true;
+    state.isRecognizing = false;
+    els.processingOverlay.hidden = true;
+    els.cancelRecognize.hidden = true;
+    setRecognizeProgress(0, 0, "");
+    els.recognizeProgress.hidden = true;
+    // 文件已经换掉时不要再去改主界面状态，交给新的加载流程处理。
+    if (fileToken === state.loadToken) {
       els.recognizeButton.disabled = !state.file;
       els.recognizeLabel.textContent = idleRecognizeLabel();
       els.clefSelect.disabled = false;
@@ -866,15 +982,19 @@ async function recognizeScore() {
   }
 }
 function updateStaffOptions(count) {
-  const selected = Math.min(Number(els.staffSelect.value) || 0, Math.max(0, count - 1));
+  const previous = els.staffSelect.value;
   els.staffSelect.replaceChildren();
+  const allOption = document.createElement("option");
+  allOption.value = "-1";
+  allOption.textContent = count > 1 ? `全部谱表（${count} 行）` : "当前谱表";
+  els.staffSelect.append(allOption);
   for (let index = 0; index < count; index++) {
     const option = document.createElement("option");
     option.value = String(index);
-    option.textContent = "第 " + (index + 1) + " 行谱表（从上往下）";
+    option.textContent = `只识别第 ${index + 1} 行谱表（从上往下）`;
     els.staffSelect.append(option);
   }
-  els.staffSelect.value = String(selected);
+  els.staffSelect.value = Array.from(els.staffSelect.options).some((option) => option.value === previous) ? previous : "-1";
   els.staffSelectField.hidden = count < 2;
 }
 function variableLength(value) {
@@ -1058,6 +1178,24 @@ els.clearSelection.addEventListener("click", () => {
   state.selection = null;
   markSelectedRows();
   updateSelectionUi();
+});
+els.cancelRecognize.addEventListener("click", () => {
+  state.cancelRecognize = true;
+  els.cancelRecognize.hidden = true;
+  els.scoreHint.textContent = "已取消识别";
+});
+els.transposeInput.addEventListener("change", () => applyTranspose(els.transposeInput.value));
+els.resetTranspose.addEventListener("click", () => applyTranspose(0));
+// 标题直接可编辑：识别引擎常把谱面编号当成标题，让用户随手改掉。
+els.scoreTitle.addEventListener("blur", () => {
+  const text = (els.scoreTitle.textContent || "").trim();
+  els.scoreTitle.textContent = text || "未命名乐谱";
+  if (state.scoreInfo) state.scoreInfo.title = els.scoreTitle.textContent;
+});
+els.scoreTitle.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  els.scoreTitle.blur();
 });
 els.prevPage.addEventListener("click", () => goToPdfPage(state.pageNumber - 1));
 els.nextPage.addEventListener("click", () => goToPdfPage(state.pageNumber + 1));

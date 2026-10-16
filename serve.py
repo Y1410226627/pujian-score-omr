@@ -201,6 +201,15 @@ class ProjectHandler(SimpleHTTPRequestHandler):
                     if detail:
                         # 详情只写到本地控制台，不回传给页面，避免泄露本机路径与用户名。
                         print("[homr] 识谱失败，返回码 {}：\n{}".format(process.returncode, detail))
+                    # "No noteheads found" 表示这一行谱表本来就没有符头（整行休止、
+                    # 或该声部尚未进入），属于正常结果而非故障：返回 200 + 标记，
+                    # 让前端按空谱表处理，也避免浏览器控制台出现无意义的报错。
+                    if "No noteheads found" in detail:
+                        self.send_json(200, {
+                            "empty": True,
+                            "message": "这一行谱表没有音符（整行休止或该声部尚未进入）。",
+                        })
+                        return
                     if process.returncode != 0:
                         message = "本机识谱引擎执行失败（返回码 {}），详情见启动窗口。".format(process.returncode)
                     else:

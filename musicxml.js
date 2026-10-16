@@ -107,6 +107,7 @@ export function parseMusicXmlText(source) {
   // 第一遍：解析各声部的音符（记录"小节内起拍"）与该声部推算出的各小节长度。
   // 不在这里决定全局起拍，因为多声部/多谱表必须共享同一份小节长度表才能对齐。
   const partTracks = [];
+  let scoreClef = "";
   for (const part of musicParts) {
     const partId = part.getAttribute("id") || `part-${partNames.size + 1}`;
     const partName = partNames.get(partId) || partId;
@@ -140,6 +141,12 @@ export function parseMusicXmlText(source) {
           const transposeNode = childNamed(item, "transpose");
           if (transposeNode) {
             transpose = (Number(textOf(transposeNode, "chromatic")) || 0) + (Number(textOf(transposeNode, "octave-change")) || 0) * 12;
+          }
+          const clefNode = childNamed(item, "clef");
+          if (clefNode && !scoreClef) {
+            const sign = textOf(clefNode, "sign").toUpperCase();
+            const line = textOf(clefNode, "line");
+            if (sign) scoreClef = sign + line;
           }
           continue;
         }
@@ -271,7 +278,7 @@ export function parseMusicXmlText(source) {
   const keySummary = keySignatures.size === 1 ? [...keySignatures][0] : keySignatures.size ? "有多种调性" : "调号未标明";
   return {
     title, notes: mergedNotes, tempo, measureCount, partNames: musicParts.map((part) => partNames.get(part.getAttribute("id")) || part.getAttribute("id") || "声部"),
-    timeSummary, keySummary, warnings: [...warnings],
+    timeSummary, keySummary, warnings: [...warnings], clef: scoreClef,
   };
 }
 

@@ -75,7 +75,7 @@
               <span aria-hidden="true">⌄</span>
             </div>
             <div class="staff-select-field" id="staffSelectField" hidden>
-              <label class="field-label" for="staffSelect">要识别的谱表</label>
+              <label class="field-label" for="staffSelect">识别范围</label>
               <div class="select-wrap">
                 <select id="staffSelect" aria-label="选择要识别的谱表"></select>
                 <span aria-hidden="true">⌄</span>
@@ -84,6 +84,11 @@
             <button class="primary-button recognize-button" id="recognizeButton" type="button" disabled>
               <span class="button-spark" aria-hidden="true">✳</span><span id="recognizeLabel">识别乐谱</span><span class="button-arrow" aria-hidden="true">→</span>
             </button>
+            <div class="recognize-progress" id="recognizeProgress" hidden>
+              <div class="recognize-progress-track"><span id="recognizeProgressBar"></span></div>
+              <span class="recognize-progress-label" id="recognizeProgressLabel"></span>
+            </div>
+            <button class="ghost-button cancel-recognize" id="cancelRecognize" type="button" hidden>取消识别</button>
             <p class="fine-print" id="engineHint">图片识别依赖本机专业识别引擎；未安装时只做粗略估算，结果务必逐音校对。也可导入 OMR 工具导出的 MusicXML/MXL。</p>
           </aside>
 
@@ -116,7 +121,7 @@
               <div class="imported-score" id="scoreInfo" hidden>
                 <span class="imported-score-mark" aria-hidden="true">♫</span>
                 <span class="step-label">结构化乐谱已载入</span>
-                <h3 id="scoreTitle">未命名乐谱</h3>
+                <h3 id="scoreTitle" contenteditable="true" spellcheck="false" title="点击可直接修改标题">未命名乐谱</h3>
                 <p id="scoreDetails"></p>
                 <p class="imported-score-warning" id="scoreWarnings" hidden></p>
                 <small>可在音符列表校对音高、起拍和时值；试听使用合成音色。</small>
@@ -153,6 +158,13 @@
                 <button class="text-button small" id="clearSelection" type="button" hidden>清除</button>
               </span>
             </div>
+            <div class="edit-row">
+              <label class="inline-field" for="transposeInput"><span>整体移调</span>
+                <input id="transposeInput" type="number" min="-12" max="12" step="1" value="0" aria-label="整体移调半音数" />
+                <small>半音</small>
+              </label>
+              <button class="ghost-button" id="resetTranspose" type="button" title="把移调量归零">归零</button>
+            </div>
             <div class="playback-bottom">
               <button class="play-button" id="playButton" type="button" disabled><span class="play-icon" id="playIcon" aria-hidden="true">▶</span><span id="playLabel">试听旋律</span><span class="space-hint">SPACE</span></button>
               <button class="stop-button" id="stopButton" type="button" disabled aria-label="停止播放">■</button>
@@ -165,8 +177,8 @@
           <div class="how-title"><span class="step-label">简单三步</span><h2>从乐谱到旋律</h2></div>
           <div class="how-steps">
             <article><span class="how-number">01</span><div><strong>导入谱面</strong><p>支持 PDF、常见图片和 MusicXML/MXL 符号乐谱。</p></div></article>
-            <article><span class="how-number">02</span><div><strong>识别并校对</strong><p>顶部徽标会标明结果来自专业引擎还是粗略估算；置信度偏低的音符会被标出，便于逐音校对。</p></div></article>
-            <article><span class="how-number">03</span><div><strong>演奏任意一段</strong><p>点音符序号设起点、Shift+点设终点，即可只试听或导出这一段，也可开启循环。</p></div></article>
+            <article><span class="how-number">02</span><div><strong>识别并校对</strong><p>先把整页切成一行行谱表再逐行识别，避免多声部被压平成一条旋律；顶部徽标标明结果来源，置信度偏低的音符会被标出。</p></div></article>
+            <article><span class="how-number">03</span><div><strong>演奏任意一段</strong><p>点音符序号设起点、Shift+点设终点，即可只试听或导出这一段，也可开启循环；整体音高偏差可用「整体移调」一次校正。</p></div></article>
           </div>
         </section>
       </main>
