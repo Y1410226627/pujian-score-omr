@@ -22,6 +22,7 @@ ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 # 一次只跑一个 OMR 任务；并发请求直接拒绝，避免线程与内存被拖垮。
 OMR_SLOT = threading.Lock()
+OMR_QUEUE_WAIT_SECONDS = 30
 REQUEST_TIMEOUT_SECONDS = 30
 
 SECURITY_HEADERS = (
@@ -171,12 +172,14 @@ class ProjectHandler(SimpleHTTPRequestHandler):
 
         homr = find_homr()
         if not homr:
-            self.send_json(503, {"error": "未找到本机 homr 命令。"})
+            # 与"任务繁忙"区分开：前者需要前端改用估算兜底，后者只需稍后重试。
+            self.send_json(503, {"error": "未找到本机 homr 命令。", "reason": "engine-missing"})
             return
 
-        # 并发闸门：同一时刻只跑一个 OMR 任务，超出直接拒绝，避免排队线程各自持有大图。
-        if not OMR_SLOT.acquire(blocking=False):
-            self.send_json(503, {"error": "本机识谱任务正忙，请稍候重试。"})
+        # 并发闸门：同一时刻只跑一个 OMR 任务。这里短暂等待而不是立刻拒绝，
+        # 避免客户端两次请求之间几毫秒的抖动被误判成"任务繁忙"而放弃整页专业识别。
+        if not OMR_SLOT.acquire(timeout=OMR_QUEUE_WAIT_SECONDS):
+            self.send_json(503, {"error": "本机识谱任务正忙，请稍候重试。", "reason": "busy"})
             return
         try:
             with tempfile.TemporaryDirectory(prefix="pujian-omr-") as temporary_dir:

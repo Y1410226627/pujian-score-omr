@@ -789,7 +789,7 @@ function applyTranspose(nextSemitones) {
   showToast(`已整体移调 ${value > 0 ? "+" : ""}${value} 个半音。`);
 }
 /** 把一张图片交给本机引擎识别，返回解析后的乐谱。 */
-async function recognizeImageBlob(blob) {
+async function recognizeImageBlob(blob, attempt = 0) {
   try {
     const response = await fetch("/api/omr/recognize", {
       method: "POST",
@@ -797,7 +797,15 @@ async function recognizeImageBlob(blob) {
       body: blob,
     });
     const payload = await response.json();
-    if (response.status === 503) return { unavailable: true };
+    if (response.status === 503 && payload.reason === "engine-missing") return { unavailable: true };
+    if (response.status === 503) {
+      // 只是"任务繁忙"：稍等后重试，不要因为一次抖动就放弃整页的专业识别。
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 700 * (attempt + 1)));
+        return recognizeImageBlob(blob, attempt + 1);
+      }
+      return { error: payload.error || "本机识谱任务繁忙，请稍后重试。" };
+    }
     // 整行没有符头（休止/声部未进入）是正常结果，不算故障。
     if (payload.empty) return { empty: true };
     if (!response.ok) return { error: payload.error || "本机 OMR 引擎没有完成识谱。" };
