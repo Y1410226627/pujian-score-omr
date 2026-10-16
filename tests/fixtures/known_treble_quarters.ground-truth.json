@@ -1,0 +1,38 @@
+{
+  "source": "tests/generate_omr_fixture.py",
+  "clef": "G2",
+  "timeSignature": "5/4",
+  "measureCount": 1,
+  "notes": [
+    {
+      "step": "E",
+      "octave": 4,
+      "onsetBeats": 0,
+      "durationBeats": 1
+    },
+    {
+      "step": "G",
+      "octave": 4,
+      "onsetBeats": 1,
+      "durationBeats": 1
+    },
+    {
+      "step": "B",
+      "octave": 4,
+      "onsetBeats": 2,
+      "durationBeats": 1
+    },
+    {
+      "step": "D",
+      "octave": 5,
+      "onsetBeats": 3,
+      "durationBeats": 1
+    },
+    {
+      "step": "F",
+      "octave": 5,
+      "onsetBeats": 4,
+      "durationBeats": 1
+    }
+  ]
+}

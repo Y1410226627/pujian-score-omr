@@ -1,0 +1,17 @@
+# 统一换行符处理，避免 .bat 在非 Windows 环境下被改成 LF 而失效
+* text=auto
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+
+# 二进制文件不做换行符转换
+*.png binary
+*.jpg binary
+*.pdf binary
+*.mxl binary

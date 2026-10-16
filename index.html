@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f7f4" />
+    <title>谱见 · 乐谱识别与试听</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='11' cy='24' r='5' fill='%2347715d'/%3E%3Crect x='14' y='6' width='3' height='19' fill='%2347715d'/%3E%3Cpath d='M17 6 L27 9 L27 14 L17 11 Z' fill='%23dc9167'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="谱见首页">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>谱见</span>
+          <span class="brand-divider"></span>
+          <span class="brand-caption">乐谱识别与试听</span>
+        </a>
+        <div class="topbar-right">
+          <span class="local-badge"><span class="status-dot"></span>文件仅在本机处理</span>
+          <a class="github-link" href="#how-it-works">使用说明 <span aria-hidden="true">↗</span></a>
+        </div>
+      </header>
+
+      <main>
+        <section class="intro">
+          <div class="intro-copy">
+            <div class="eyebrow"><span class="eyebrow-line"></span>从纸面，到声音</div>
+            <h1>让乐谱，<span>开口唱出来。</span></h1>
+            <p>上传乐谱图片，或导入 OMR 工具生成的 MusicXML。识别结果会标明来源与可信度，校对后可试听、循环演奏任意片段并导出 MIDI。</p>
+          </div>
+          <div class="intro-note" aria-hidden="true">
+            <span class="note-orbit orbit-one"></span><span class="note-orbit orbit-two"></span>
+            <span class="floating-note note-a">♪</span><span class="floating-note note-b">♫</span>
+            <span class="intro-note-label">SCORE TO SOUND</span>
+          </div>
+        </section>
+
+        <section class="workspace" aria-label="乐谱工作区">
+          <aside class="upload-card panel" id="uploadCard">
+            <div class="panel-heading">
+              <div><span class="step-label">01 / 导入</span><h2>添加乐谱</h2></div>
+              <span class="heading-icon" aria-hidden="true">＋</span>
+            </div>
+            <label class="dropzone" id="dropzone" for="fileInput" tabindex="0">
+              <span class="upload-illustration" aria-hidden="true">
+                <svg viewBox="0 0 64 64" fill="none"><path d="M17 9.5h20l11 11V53a2.5 2.5 0 0 1-2.5 2.5h-29A2.5 2.5 0 0 1 14 53V12a2.5 2.5 0 0 1 3-2.5Z" stroke="currentColor" stroke-width="2"/><path d="M37 10v12h11M23 34h18M23 41h18M23 48h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M32 29v14m0-14-5 5m5-5 5 5" stroke="#547264" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <strong>拖放文件到这里</strong>
+              <span class="dropzone-sub">或 <span class="browse-text">浏览文件</span></span>
+              <span class="file-types">PDF、图片、MusicXML、MXL</span>
+            </label>
+            <input id="fileInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp,image/bmp,image/gif,.musicxml,.xml,.mxl,application/vnd.recordare.musicxml+xml" hidden />
+            <div class="upload-foot"><span class="lock-icon" aria-hidden="true">⌑</span><span>无需上传到服务器，文件在浏览器本地读取</span></div>
+            <div class="current-file" id="currentFile" hidden>
+              <span class="file-icon" aria-hidden="true">♫</span>
+              <span class="file-meta"><strong id="fileName">—</strong><small id="fileInfo">—</small></span>
+              <button class="icon-button" id="removeFile" type="button" aria-label="移除文件">×</button>
+            </div>
+
+            <div class="divider"></div>
+            <div class="settings-heading"><span class="step-label">识别设置</span><span class="auto-tag">可随时修改</span></div>
+            <label class="field-label" for="clefSelect">谱号</label>
+            <div class="select-wrap">
+              <select id="clefSelect">
+                <option value="treble">高音谱号 · Treble</option>
+                <option value="bass">低音谱号 · Bass</option>
+                <option value="alto">中音谱号 · Alto C</option>
+                <option value="tenor">次中音谱号 · Tenor C</option>
+              </select>
+              <span aria-hidden="true">⌄</span>
+            </div>
+            <div class="staff-select-field" id="staffSelectField" hidden>
+              <label class="field-label" for="staffSelect">要识别的谱表</label>
+              <div class="select-wrap">
+                <select id="staffSelect" aria-label="选择要识别的谱表"></select>
+                <span aria-hidden="true">⌄</span>
+              </div>
+            </div>
+            <button class="primary-button recognize-button" id="recognizeButton" type="button" disabled>
+              <span class="button-spark" aria-hidden="true">✳</span><span id="recognizeLabel">识别乐谱</span><span class="button-arrow" aria-hidden="true">→</span>
+            </button>
+            <p class="fine-print" id="engineHint">图片识别依赖本机专业识别引擎；未安装时只做粗略估算，结果务必逐音校对。也可导入 OMR 工具导出的 MusicXML/MXL。</p>
+          </aside>
+
+          <section class="score-card panel">
+            <div class="panel-heading score-heading">
+              <div><span class="step-label">02 / 查看</span><h2>乐谱预览</h2></div>
+              <div class="score-toolbar">
+                <div class="page-controls" id="pageControls" hidden>
+                  <button class="icon-button" id="prevPage" type="button" aria-label="上一页">‹</button>
+                  <span id="pageLabel">1 / 1</span>
+                  <button class="icon-button" id="nextPage" type="button" aria-label="下一页">›</button>
+                </div>
+                <span class="zoom-label" id="zoomLabel">适合窗口</span>
+              </div>
+            </div>
+            <div class="recognition-banner" id="recognitionBanner" hidden>
+              <span class="recognition-dot" aria-hidden="true"></span>
+              <span class="recognition-copy">
+                <strong id="recognitionSource">—</strong>
+                <small id="recognitionDetail">—</small>
+              </span>
+            </div>
+            <div class="score-stage" id="scoreStage">
+              <div class="empty-state" id="emptyState">
+                <div class="empty-staff" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><b>𝄞</b><i>♪</i><em>♫</em></div>
+                <strong>你的乐谱会显示在这里</strong>
+                <p>支持 PDF、图片以及 MusicXML/MXL 符号乐谱</p>
+                <button class="text-button" id="chooseFileButton" type="button">选择一个文件 <span>→</span></button>
+              </div>
+              <div class="imported-score" id="scoreInfo" hidden>
+                <span class="imported-score-mark" aria-hidden="true">♫</span>
+                <span class="step-label">结构化乐谱已载入</span>
+                <h3 id="scoreTitle">未命名乐谱</h3>
+                <p id="scoreDetails"></p>
+                <p class="imported-score-warning" id="scoreWarnings" hidden></p>
+                <small>可在音符列表校对音高、起拍和时值；试听使用合成音色。</small>
+              </div>
+              <div class="canvas-wrap" id="canvasWrap" hidden>
+                <canvas id="scoreCanvas"></canvas>
+                <canvas id="overlayCanvas" aria-hidden="true"></canvas>
+              </div>
+              <div class="processing-overlay" id="processingOverlay" hidden><span class="spinner"></span><strong>正在识别谱面…</strong><small>分析五线谱与音符位置</small></div>
+            </div>
+            <div class="score-footer"><span class="score-legend" id="scoreLegend" hidden><span class="legend-dot"></span><span>点标记定位音符</span><span class="legend-dot is-low"></span><span>待校对</span></span><span class="score-footer-spacer"></span><span id="scoreHint">导入文件后开始</span></div>
+          </section>
+
+          <aside class="playback-card panel">
+            <div class="panel-heading playback-heading">
+              <div><span class="step-label">03 / 演奏</span><h2>旋律工作台</h2></div>
+              <span class="live-pill"><i></i>可试听</span>
+            </div>
+            <div class="playback-summary">
+              <div><span class="summary-label">当前音符</span><strong id="noteCount">0 <small>个</small></strong></div>
+              <div class="summary-divider"></div>
+              <label class="tempo-box"><span class="summary-label">速度</span><span class="tempo-value"><input id="tempoInput" type="number" min="20" max="320" value="84" aria-label="每分钟拍数" /><small>BPM</small></span></label>
+            </div>
+            <div class="notes-toolbar"><span class="field-label">旋律音符</span><div class="note-actions"><button class="ghost-button" id="lowConfidenceButton" type="button" title="只显示置信度偏低、建议校对的音符" hidden>只看待校对</button><button class="midi-button" id="midiButton" type="button" title="下载 MIDI 文件" disabled>↓ MIDI</button><button class="add-note-button" id="addNoteButton" type="button" title="添加音符">＋ 添加</button></div></div>
+            <label class="voice-filter" id="voiceFilterField" hidden><span>试听 / 导出声部</span><select id="voiceFilter" aria-label="选择试听和导出的声部"><option value="all">全部声部</option></select></label>
+            <div class="note-columns" aria-hidden="true"><span></span><span>音高</span><span title="以四分音符为一拍">起拍</span><span>时值</span><span></span></div>
+            <div class="note-list" id="noteList">
+              <div class="notes-empty" id="notesEmpty"><span aria-hidden="true">♫</span><strong>等乐谱准备好</strong><small>识别结果会出现在这里</small></div>
+            </div>
+            <div class="selection-bar" id="selectionBar">
+              <span class="selection-label" id="selectionLabel">未选择片段：点音符序号设起点，Shift+点设终点</span>
+              <span class="selection-actions">
+                <label class="loop-toggle"><input type="checkbox" id="loopToggle" /><span>循环</span></label>
+                <button class="text-button small" id="clearSelection" type="button" hidden>清除</button>
+              </span>
+            </div>
+            <div class="playback-bottom">
+              <button class="play-button" id="playButton" type="button" disabled><span class="play-icon" id="playIcon" aria-hidden="true">▶</span><span id="playLabel">试听旋律</span><span class="space-hint">SPACE</span></button>
+              <button class="stop-button" id="stopButton" type="button" disabled aria-label="停止播放">■</button>
+            </div>
+            <div class="instrument-note"><span class="wave-icon" aria-hidden="true">〰</span><span>合成钢琴音色 · 音符可编辑</span></div>
+          </aside>
+        </section>
+
+        <section class="how-section" id="how-it-works">
+          <div class="how-title"><span class="step-label">简单三步</span><h2>从乐谱到旋律</h2></div>
+          <div class="how-steps">
+            <article><span class="how-number">01</span><div><strong>导入谱面</strong><p>支持 PDF、常见图片和 MusicXML/MXL 符号乐谱。</p></div></article>
+            <article><span class="how-number">02</span><div><strong>识别并校对</strong><p>顶部徽标会标明结果来自专业引擎还是粗略估算；置信度偏低的音符会被标出，便于逐音校对。</p></div></article>
+            <article><span class="how-number">03</span><div><strong>演奏任意一段</strong><p>点音符序号设起点、Shift+点设终点，即可只试听或导出这一段，也可开启循环。</p></div></article>
+          </div>
+        </section>
+      </main>
+      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见</span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

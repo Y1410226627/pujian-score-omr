@@ -1,0 +1,17 @@
+# 本地虚拟环境（含 homr 引擎与模型，不入库）
+.venv/
+
+# 前端测试依赖
+node_modules/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+*.log
+
+# 浏览器自动化测试产物
+.playwright-cli/
