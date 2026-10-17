@@ -184,3 +184,18 @@ test("mergeSystemScores 重新分配 eventId，同一拍上的音共用一个事
   ]));
   assert.equal(merged.notes[0].eventId, merged.notes[1].eventId, "同一拍的音符应属于同一个事件（和弦）");
 });
+
+test("groupStaffLines 拒绝线距上百像素的伪谱表（简谱页的系统边线）", () => {
+  // 《敕勒歌》第 11 页是简谱：页面上只有每个"系统"的上下边线，线距约 119px。
+  // 这些线不应被当成五线谱，否则上层会拿去做无意义的逐行识别。
+  const jianpuLines = [];
+  for (let system = 0; system < 3; system++) {
+    const top = 300 + system * 400;
+    for (let i = 0; i < 5; i++) jianpuLines.push(top + i * 119.5);
+  }
+  assert.equal(groupStaffLines(jianpuLines).length, 0, "线距超过 60px 的组应被丢弃");
+
+  // 正常谱表（线距约 12px）不受影响
+  const normal = groupStaffLines(linesFromStaffs(CELEGE_STAFFS));
+  assert.equal(normal.length, 12);
+});

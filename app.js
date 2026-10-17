@@ -71,17 +71,21 @@ function formatSize(bytes) {
   return bytes < 1048576 ? Math.max(1, Math.round(bytes / 1024)) + " KB" : (bytes / 1048576).toFixed(1) + " MB";
 }
 // 本机是否装有专业识别引擎。null 表示尚未探测成功（例如直接用 file:// 打开页面）。
+// audiveris：整页识别（能保留多声部结构）；homr：单谱表裁片识别（逐行流程用）。
+let audiverisAvailable = null;
 let homrAvailable = null;
 function idleRecognizeLabel() {
-  if (homrAvailable === false) return "估算识别";
+  if (audiverisAvailable === false && homrAvailable === false) return "估算识别";
   if (state.recognized) return "重新识别";
   return "识别乐谱";
 }
 function updateEngineHint() {
   if (!els.engineHint) return;
-  if (homrAvailable === true) {
-    els.engineHint.textContent = "已检测到本机专业识别引擎；识别结果仍建议逐音校对后再使用。";
-  } else if (homrAvailable === false) {
+  if (audiverisAvailable === true) {
+    els.engineHint.textContent = "已检测到 Audiveris 整页识别引擎（可保留多声部结构）；识别结果仍建议逐音校对后再使用。";
+  } else if (homrAvailable === true) {
+    els.engineHint.textContent = "已检测到 homr 逐谱表识别引擎；识别结果仍建议逐音校对后再使用。";
+  } else if (audiverisAvailable === false && homrAvailable === false) {
     els.engineHint.textContent = "未检测到本机专业识别引擎：图片只会做粗略估算，结果可能明显不准，请务必逐音校对。";
   }
 }
@@ -89,8 +93,10 @@ async function refreshEngineStatus() {
   try {
     const response = await fetch("/api/omr/status");
     const payload = await response.json();
+    audiverisAvailable = Boolean(payload.audiverisAvailable);
     homrAvailable = Boolean(payload.homrAvailable);
   } catch {
+    audiverisAvailable = null;
     homrAvailable = null;
   }
   updateEngineHint();
@@ -134,6 +140,30 @@ async function destroyPdf() {
 // 只有"粗略估算"出来的音符才带置信分；专业引擎与 MusicXML 导入没有逐音置信度。
 const isLowConfidence = (note) => Number.isFinite(note.confidence) && note.confidence < LOW_CONFIDENCE_THRESHOLD;
 const hasLowConfidenceNotes = () => state.notes.some(isLowConfidence);
+// Audiveris 给各声部的默认名字都是 "Voice"，界面里无法区分；按 part 去重编号。
+function dedupePartNames(notes) {
+  const partNames = new Map(); // partId -> partName（每个 part 只取第一个音符的名字）
+  for (const note of notes) {
+    if (note.partId && !partNames.has(note.partId)) partNames.set(note.partId, note.partName || "");
+  }
+  const nameCounts = new Map();
+  for (const name of partNames.values()) {
+    if (!name) continue;
+    nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+  }
+  const used = new Map();
+  const renamed = new Map(); // partId -> 新名字
+  for (const [partId, name] of partNames) {
+    if (!name || (nameCounts.get(name) || 0) < 2) continue;
+    const index = (used.get(name) || 0) + 1;
+    used.set(name, index);
+    renamed.set(partId, `${name} ${index}`);
+  }
+  if (!renamed.size) return;
+  for (const note of notes) {
+    if (note.partId && renamed.has(note.partId)) note.partName = renamed.get(note.partId);
+  }
+}
 function updateRecognitionBanner() {
   const banner = els.recognitionBanner;
   if (!banner) return;
@@ -290,7 +320,9 @@ async function renderPdfPage(number, token = state.loadToken) {
   const renderToken = ++state.renderToken;
   const page = await state.pdf.getPage(targetPage);
   const base = page.getViewport({ scale: 1 });
-  const viewport = page.getViewport({ scale: Math.min(2.2, 2200 / Math.max(base.width, base.height)) });
+  // Audiveris 需要较高分辨率才能可靠检测谱线（实测 scale ≥3.0 才稳定），
+  // 这里按 A4 折算成约 2600px 长边，显示时由 CSS 缩放，不影响观感。
+  const viewport = page.getViewport({ scale: Math.min(3.8, 2600 / Math.max(base.width, base.height)) });
   if (renderToken !== state.renderToken || token !== state.loadToken) return;
   const width = Math.ceil(viewport.width), height = Math.ceil(viewport.height);
   // 先渲染到离屏画布，再把最终结果贴到可见画布：这样连点翻页时不会对同一画布并发调用 render()。
@@ -593,6 +625,12 @@ function renderNotes() {
         event.preventDefault();
         applySelection(event.shiftKey);
       });
+      // 点序号太小的目标容易点空：整行（除输入框外）点击都当作设选区，
+      // 这样"演奏任意一段"的操作不需要精确瞄准那个两位数字。
+      row.addEventListener("click", (event) => {
+        if (event.target.closest("input, button, select")) return;
+        applySelection(event.shiftKey);
+      });
       const input = document.createElement("input");
       input.className = "note-pitch";
       input.type = "text";
@@ -788,10 +826,10 @@ function applyTranspose(nextSemitones) {
   drawNoteOverlay(state.notes);
   showToast(`已整体移调 ${value > 0 ? "+" : ""}${value} 个半音。`);
 }
-/** 把一张图片交给本机引擎识别，返回解析后的乐谱。 */
-async function recognizeImageBlob(blob, attempt = 0) {
+/** 把一张图片交给本机引擎识别，返回解析后的乐谱。engine: "audiveris" 整页 / "homr" 单谱表。 */
+async function recognizeImageBlob(blob, engine = "homr", attempt = 0) {
   try {
-    const response = await fetch("/api/omr/recognize", {
+    const response = await fetch("/api/omr/recognize?engine=" + engine, {
       method: "POST",
       headers: { "Content-Type": "image/jpeg" },
       body: blob,
@@ -802,18 +840,31 @@ async function recognizeImageBlob(blob, attempt = 0) {
       // 只是"任务繁忙"：稍等后重试，不要因为一次抖动就放弃整页的专业识别。
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 700 * (attempt + 1)));
-        return recognizeImageBlob(blob, attempt + 1);
+        return recognizeImageBlob(blob, engine, attempt + 1);
       }
       return { error: payload.error || "本机识谱任务繁忙，请稍后重试。" };
     }
     // 整行没有符头（休止/声部未进入）是正常结果，不算故障。
     if (payload.empty) return { empty: true };
-    if (!response.ok) return { error: payload.error || "本机 OMR 引擎没有完成识谱。" };
-    return { scoreInfo: parseMusicXmlText(payload.musicxml) };
+    if (!response.ok) return { error: payload.error || "本机 OMR 引擎没有完成识谱。", engine };
+    const scoreInfo = parseMusicXmlText(payload.musicxml);
+    return { scoreInfo, engine };
   } catch (error) {
     console.info("本机 OMR 未响应，改用浏览器粗略估算。", error);
     return { unavailable: true };
   }
+}
+
+/** 整页交给 Audiveris 识别：一次调用得到完整的多声部结构，不再需要逐行裁切。 */
+async function recognizeWholePage() {
+  const blob = await canvasToBlob();
+  if (!blob) return { error: "当前页面无法导出为图片。" };
+  return recognizeImageBlob(blob, "audiveris");
+}
+
+/** 把可见的谱面画布整张转成 JPEG（供整页识别使用）。 */
+function canvasToBlob() {
+  return new Promise((resolve) => els.scoreCanvas.toBlob(resolve, "image/jpeg", 0.92));
 }
 
 /** 从画布裁出一块区域并转成 JPEG。 */
@@ -856,20 +907,65 @@ async function recognizeScore() {
   els.clefSelect.disabled = true;
   els.staffSelect.disabled = true;
   els.cancelRecognize.hidden = false;
+  let wholePageError = "";
   setRecognizeProgress(0, 0, "正在分析谱表…");
-  els.scoreHint.textContent = homrAvailable === false
+  els.scoreHint.textContent = audiverisAvailable === false && homrAvailable === false
     ? "未检测到专业引擎，正在逐行做粗略估算"
-    : "正在逐行谱表识别（每行单独送引擎，避免多声部被压平）";
+    : audiverisAvailable !== false
+      ? "正在整页识别；若 Audiveris 不可用则逐行谱表识别（避免多声部被压平）"
+      : "正在逐行谱表识别（每行单独送引擎，避免多声部被压平）";
+  if (wholePageError) {
+    els.scoreHint.textContent += "；上次整页识别未成功，已改用逐行识别";
+  }
   await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 30)));
 
   try {
     const { binary, width, height } = readPageBinary();
     const staves = detectStaves(binary, width, height);
-    if (!staves.length) throw new Error("没有检测到五线谱。请换一张更清晰、对比度更高的谱面图片。");
+    if (!staves.length) {
+      throw new Error("没有检测到五线谱。这页可能是简谱（数字谱）——目前识谱引擎只支持五线谱；也请检查图片是否清晰完整。");
+    }
     updateStaffOptions(staves.length);
 
     const wanted = Number(els.staffSelect.value);
-    const targets = Number.isInteger(wanted) && wanted >= 0 && wanted < staves.length ? [wanted] : staves.map((_, index) => index);
+    const singleStaff = Number.isInteger(wanted) && wanted >= 0 && wanted < staves.length;
+    const targets = singleStaff ? [wanted] : staves.map((_, index) => index);
+
+    // Audiveris 整页识别：一次调用即得到完整的多声部结构（各声部并行而非首尾串接）。
+    // 只在"识别全部谱表"且本机装有 Audiveris 时走这条路；单行重试仍走逐行流程。
+    if (!singleStaff && audiverisAvailable !== false) {
+      setRecognizeProgress(0, 1, "正在整页识别（Audiveris，约 10–20 秒）…");
+      const engineResult = await recognizeWholePage();
+      if (superseded()) return;
+      if (engineResult.scoreInfo && engineResult.scoreInfo.notes.length) {
+        const scoreInfo = engineResult.scoreInfo;
+        for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
+        dedupePartNames(scoreInfo.notes);
+        state.scoreInfo = scoreInfo;
+        state.notes = scoreInfo.notes;
+        state.staffBoxes = staves;
+        state.recognitionSource = "engine";
+        state.transposeOffset = 0;
+        if (els.transposeInput) els.transposeInput.value = "0";
+        updateVoiceOptions(true);
+        state.recognized = true;
+        els.clefSelect.disabled = false;
+        renderNotes();
+        drawNoteOverlay(scoreInfo.notes, null, staves);
+        updateRecognitionBanner();
+        els.scoreHint.textContent = `Audiveris 整页识别完成：${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节`;
+        const warning = scoreInfo.warnings[0] ? ` ${scoreInfo.warnings[0]}` : "";
+        showToast(`Audiveris 识别到 ${scoreInfo.notes.length} 个音符（${scoreInfo.partNames.length} 个声部），请逐音校对。${warning}`);
+        return;
+      }
+      if (engineResult.unavailable) {
+        audiverisAvailable = false;
+        updateEngineHint();
+      }
+      // 整页识别失败（例如分辨率不足或这一页是简谱）：记下原因，继续走逐行流程。
+      wholePageError = engineResult.error || "";
+    }
+
     const systems = targets.length === 1
       ? [[targets[0]]]
       : groupSystems(staves.filter((_, index) => targets.includes(index)))
@@ -933,6 +1029,11 @@ async function recognizeScore() {
     if (superseded()) return;
     const merged = mergeSystemScores(systems, results);
     if (!merged.notes.length) {
+      // 所有谱表都没能读出音符：最常见的两种情况是这一页是简谱（数字谱），
+      // 或者图片分辨率不足。明确说出来，不要让用户对着"失败"干猜。
+      if (failedCount === targets.length && !estimatedCount && !emptyCount) {
+        throw new Error("没有识别出任何音符。这页可能是简谱（数字谱）——识谱引擎只支持五线谱；也可能是图片不清晰，可换更清晰的整页图片再试。");
+      }
       throw new Error("逐行识别没有提取到音符，可点击“添加”手动录入。");
     }
     for (const note of merged.notes) note.duration = durationFromBeats(note.durationBeats);
@@ -957,6 +1058,10 @@ async function recognizeScore() {
       failedCount ? `${failedCount} 行识别失败` : "",
     ].filter(Boolean).join(" · ");
     els.scoreHint.textContent = `逐行识别完成：${targets.length} 行谱表 · ${merged.notes.length} 个音符 · ${merged.systemCount} 个系统${extra ? " · " + extra : ""}`;
+    if (wholePageError) {
+      // 把整页识别失败的原因如实告诉用户（例如这一页是简谱、数字谱，任何引擎都不支持）。
+      els.scoreHint.textContent += ` · 整页识别未成功：${wholePageError}`;
+    }
     const warning = merged.warnings[0] ? ` ${merged.warnings[0]}` : "";
     showToast(`${sourceLabel}识别到 ${merged.notes.length} 个音符（${targets.length} 行谱表），请逐音校对。${warning}`);
   } catch (error) {
@@ -972,8 +1077,10 @@ async function recognizeScore() {
 
     clearOverlay();
     updateRecognitionBanner();
-    showToast("识别时遇到问题，请换一张更清晰的图片再试。");
-    els.scoreHint.textContent = "识别失败，已清空上一次的结果";
+    // 把真实原因告诉用户（例如"这页是简谱"、"没找到五线谱"），而不是一句笼统的失败。
+    const message = error && error.message ? error.message : "识别时遇到问题，请换一张更清晰的图片再试。";
+    showToast(message);
+    els.scoreHint.textContent = "识别失败，已清空上一次的结果 · " + message;
   } finally {
     state.isRecognizing = false;
     els.processingOverlay.hidden = true;

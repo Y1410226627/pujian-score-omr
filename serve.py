@@ -1,6 +1,6 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 import json
 import os
 import shutil
@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import webbrowser
+import zipfile
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -63,6 +64,26 @@ def find_homr():
     return shutil.which("homr")
 
 
+def find_audiveris():
+    """Audiveris 是 Java 程序，优先用项目自带的可移植版本（.tools/audiveris），其次找 PATH。"""
+    configured = os.environ.get("AUDIVERIS_EXECUTABLE", "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.is_file():
+            return str(configured_path.resolve())
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+    local_candidates = (
+        PROJECT_DIR / ".tools" / "audiveris" / "Audiveris" / "Audiveris.exe",
+        PROJECT_DIR / ".tools" / "audiveris" / "Audiveris" / "bin" / "Audiveris",
+    )
+    for candidate in local_candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("Audiveris")
+
+
 class ProjectHandler(SimpleHTTPRequestHandler):
     # 给每个连接设置读超时，避免客户端声明 Content-Length 后慢速滴流、长期占用线程。
     timeout = REQUEST_TIMEOUT_SECONDS
@@ -116,7 +137,10 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             self.send_error(403, "Forbidden")
             return
         if self.path.split("?", 1)[0] == "/api/omr/status":
-            self.send_json(200, {"homrAvailable": find_homr() is not None})
+            self.send_json(200, {
+                "homrAvailable": find_homr() is not None,
+                "audiverisAvailable": find_audiveris() is not None,
+            })
             return
         if not self.path_is_servable():
             self.send_error(404, "Not Found")
@@ -141,8 +165,15 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         if not self.host_is_allowed():
             self.send_error(403, "Forbidden")
             return
-        if self.path != "/api/omr/recognize":
+        if self.path.split("?", 1)[0] != "/api/omr/recognize":
             self.send_error(404)
+            return
+
+        # engine 参数：audiveris=整页识别（多声部）；homr=单谱表裁片（逐行识别用）。
+        # 不传时默认 homr，保持逐行识别流程的既有语义。
+        engine = (parse_qs(urlsplit(self.path).query).get("engine", ["homr"])[0] or "homr").lower()
+        if engine not in ("audiveris", "homr"):
+            self.send_json(400, {"error": "不支持的识谱引擎参数。"})
             return
 
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -170,12 +201,6 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             self.send_json(400, {"error": "图片内容与文件格式不匹配。"})
             return
 
-        homr = find_homr()
-        if not homr:
-            # 与"任务繁忙"区分开：前者需要前端改用估算兜底，后者只需稍后重试。
-            self.send_json(503, {"error": "未找到本机 homr 命令。", "reason": "engine-missing"})
-            return
-
         # 并发闸门：同一时刻只跑一个 OMR 任务。这里短暂等待而不是立刻拒绝，
         # 避免客户端两次请求之间几毫秒的抖动被误判成"任务繁忙"而放弃整页专业识别。
         if not OMR_SLOT.acquire(timeout=OMR_QUEUE_WAIT_SECONDS):
@@ -186,54 +211,114 @@ class ProjectHandler(SimpleHTTPRequestHandler):
                 temporary_path = Path(temporary_dir)
                 input_path = temporary_path / ("score" + suffix)
                 input_path.write_bytes(image_bytes)
-                process = subprocess.run(
-                    [homr, str(input_path)],
-                    cwd=temporary_dir,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=300,
-                    check=False,
-                )
-                output_files = sorted(
-                    path for path in temporary_path.rglob("*")
-                    if path.is_file() and path.suffix.lower() in (".musicxml", ".xml")
-                )
-                if not output_files:
-                    detail = process.stderr.decode("utf-8", errors="replace")[-1200:].strip()
-                    if detail:
-                        # 详情只写到本地控制台，不回传给页面，避免泄露本机路径与用户名。
-                        print("[homr] 识谱失败，返回码 {}：\n{}".format(process.returncode, detail))
-                    # "No noteheads found" 表示这一行谱表本来就没有符头（整行休止、
-                    # 或该声部尚未进入），属于正常结果而非故障：返回 200 + 标记，
-                    # 让前端按空谱表处理，也避免浏览器控制台出现无意义的报错。
-                    if "No noteheads found" in detail:
-                        self.send_json(200, {
-                            "empty": True,
-                            "message": "这一行谱表没有音符（整行休止或该声部尚未进入）。",
-                        })
-                        return
-                    if process.returncode != 0:
-                        message = "本机识谱引擎执行失败（返回码 {}），详情见启动窗口。".format(process.returncode)
-                    else:
-                        message = "本机识谱引擎没有生成 MusicXML 结果。"
-                    self.send_json(422, {"error": message})
-                    return
-                output_path = output_files[0]
-                if output_path.stat().st_size > MAX_MUSICXML_BYTES:
-                    self.send_json(413, {"error": "本机识谱输出的 MusicXML 超过 50 MB。"})
-                    return
-                musicxml = output_path.read_text(encoding="utf-8-sig")
-                self.send_json(200, {"musicxml": musicxml})
+                if engine == "audiveris":
+                    self.run_audiveris(input_path, temporary_path)
+                else:
+                    self.run_homr(input_path, temporary_path)
         except subprocess.TimeoutExpired:
             self.send_json(504, {"error": "本机识谱超过 5 分钟，已停止处理。"})
         except FileNotFoundError:
-            self.send_json(503, {"error": "找不到本机识谱引擎，请检查 HOMR_EXECUTABLE 设置。"})
+            self.send_json(503, {"error": "找不到本机识谱引擎，请检查 AUDIVERIS_EXECUTABLE / HOMR_EXECUTABLE 设置。"})
         except Exception as error:
             print("[pujian] 识谱接口出错：{!r}".format(error))
             self.send_json(500, {"error": "本机识谱接口出错，详情见启动窗口。"})
         finally:
             OMR_SLOT.release()
+
+    def run_audiveris(self, input_path, temporary_path):
+        """整页交给 Audiveris 识别，输出多声部 MusicXML。"""
+        audiveris = find_audiveris()
+        if not audiveris:
+            self.send_json(503, {"error": "未找到本机 Audiveris。", "reason": "engine-missing"})
+            return
+        output_dir = temporary_path / "audiveris-out"
+        output_dir.mkdir()
+        process = subprocess.run(
+            [audiveris, "-batch", "-transcribe", "-export", "-output", str(output_dir), "--", str(input_path)],
+            cwd=str(temporary_path),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,
+            check=False,
+        )
+        mxl_files = sorted(path for path in output_dir.rglob("*.mxl") if path.is_file())
+        if not mxl_files:
+            detail = (process.stderr.decode("utf-8", errors="replace") + process.stdout.decode("utf-8", errors="replace"))[-1200:].strip()
+            if detail:
+                # 详情只写到本地控制台，不回传给页面，避免泄露本机路径与用户名。
+                print("[audiveris] 识谱失败，返回码 {}：\n{}".format(process.returncode, detail))
+            if "Sheet ignored" in detail or "Error in reaching step" in detail:
+                message = "Audiveris 没能从这张图里读出谱线（可能是分辨率太低或画面不完整）。可换更清晰的整页图片，或改用逐行识别。"
+            elif process.returncode != 0:
+                message = "本机 Audiveris 执行失败（返回码 {}），详情见启动窗口。".format(process.returncode)
+            else:
+                message = "本机 Audiveris 没有生成 MusicXML 结果。"
+            self.send_json(422, {"error": message, "engine": "audiveris"})
+            return
+        mxl_path = mxl_files[0]
+        if mxl_path.stat().st_size > MAX_MUSICXML_BYTES:
+            self.send_json(413, {"error": "本机识谱输出的 MusicXML 超过 50 MB。"})
+            return
+        try:
+            with zipfile.ZipFile(mxl_path) as archive:
+                members = [name for name in archive.namelist()
+                           if name.lower().endswith((".xml", ".musicxml")) and "meta-inf" not in name.lower()]
+                if not members:
+                    self.send_json(422, {"error": "Audiveris 导出的文件里没有找到 MusicXML。", "engine": "audiveris"})
+                    return
+                musicxml = archive.read(members[0]).decode("utf-8-sig")
+        except zipfile.BadZipFile:
+            self.send_json(422, {"error": "Audiveris 导出的压缩文件已损坏。", "engine": "audiveris"})
+            return
+        self.send_json(200, {"musicxml": musicxml, "engine": "audiveris"})
+
+    def run_homr(self, input_path, temporary_path):
+        """把一张谱表裁片交给 homr 识别（逐行识别流程）。"""
+        homr = find_homr()
+        if not homr:
+            # 与"任务繁忙"区分开：前者需要前端改用估算兜底，后者只需稍后重试。
+            self.send_json(503, {"error": "未找到本机 homr 命令。", "reason": "engine-missing"})
+            return
+        process = subprocess.run(
+            [homr, str(input_path)],
+            cwd=str(temporary_path),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,
+            check=False,
+        )
+        output_files = sorted(
+            path for path in temporary_path.rglob("*")
+            if path.is_file() and path.suffix.lower() in (".musicxml", ".xml")
+        )
+        if not output_files:
+            detail = process.stderr.decode("utf-8", errors="replace")[-1200:].strip()
+            if detail:
+                # 详情只写到本地控制台，不回传给页面，避免泄露本机路径与用户名。
+                print("[homr] 识谱失败，返回码 {}：\n{}".format(process.returncode, detail))
+            # "No noteheads found" 表示这一行谱表本来就没有符头（整行休止、
+            # 或该声部尚未进入），属于正常结果而非故障：返回 200 + 标记，
+            # 让前端按空谱表处理，也避免浏览器控制台出现无意义的报错。
+            if "No noteheads found" in detail:
+                self.send_json(200, {
+                    "empty": True,
+                    "message": "这一行谱表没有音符（整行休止或该声部尚未进入）。",
+                })
+                return
+            if process.returncode != 0:
+                message = "本机识谱引擎执行失败（返回码 {}），详情见启动窗口。".format(process.returncode)
+            else:
+                message = "本机识谱引擎没有生成 MusicXML 结果。"
+            self.send_json(422, {"error": message})
+            return
+        output_path = output_files[0]
+        if output_path.stat().st_size > MAX_MUSICXML_BYTES:
+            self.send_json(413, {"error": "本机识谱输出的 MusicXML 超过 50 MB。"})
+            return
+        musicxml = output_path.read_text(encoding="utf-8-sig")
+        self.send_json(200, {"musicxml": musicxml, "engine": "homr"})
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), ProjectHandler)

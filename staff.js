@@ -170,6 +170,9 @@ export function groupStaffLines(lineYs) {
     .map((lines) => {
       const spacing = (lines[STAFF_LINE_COUNT - 1] - lines[0]) / (STAFF_LINE_COUNT - 1);
       if (!(spacing > 0)) return null;
+      // 真实谱表的线距通常只有十几到几十像素；简谱页上的"系统边线"间距可达上百像素，
+      // 这种组显然不是五线谱，直接丢弃，让上层给出"可能是简谱"的准确提示。
+      if (spacing > 60) return null;
       return { lines, spacing, top: lines[0], bottom: lines[STAFF_LINE_COUNT - 1] };
     })
     .filter(Boolean);

@@ -1,6 +1,9 @@
 # 本地虚拟环境（含 homr 引擎与模型，不入库）
 .venv/
 
+# 本地 OMR 引擎（Audiveris 便携版，体积大，按需安装）
+.tools/
+
 # 前端测试依赖
 node_modules/
 
