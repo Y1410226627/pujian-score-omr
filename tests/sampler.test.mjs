@@ -3,23 +3,32 @@ import test from "node:test";
 
 import {
   SAMPLED_TARGET_RMS, SAMPLED_TIMBRES, SAMPLE_MANIFEST_URL, SAMPLE_ROOT,
-  isSampledTimbre, nearestSampleIndex, playbackRateFor, pickLayerIndex, snapToZeroCrossing,
+  isSampledTimbre, lookupSample, nearestSampleIndex, playbackRateFor, pickLayerIndex, snapToZeroCrossing,
 } from "../sampler.js";
 
 // 这些是「采样音源」的纯映射逻辑：不需要浏览器就能验证对错。
-// 真正的 mp3 解码与发声由 tests/e2e-audio.mjs 在浏览器里验证（装了音源才会跑）。
+// 真正的 wav/mp3 解码与发声由 tests/e2e-audio.mjs 在浏览器里验证（装了音源才会跑）。
 
-test("采样音色名单：三种真实音色，都有合成音色兜底", () => {
-  assert.deepEqual(Object.keys(SAMPLED_TIMBRES).sort(), ["choir_real", "piano_real", "strings_real"]);
-  for (const [name, spec] of Object.entries(SAMPLED_TIMBRES)) {
-    assert.ok(name.endsWith("_real"), name + " 应以 _real 结尾（界面据此显示「真实」）");
-    assert.equal(typeof spec.fallback, "string");
-    assert.ok(["piano", "choir", "strings"].includes(spec.fallback), name + " 的兜底音色不对");
-    assert.equal(typeof spec.continuous, "boolean");
+const CHOIR_BANKS = new Set(["choir_female", "choir_male", "choir_real"]);
+
+test("采样音色名单：覆盖钢琴/弦乐细分/人声/管乐，都有合成音色兜底", () => {
+  const keys = Object.keys(SAMPLED_TIMBRES);
+  assert.ok(keys.length >= 20, "采样音色至少要 20 种（现有 " + keys.length + " 种）");
+  for (const name of keys) {
+    assert.ok(name.endsWith("_real") || CHOIR_BANKS.has(name), name + " 命名不符合约定");
     assert.equal(isSampledTimbre(name), true);
+    const spec = SAMPLED_TIMBRES[name];
+    assert.equal(typeof spec.fallback, "string", name + " 缺少兜底合成音色");
+    assert.equal(typeof spec.continuous, "boolean", name + " 缺少 continuous 标记");
+  }
+  // 细分乐器必须真的存在（用户要求：弦乐可细分、乐器不局限于钢琴）
+  for (const name of ["violin_real", "viola_real", "cello_real", "contrabass_real",
+    "pizzicato_real", "tremolo_real", "flute_real", "clarinet_real", "trumpet_real",
+    "choir_female", "choir_male", "church_organ_real", "harpsichord_real"]) {
+    assert.ok(SAMPLED_TIMBRES[name], "缺少采样音色：" + name);
   }
   // 合成音色不能被误判成采样音色
-  for (const name of ["piano", "strings", "choir", "organ", "soft"]) {
+  for (const name of ["piano", "strings", "choir", "choir_female_synth", "organ", "soft"]) {
     assert.equal(isSampledTimbre(name), false, name + " 不是采样音色");
   }
   assert.equal(isSampledTimbre("nope"), false);
@@ -47,7 +56,6 @@ test("变速比：同音=1，高八度=2，低八度=0.5，半音=2^(1/12)", () 
   assert.equal(playbackRateFor(72, 60), 2);
   assert.equal(playbackRateFor(48, 60), 0.5);
   assert.ok(Math.abs(playbackRateFor(61, 60) - 2 ** (1 / 12)) < 1e-12);
-  // 采样表每 3 个半音一个样本 → 最大只差 ±1.5 个半音，变速不离谱
   assert.ok(playbackRateFor(61, 60) < 1.07);
 });
 
@@ -61,19 +69,33 @@ test("力度层：挑最接近的一层，边界情况有确定行为", () => {
   assert.equal(pickLayerIndex(null, 0.5), 0);
 });
 
+test("样本音准偏差（tune）：查表时要把样本自身的音分偏差算进变速比", () => {
+  const bank = {
+    continuous: false,
+    layers: [{
+      velocity: 0.8,
+      samples: [{ midi: 67, buffer: null, tune: 0.16 }, { midi: 70, buffer: null, tune: 0 }],
+    }],
+  };
+  const found = lookupSample(bank, 67, 0.8);
+  assert.ok(found, "应当能查到样本");
+  assert.ok(found.playbackRate < 1 && found.playbackRate > 0.99,
+    "tune=+0.16 半音的样本，播放比应略小于 1（实测 " + found.playbackRate + "）");
+  const exact = lookupSample(bank, 70, 0.8);
+  assert.equal(exact.playbackRate, 1, "无偏差的样本同音播放比应为 1");
+  assert.equal(lookupSample({ continuous: false, layers: [] }, 60, 0.5), null);
+});
+
 test("循环点吸附：在目标时间附近找到向上过零点", () => {
   const rate = 24000;
   const data = new Float32Array(rate * 3);
-  // 造一个 100 Hz 正弦：每 1/100 秒有一个向上过零点
   for (let index = 0; index < data.length; index += 1) data[index] = Math.sin((2 * Math.PI * 100 * index) / rate);
   const snapped = snapToZeroCrossing(data, rate, 1.0);
-  // 100 Hz → 过零点间隔 10 ms；1.0 秒附近应该有 <= 10ms 的误差
   assert.ok(Math.abs(snapped - 1.0) <= 0.01, "吸附误差应在一个周期内（实测 " + snapped + "）");
   const index = Math.round(snapped * rate);
   if (index > 0 && index < data.length) {
     assert.ok(data[index - 1] <= 0 && data[index] > 0, "吸附点必须是向上过零点");
   }
-  // 全静音 / 空数组等边界不能崩
   assert.equal(snapToZeroCrossing(new Float32Array(100), rate, 0.001) >= 0, true);
   assert.equal(snapToZeroCrossing(null, rate, 1), 1);
   assert.equal(snapToZeroCrossing(data, 0, 1), 1, "采样率无效时原样返回");

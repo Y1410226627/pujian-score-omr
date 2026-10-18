@@ -4,9 +4,9 @@ import {
   mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN,
 } from "./staff.js";
 import {
-  TIMBRE_LABELS, TIMBRE_GAIN, TIMBRE_ORDER, PIANO_HARMONICS, PIANO_STRINGS, STRINGS_DETUNE,
-  ORGAN_HARMONICS, VOWELS, VIBRATO, REVERB, COMPRESSOR, HUMANIZE, CHOIR_ENVELOPE,
-  ORGAN_ENVELOPE, STRINGS_ENVELOPE, SCHEDULER,
+  TIMBRE_LABELS, TIMBRE_GAIN, TIMBRE_ORDER, TIMBRE_GROUPS, PIANO_HARMONICS, PIANO_STRINGS,
+  STRINGS_DETUNE, ORGAN_HARMONICS, VOWELS, FEMALE_VOWELS, VIBRATO, REVERB, COMPRESSOR,
+  HUMANIZE, CHOIR_ENVELOPE, ORGAN_ENVELOPE, STRINGS_ENVELOPE, SCHEDULER,
   vowelForPart, pianoDamperSeconds, pianoBrightness, pianoDecayShape,
 } from "./timbre.js";
 import {
@@ -66,8 +66,8 @@ const state = {
   partTimbres: new Map(),
   // 播放的滚动调度定时器（见 playMelody 里的说明）与软限幅曲线缓存。
   scheduleTimer: null, softClipCurve: null,
-  // 采样音源（真实钢琴/人声/弦乐）：清单、已加载的样本表、正在加载的 Promise。
-  sampleManifest: null, sampleBanks: new Map(), sampleLoading: new Map(),
+  // 采样音源：清单、已加载的样本表、正在加载的 Promise、加载顺序（用于内存上限 LRU）。
+  sampleManifest: null, sampleBanks: new Map(), sampleLoading: new Map(), sampleOrder: [],
   // 识别结果对应的是哪一页（简谱/单页识别=页码；整本识别或 MusicXML 导入=null）。
   // 翻页时**不清空结果**，只按这个页码决定要不要在谱面上画音符坐标。
   scorePage: null,
@@ -1122,16 +1122,7 @@ function updatePartControls(reset = false) {
     timbreSelect.className = "part-timbre-select";
     timbreSelect.title = `给「${part.name}」单独选音色（播放中切换会在下次播放生效）`;
     timbreSelect.setAttribute("aria-label", `${part.name} 的音色`);
-    const followOption = document.createElement("option");
-    followOption.value = "";
-    followOption.textContent = "跟随全局";
-    timbreSelect.append(followOption);
-    for (const name of TIMBRE_ORDER) {
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = TIMBRE_LABELS[name];
-      timbreSelect.append(option);
-    }
+    fillTimbreOptions(timbreSelect, { followGlobal: true });
     timbreSelect.value = partTimbre(part.key);
     timbreSelect.addEventListener("change", () => {
       if (!setPartTimbre(part.key, timbreSelect.value)) {
@@ -2498,8 +2489,11 @@ function playPianoTone(midi, startAt, duration, peak, destination) {
   registerVoice(sources, nodes);
 }
 
-/** 合唱人声：两条微失谐的声带波 + 三段共振峰（元音）+ 全局颤音 + 气口噪声。 */
-function playChoirTone(midi, startAt, duration, peak, destination, vowel) {
+/**
+ * 合唱人声：两条微失谐的声带波 + 三段共振峰（元音）+ 全局颤音 + 气口噪声。
+ * `female=true` 时用女声共振峰表、再提一点高频——性别听感主要由共振峰决定。
+ */
+function playChoirTone(midi, startAt, duration, peak, destination, vowel, { female = false } = {}) {
   const audio = state.audio;
   const human = humanize(peak);
   const at = Math.max(audio.currentTime + 0.001, startAt + human.offset);
@@ -2510,9 +2504,10 @@ function playChoirTone(midi, startAt, duration, peak, destination, vowel) {
   const nodes = [];
 
   // 三段共振峰串起来（峰值滤波）：F1/F2 决定唱的是哪个元音，F3 提供人声的「亮」。
+  const formantTable = female ? FEMALE_VOWELS : VOWELS;
   let head = null;
   let previous = null;
-  for (const [hz, strength, bandwidth] of VOWELS[vowel] || VOWELS.a) {
+  for (const [hz, strength, bandwidth] of formantTable[vowel] || formantTable.a) {
     const formant = audio.createBiquadFilter();
     formant.type = "peaking";
     formant.frequency.value = Math.min(audio.sampleRate * 0.45, hz);
@@ -2524,6 +2519,17 @@ function playChoirTone(midi, startAt, duration, peak, destination, vowel) {
     nodes.push(formant);
   }
 
+  // 女声再补一点高频「空气感」，和混声/男声区分得更明显。
+  let outputTail = previous;
+  if (female) {
+    const air = audio.createBiquadFilter();
+    air.type = "highshelf";
+    air.frequency.value = 2600;
+    air.gain.value = 3.5;
+    previous.connect(air);
+    outputTail = air;
+    nodes.push(air);
+  }
   const envelope = audio.createGain();
   // 人声起音比钢琴慢，但开头 12 ms 内要有一个"轻但立刻听得见"的起声，
   // 否则短音符会显得含糊（原来从 -80 dB 指数上升，前 50 ms 几乎没声音）。
@@ -2537,7 +2543,7 @@ function playChoirTone(midi, startAt, duration, peak, destination, vowel) {
   );
   envelope.gain.setValueAtTime(Math.max(SILENCE * 2, human.peak * CHOIR_ENVELOPE.hold), at + held);
   envelope.gain.exponentialRampToValueAtTime(SILENCE, at + held + CHOIR_ENVELOPE.release);
-  previous.connect(envelope);
+  outputTail.connect(envelope);
   envelope.connect(target);
   nodes.push(envelope);
 
@@ -2690,6 +2696,35 @@ function playSoftTone(midi, startAt, duration, peak, destination) {
   registerVoice([oscillator], [oscillator, gain]);
 }
 
+/**
+ * 把音色选项填进一个 <select>：按 TIMBRE_GROUPS 分 <optgroup>。
+ * 共用一个函数，保证「全局音色」和「逐声部音色」两个下拉的内容永远一致。
+ */
+function fillTimbreOptions(select, { followGlobal = false } = {}) {
+  if (!select) return;
+  select.replaceChildren();
+  if (followGlobal) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "跟随全局";
+    select.append(option);
+  }
+  for (const group of TIMBRE_GROUPS) {
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = group.label;
+    for (const name of group.ids) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = TIMBRE_LABELS[name] || name;
+      optgroup.append(option);
+    }
+    select.append(optgroup);
+  }
+}
+
+/** 最多同时保留几个采样音源在内存里（每个 20–40 MB，再多容易把老机器撑爆）。 */
+const MAX_LOADED_SAMPLE_BANKS = 4;
+
 /** 更新界面上的「真实音源」状态提示（装没装、加载到百分之几、哪些已就绪）。 */
 function updateSampleStatus(message) {
   const element = els.sampleStatus;
@@ -2736,6 +2771,14 @@ function ensureSampleBank(name) {
     if (bank) {
       bank.ready = true;
       state.sampleBanks.set(name, bank);
+      state.sampleOrder = state.sampleOrder.filter((item) => item !== name);
+      state.sampleOrder.push(name);
+      // 内存上限：采样音源每个要占 20–40 MB，只保留最近用过的几个（发出去的声音节点会自己握着 buffer 引用，
+      // 从 map 里删掉不会让正在播的音断掉）。
+      while (state.sampleOrder.length > MAX_LOADED_SAMPLE_BANKS) {
+        const oldest = state.sampleOrder.shift();
+        if (oldest && oldest !== name) state.sampleBanks.delete(oldest);
+      }
       showToast(`${TIMBRE_LABELS[name] || name}已加载完成。`);
     }
     updateSampleStatus();
@@ -2813,6 +2856,10 @@ function playSynthTone(chosen, midi, startAt, duration, peak, destination, partK
     if (chosen === "choir") {
       // 不同声部唱不同元音，合在一起更像「一群人」而不是「一个人叠了几遍」。
       playChoirTone(midi, startAt, duration, balanced, destination, vowelForPart(partKey));
+      return;
+    }
+    if (chosen === "choir_female_synth") {
+      playChoirTone(midi, startAt, duration, balanced, destination, vowelForPart(partKey), { female: true });
       return;
     }
     if (chosen === "strings") { playStringsTone(midi, startAt, duration, balanced, destination); return; }
@@ -3089,6 +3136,7 @@ els.tempoInput.addEventListener("change", () => {
 });
 // 音色选择：记本地偏好，切换后下次播放生效（不打断正在播放的乐句）。
 if (els.timbreSelect) {
+  fillTimbreOptions(els.timbreSelect);
   const savedTimbre = loadSettings().timbre;
   if (TIMBRE_LABELS[savedTimbre]) state.timbre = savedTimbre;
   els.timbreSelect.value = state.timbre;

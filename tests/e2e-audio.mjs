@@ -7,7 +7,10 @@
 //   - 管风琴：第 2、3 泛音（八度/十二度音栓）必须明显存在；
 //   - 合唱：元音共振峰位置的频率能量要高于旁边的「谷」，证明共振峰滤波真的在塑形；
 //   - 电子琴：三角波只有奇次泛音，第 2 泛音应当几乎没有；
-//   - 所有音色：松键后还有混响余音（tail RMS > 0）。
+//   - 所有音色：松键后还有混响余音（tail RMS > 0）；
+//   - 合成女声合唱：同一音高下频谱质心明显高于混声（用户反馈「人声偏男声」）；
+//   - 音色下拉：按 4 组显示、32 种音色齐全、声部下拉第一项是「跟随全局」；
+//   - 真实女声/男声合唱：采样音域分别落在 G4–C6 / G2–F#4，A4/C5/G3 音高正确。
 // 最后再走一遍真实播放流程（点▶试听 → 停止），确认没有 JS 报错、音频节点能正常回收。
 //
 // 用法（需要本机有 Edge、有 playwright-core）：
@@ -18,7 +21,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { vowelForPart, VOWELS, REVERB } from "../timbre.js";
+import { vowelForPart, VOWELS, REVERB, TIMBRE_ORDER } from "../timbre.js";
 
 const require = createRequire(import.meta.url);
 const playwrightPath = process.env.PLAYWRIGHT_CORE || "playwright-core";
@@ -237,6 +240,59 @@ try {
   }
   console.log("混响余音（松键后 0.35–0.9 秒）：", REVERB.seconds, "秒衰减，实测 RMS 均 > 0 ✔");
 
+  // ——— 女声合唱（合成兜底）：同一音高下，女声共振峰/亮度应明显高于混声 ———
+  // 用户反馈原来的人声「偏男声」，所以这里不只看参数表，要在浏览器里真的比一次频谱。
+  const femaleSynth = await page.evaluate(async () => {
+    const debug = window.__pujian;
+    const sampleRate = 44100;
+    const renderSpectrum = async (timbre) => {
+      const context = new OfflineAudioContext(1, Math.floor(sampleRate * 1.5), sampleRate);
+      debug.state.audio = context;
+      debug.state.master = null;
+      debug.state.reverbBuffer = null;
+      debug.state.vibrato = null;
+      debug.state.noiseBuffer = null;
+      debug.state.waves.clear();
+      debug.state.partBuses.clear();
+      debug.state.sources.clear();
+      debug.state.timbre = timbre;
+      debug.playTone(36, 0.05, 1.1, 0.16, null, "S1");
+      const buffer = await context.startRendering();
+      const samples = buffer.getChannelData(0);
+      const from = Math.floor(0.15 * sampleRate);
+      const to = Math.floor(0.95 * sampleRate);
+      const magnitude = (frequency) => {
+        const coefficient = 2 * Math.cos(2 * Math.PI * frequency / sampleRate);
+        let previous = 0;
+        let beforePrevious = 0;
+        for (let index = from; index < to; index += 1) {
+          const current = samples[index] + coefficient * previous - beforePrevious;
+          beforePrevious = previous;
+          previous = current;
+        }
+        return Math.sqrt(Math.max(0, previous * previous + beforePrevious * beforePrevious - coefficient * previous * beforePrevious));
+      };
+      const spectrum = [];
+      for (let hz = 120; hz <= 3600; hz += 8) spectrum.push([hz, magnitude(hz)]);
+      return spectrum;
+    };
+    const centroid = (spectrum) => {
+      let weighted = 0;
+      let total = 0;
+      for (const [hz, value] of spectrum) {
+        const energy = value * value;
+        weighted += hz * energy;
+        total += energy;
+      }
+      return total ? weighted / total : 0;
+    };
+    const mixed = await renderSpectrum("choir");
+    const female = await renderSpectrum("choir_female_synth");
+    return { mixed: Number(centroid(mixed).toFixed(0)), female: Number(centroid(female).toFixed(0)) };
+  });
+  console.log("合成女声合唱：频谱质心 混声", femaleSynth.mixed, "→ 女声", femaleSynth.female, "Hz");
+  assert.ok(femaleSynth.female > femaleSynth.mixed, "女声合唱的频谱质心应高于混声（实测 " + femaleSynth.mixed + " → " + femaleSynth.female + " Hz）");
+
   // ——— 真实播放流程：切换音色 → 点▶ → 停止 ———
   await page.selectOption("#timbreSelect", "choir");
   const afterSelect = await page.evaluate(() => ({
@@ -320,6 +376,30 @@ try {
   assert.match(String(perPart.saved), /strings/, "逐声部音色应记进本地存储");
   assert.equal(perPart.restored, "choir", "改回「跟随全局」后应回到全局音色");
 
+  // ——— 音色下拉：必须按组显示，而且「女声合唱」所有音色都能选到 ———
+  const menu = await page.evaluate(() => {
+    const select = document.querySelector("#timbreSelect");
+    const groups = [...select.querySelectorAll("optgroup")].map((group) => ({
+      label: group.label,
+      options: [...group.querySelectorAll("option")].map((option) => option.value),
+    }));
+    const partSelect = document.querySelector(".part-timbre-select");
+    return {
+      total: select.options.length,
+      groups,
+      partFirst: partSelect ? [...partSelect.options][0].textContent.trim() : "",
+    };
+  });
+  console.log("音色下拉：", menu.groups.map((group) => group.label + "(" + group.options.length + ")").join(" / "), "共", menu.total, "种");
+  assert.ok(menu.groups.length >= 4, "音色下拉应按「钢琴/键盘、弦乐、人声、管乐」分组（实测 " + menu.groups.length + " 组）");
+  const menuIds = menu.groups.flatMap((group) => group.options);
+  assert.equal(menuIds.length, TIMBRE_ORDER.length, "下拉里的音色数应等于音色总表");
+  for (const name of TIMBRE_ORDER) assert.ok(menuIds.includes(name), "下拉里缺音色：" + name);
+  for (const name of ["choir_female", "choir_male", "choir_female_synth", "violin_real", "cello_real", "flute_real", "harp_real"]) {
+    assert.ok(menuIds.includes(name), "下拉里应有细分/女声音色：" + name);
+  }
+  assert.equal(menu.partFirst, "跟随全局", "声部音色下拉的第一项应是「跟随全局」");
+
   // ——— 滚动调度护栏：播放时音频图里不能堆着整曲的节点 ———
   const scheduling = await page.evaluate(async () => {
     const debug = window.__pujian;
@@ -350,9 +430,9 @@ try {
     console.log("跳过采样音源测试：本机未安装 .assets/soundfonts（运行「安装真实音源.bat」后可测）。");
   } else {
     assert.ok(sampleManifest.banks.piano_real, "音源清单里应有真实钢琴");
-    assert.ok(sampleManifest.banks.choir_real, "音源清单里应有真实合唱人声");
-    assert.ok(sampleManifest.banks.strings_real, "音源清单里应有真实弦乐");
-    console.log("音源清单：", Object.keys(sampleManifest.banks).join("、"));
+    // 音源可以按类别单独安装（-only strings / winds / voice …），所以其余音源按「装了才测」处理。
+    const installed = Object.keys(sampleManifest.banks);
+    console.log("音源清单（", installed.length, "个）：", installed.join("、"));
 
     const sampled = await page.evaluate(async () => {
       const debug = window.__pujian;
@@ -447,71 +527,167 @@ try {
     assert.ok(sampled.loud.peak < 0.95, "真实钢琴不能削波（峰值 " + sampled.loud.peak + "）");
     assert.ok(sampled.loud.maxJump < 0.2, "真实钢琴不应有爆音跳变（最大跳变 " + sampled.loud.maxJump + "）");
 
-    // 真实人声/弦乐：长音必须能"撑住"（样本 3.13 秒 + 循环）
-    const sustained = await page.evaluate(async () => {
-      const debug = window.__pujian;
-      const sampleRate = 44100;
-      const result = {};
-      const savedAudio = debug.state.audio;
-      for (const name of ["choir_real", "strings_real"]) {
-        const bank = await debug.ensureSampleBank(name);
-        const offline = new OfflineAudioContext(1, Math.ceil(sampleRate * 6), sampleRate);
-        debug.state.audio = offline;
-        debug.state.master = null;
-        debug.state.reverbBuffer = null;
-        debug.state.vibrato = null;
-        debug.state.noiseBuffer = null;
-        debug.state.waves.clear();
-        debug.state.partBuses.clear();
-        debug.state.sources.clear();
-        debug.state.partTimbres.clear();
-        debug.state.timbre = name;
-        debug.playTone(60, 0.05, 4.8, 0.16, null, "S1");
-        const buffer = await offline.startRendering();
-        const data = buffer.getChannelData(0);
-        const rms = (from, to) => {
-          const start = Math.floor(from * sampleRate);
-          const end = Math.min(data.length, Math.floor(to * sampleRate));
-          let sum = 0;
-          for (let index = start; index < end; index += 1) sum += data[index] * data[index];
-          return Math.sqrt(sum / Math.max(1, end - start));
+    // 真实人声/弦乐：长音必须能"撑住"（FluidR3 样本 3.13 秒、SSO 合唱样本约 7.9 秒，都要靠循环）
+    // 用 14 秒长音 + 16 秒离线渲染：两种样本都会长时间停在循环段。
+    const sustainedNames = ["choir_real", "strings_real"].filter((name) => installed.includes(name));
+    if (!sustainedNames.length) {
+      console.log("未安装真实人声/弦乐，跳过长音循环测试。");
+    } else {
+      const sustained = await page.evaluate(async (bankNames) => {
+        const debug = window.__pujian;
+        const sampleRate = 44100;
+        const result = {};
+        const savedAudio = debug.state.audio;
+        const clearGraph = () => {
+          debug.state.master = null;
+          debug.state.reverbBuffer = null;
+          debug.state.vibrato = null;
+          debug.state.noiseBuffer = null;
+          debug.state.waves.clear();
+          debug.state.partBuses.clear();
+          debug.state.sources.clear();
+          debug.state.partTimbres.clear();
         };
-        let peak = 0;
-        let maxJump = 0;
-        for (let index = 0; index < data.length; index += 1) {
-          peak = Math.max(peak, Math.abs(data[index]));
-          if (index > 0) maxJump = Math.max(maxJump, Math.abs(data[index] - data[index - 1]));
+        for (const name of bankNames) {
+          const bank = await debug.ensureSampleBank(name);
+          const offline = new OfflineAudioContext(1, Math.ceil(sampleRate * 16), sampleRate);
+          debug.state.audio = offline;
+          clearGraph();
+          debug.state.timbre = name;
+          debug.playTone(60, 0.05, 14, 0.16, null, "S1");
+          const buffer = await offline.startRendering();
+          const data = buffer.getChannelData(0);
+          const rms = (from, to) => {
+            const start = Math.floor(from * sampleRate);
+            const end = Math.min(data.length, Math.floor(to * sampleRate));
+            let sum = 0;
+            for (let index = start; index < end; index += 1) sum += data[index] * data[index];
+            return Math.sqrt(sum / Math.max(1, end - start));
+          };
+          let peak = 0;
+          let maxJump = 0;
+          for (let index = 0; index < data.length; index += 1) {
+            peak = Math.max(peak, Math.abs(data[index]));
+            if (index > 0) maxJump = Math.max(maxJump, Math.abs(data[index] - data[index - 1]));
+          }
+          result[name] = {
+            loaded: Boolean(bank),
+            samples: bank ? bank.layers[0].samples.length : 0,
+            early: Number(rms(0.5, 1.5).toFixed(4)),
+            late: Number(rms(12.0, 14.0).toFixed(4)),   // 远超样本本身长度：靠循环撑住
+            peak: Number(peak.toFixed(3)),
+            maxJump: Number(maxJump.toFixed(3)),
+          };
         }
-        result[name] = {
-          loaded: Boolean(bank),
-          samples: bank ? bank.layers[0].samples.length : 0,
-          early: Number(rms(0.5, 1.5).toFixed(4)),
-          late: Number(rms(2.5, 4.0).toFixed(4)),   // 超过原始样本 3.13 秒：靠循环撑住
-          peak: Number(peak.toFixed(3)),
-          maxJump: Number(maxJump.toFixed(3)),
-        };
+        debug.state.audio = savedAudio;
+        clearGraph();
+        debug.state.timbre = "piano_real";
+        return result;
+      }, sustainedNames);
+      console.log("真实持续音色（14 秒长音）：", JSON.stringify(sustained));
+      for (const [name, data] of Object.entries(sustained)) {
+        assert.equal(data.loaded, true, name + " 应当能加载");
+        // FluidR3 每个音一个采样（88 个，剔除静音后 70+）；SSO 合唱只有 G2–C6 的 42 个采样。
+        const minimum = name === "choir_real" ? 30 : 70;
+        assert.ok(data.samples >= minimum, name + " 应有 " + minimum + "+ 个可用采样（静音样本已剔除）");
+        assert.ok(data.early > 0.008, name + " 起音后应有声音");
+        assert.ok(data.late > 0.004, name + " 超过样本长度后应靠循环继续发声（实测 " + data.late + "）");
+        // 循环段本身比「起音渐强」的峰值轻约 30%（合唱/弦乐样本的自然包络），
+        // 所以不跟起音比绝对值，只要求长音尾段仍有起音的一半以上——再衰减就是循环没接上。
+        assert.ok(data.late > data.early * 0.5, name + " 长音不应明显衰减（循环没生效？实测 " + data.late + " vs 起音 " + data.early + "）");
+        assert.ok(data.peak < 0.95, name + " 不能削波");
+        assert.ok(data.maxJump < 0.2, name + " 循环处不应有爆音（最大跳变 " + data.maxJump + "）");
       }
-      debug.state.audio = savedAudio;
-      debug.state.master = null;
-      debug.state.reverbBuffer = null;
-      debug.state.vibrato = null;
-      debug.state.noiseBuffer = null;
-      debug.state.waves.clear();
-      debug.state.partBuses.clear();
-      debug.state.sources.clear();
-      debug.state.partTimbres.clear();
-      debug.state.timbre = "piano_real";
-      return result;
-    });
-    console.log("真实持续音色：", JSON.stringify(sustained));
-    for (const [name, data] of Object.entries(sustained)) {
-      assert.equal(data.loaded, true, name + " 应当能加载");
-      assert.ok(data.samples >= 70, name + " 应有 70+ 个可用采样（静音样本已剔除）");
-      assert.ok(data.early > 0.008, name + " 起音后应有声音");
-      assert.ok(data.late > 0.004, name + " 超过样本长度后应靠循环继续发声（实测 " + data.late + "）");
-      assert.ok(data.late > data.early * 0.4, name + " 长音不应明显衰减（循环没生效？）");
-      assert.ok(data.peak < 0.95, name + " 不能削波");
-      assert.ok(data.maxJump < 0.2, name + " 循环处不应有爆音（最大跳变 " + data.maxJump + "）");
+    }
+
+    // ——— 女声/男声合唱：不是「同一份混声换个名字」——两者的采样音域本身就不同 ———
+    const genders = ["choir_female", "choir_male"].filter((name) => installed.includes(name));
+    if (genders.length < 2) {
+      console.log("未安装真实女声/男声合唱，跳过性别分层测试（运行「安装真实音源.bat」或 --only voice 后可测）。");
+    } else {
+      const chorus = await page.evaluate(async () => {
+        const debug = window.__pujian;
+        const sampleRate = 44100;
+        const savedAudio = debug.state.audio;
+        const clearGraph = () => {
+          debug.state.master = null;
+          debug.state.reverbBuffer = null;
+          debug.state.vibrato = null;
+          debug.state.noiseBuffer = null;
+          debug.state.waves.clear();
+          debug.state.partBuses.clear();
+          debug.state.sources.clear();
+          debug.state.partTimbres.clear();
+        };
+        const rangeOf = (bank) => {
+          const notes = bank ? bank.layers[0].samples.map((sample) => sample.midi) : [];
+          return notes.length ? [Math.min(...notes), Math.max(...notes)] : [0, 0];
+        };
+        const measure = async (name, midi, seconds) => {
+          const offline = new OfflineAudioContext(1, Math.ceil(sampleRate * seconds), sampleRate);
+          debug.state.audio = offline;
+          clearGraph();
+          debug.state.timbre = name;
+          debug.playTone(midi, 0.05, seconds - 0.8, 0.16, null, "S1");
+          const buffer = await offline.startRendering();
+          const data = buffer.getChannelData(0);
+          const from = Math.floor(0.8 * sampleRate);
+          const size = 8192;
+          const slice = data.slice(from, from + size);
+          let bestLag = 0;
+          let bestScore = -Infinity;
+          for (let lag = Math.floor(sampleRate / 1200); lag <= Math.floor(sampleRate / 80); lag += 1) {
+            let sum = 0;
+            let norm = 0;
+            for (let index = 0; index + lag < size; index += 1) {
+              sum += slice[index] * slice[index + lag];
+              norm += slice[index + lag] * slice[index + lag];
+            }
+            const score = sum / Math.sqrt(Math.max(1e-9, norm));
+            if (score > bestScore) { bestScore = score; bestLag = lag; }
+          }
+          let peak = 0;
+          let maxJump = 0;
+          for (let index = 0; index < data.length; index += 1) {
+            peak = Math.max(peak, Math.abs(data[index]));
+            if (index > 0) maxJump = Math.max(maxJump, Math.abs(data[index] - data[index - 1]));
+          }
+          return {
+            pitch: Number((sampleRate / bestLag).toFixed(1)),
+            peak: Number(peak.toFixed(3)),
+            maxJump: Number(maxJump.toFixed(3)),
+          };
+        };
+        const female = await debug.ensureSampleBank("choir_female");
+        const a4 = await measure("choir_female", 69, 6);   // A4 = 440 Hz，女声常用音区
+        const c5 = await measure("choir_female", 72, 6);   // C5 = 523.25 Hz：男声采样到不了这么高
+        const male = await debug.ensureSampleBank("choir_male");
+        const g3 = await measure("choir_male", 55, 6);     // G3 = 196 Hz，男声常用音区
+        const result = {
+          female: { loaded: Boolean(female), range: rangeOf(female), count: female ? female.layers[0].samples.length : 0 },
+          male: { loaded: Boolean(male), range: rangeOf(male), count: male ? male.layers[0].samples.length : 0 },
+          looped: Boolean(female && female.layers[0].samples[0] && female.layers[0].samples[0].loopStart),
+          a4, c5, g3,
+        };
+        debug.state.audio = savedAudio;
+        clearGraph();
+        debug.state.timbre = "piano_real";
+        return result;
+      });
+      console.log("女声/男声合唱：", JSON.stringify(chorus));
+      assert.equal(chorus.female.loaded, true, "真实女声合唱应当能加载");
+      assert.equal(chorus.male.loaded, true, "真实男声合唱应当能加载");
+      assert.ok(chorus.female.range[0] >= 67, "女声采样最低音应≥G4（实测 MIDI " + chorus.female.range[0] + "）");
+      assert.ok(chorus.female.range[1] <= 84, "女声采样最高音应≤C6（实测 MIDI " + chorus.female.range[1] + "）");
+      assert.ok(chorus.male.range[0] >= 43, "男声采样最低音应≥G2（实测 MIDI " + chorus.male.range[0] + "）");
+      assert.ok(chorus.male.range[1] <= 66, "男声采样最高音应≤F#4（实测 MIDI " + chorus.male.range[1] + "）");
+      assert.ok(chorus.female.count >= 15, "女声合唱应有 15+ 个采样（实测 " + chorus.female.count + " 个）");
+      assert.ok(chorus.male.count >= 20, "男声合唱应有 20+ 个采样（实测 " + chorus.male.count + " 个）");
+      assert.equal(chorus.looped, true, "SW 合唱样本应带 SFZ 循环点（长音不衰减）");
+      assert.ok(Math.abs(chorus.a4.pitch - 440) < 15, "女声 A4 音高应≈440 Hz（实测 " + chorus.a4.pitch + "）");
+      assert.ok(Math.abs(chorus.c5.pitch - 523.25) < 20, "女声 C5 音高应≈523.25 Hz（实测 " + chorus.c5.pitch + "）");
+      assert.ok(Math.abs(chorus.g3.pitch - 196) < 10, "男声 G3 音高应≈196 Hz（实测 " + chorus.g3.pitch + "）");
+      assert.ok(chorus.a4.maxJump < 0.2 && chorus.c5.maxJump < 0.2, "女声合唱不应有爆音");
     }
 
     // 走真实 UI 路径：选真实钢琴 → 等加载完成 → 播放 → 停止
@@ -535,6 +711,29 @@ try {
     assert.equal(realtime.playing, true, "真实钢琴应当能播放");
     assert.ok(realtime.sources > 0, "真实钢琴播放应有音频节点");
     assert.match(realtime.status, /音源/, "界面应显示真实音源状态");
+
+    // 走真实 UI 路径：选真实女声合唱 → 等加载完成 → 播放
+    if (installed.includes("choir_female")) {
+      await page.selectOption("#timbreSelect", "choir_female");
+      await page.waitForFunction(() => window.__pujian.state.sampleBanks.has("choir_female"), null, { timeout: 60000 });
+      await page.click("#playButton");
+      await page.waitForTimeout(1200);
+      const voice = await page.evaluate(() => ({
+        timbre: window.__pujian.state.timbre,
+        playing: window.__pujian.state.isPlaying,
+        sources: window.__pujian.state.sources.size,
+        status: document.querySelector("#sampleStatus")?.textContent || "",
+      }));
+      console.log("真实女声合唱 UI 播放：", JSON.stringify(voice));
+      if (!(await page.$eval("#stopButton", (button) => button.disabled))) {
+        await page.click("#stopButton");
+        await page.waitForTimeout(300);
+      }
+      assert.equal(voice.timbre, "choir_female", "下拉应能选到真实女声合唱");
+      assert.equal(voice.playing, true, "真实女声合唱应当能播放");
+      assert.ok(voice.sources > 0, "真实女声合唱播放应有音频节点");
+      assert.match(voice.status, /音源/, "界面应显示真实音源状态");
+    }
   }
 
   assert.deepEqual(errors, [], "页面不应有 JS 报错：" + errors.slice(0, 5).join(" | "));

@@ -11,16 +11,49 @@
 // - 共振峰：人声的「元音」特征频率。把声带的声音按 800 Hz / 1150 Hz / 2900 Hz
 //   附近加强，听起来就是「啊」；换成 450 / 800 / 2830 就是「哦」。
 
-/** 音色名（界面下拉选项用的显示文字）。 */
+/** 音色名（界面下拉选项用的显示文字）。带「（采样）」= 真实录音，需先装音源。 */
 export const TIMBRE_LABELS = {
-  piano: "钢琴", strings: "弦乐", choir: "合唱人声", organ: "管风琴", soft: "电子琴",
-  // 采样音源（真实录音）：需要先运行「安装真实音源.bat」，没装时自动退回对应的合成音色。
-  piano_real: "真实钢琴（采样）", strings_real: "真实弦乐（采样）", choir_real: "真实合唱人声（采样）",
+  // 合成音色
+  piano: "钢琴（合成）", strings: "弦乐（合成）", choir: "混声合唱（合成）",
+  choir_female_synth: "女声合唱（合成）", organ: "管风琴（合成）", soft: "电子琴（合成）",
+  // 钢琴 / 键盘（采样）
+  piano_real: "真实钢琴（采样）", electric_piano_real: "电钢琴（采样）",
+  harpsichord_real: "羽管键琴（采样）", vibraphone_real: "颤音琴（采样）",
+  church_organ_real: "教堂管风琴（采样）", pad_real: "温暖铺底（采样）",
+  // 弦乐（采样，可细分）
+  strings_real: "真实弦乐合奏（采样）", violin_real: "小提琴（采样）", viola_real: "中提琴（采样）",
+  cello_real: "大提琴（采样）", contrabass_real: "低音提琴（采样）",
+  pizzicato_real: "拨弦（采样）", tremolo_real: "震音弦乐（采样）", harp_real: "竖琴（采样）",
+  // 人声（采样）
+  choir_real: "真实混声合唱（采样）", choir_female: "真实女声合唱（采样）",
+  choir_male: "真实男声合唱（采样）", voice_oohs_real: "人声「哦」（采样）",
+  synth_choir_real: "合成人声合唱（采样）",
+  // 管乐（采样）
+  flute_real: "长笛（采样）", clarinet_real: "单簧管（采样）", oboe_real: "双簧管（采样）",
+  bassoon_real: "大管（采样）", trumpet_real: "小号（采样）", horn_real: "圆号（采样）",
+  trombone_real: "长号（采样）",
 };
-/** 界面下拉的显示顺序：合成音色在前，采样音色紧跟在同类合成音色之后。 */
-export const TIMBRE_ORDER = [
-  "piano", "piano_real", "strings", "strings_real", "choir", "choir_real", "organ", "soft",
+/** 界面下拉的分组（optgroup）：同组内合成音色在前、采样音色在后。 */
+export const TIMBRE_GROUPS = [
+  { label: "钢琴 / 键盘", ids: [
+    "piano", "piano_real", "electric_piano_real", "harpsichord_real", "vibraphone_real",
+    "church_organ_real", "organ", "soft", "pad_real",
+  ] },
+  { label: "弦乐", ids: [
+    "strings", "strings_real", "violin_real", "viola_real", "cello_real",
+    "contrabass_real", "pizzicato_real", "tremolo_real", "harp_real",
+  ] },
+  { label: "人声（合唱）", ids: [
+    "choir", "choir_female_synth", "choir_real", "choir_female", "choir_male",
+    "voice_oohs_real", "synth_choir_real",
+  ] },
+  { label: "管乐", ids: [
+    "flute_real", "clarinet_real", "oboe_real", "bassoon_real",
+    "trumpet_real", "horn_real", "trombone_real",
+  ] },
 ];
+/** 界面下拉的显示顺序（各分组顺序展开）。 */
+export const TIMBRE_ORDER = TIMBRE_GROUPS.flatMap((group) => group.ids);
 
 /**
  * 钢琴泛音强度：第 n 次泛音约 1/n^1.35 递减，第 7 次以上再压到 0.7。
@@ -60,6 +93,17 @@ export const VOWELS = {
 };
 /** 各声部轮流分到的元音：让合唱听起来是「一群人」，而不是一个人叠了几遍。 */
 export const VOWEL_ORDER = ["a", "o", "e", "u"];
+
+/**
+ * 女声的元音共振峰：比混声/男声整体高 20%–40%（女声 F1 约 850、F2 约 1200、F3 约 2800）。
+ * 性别听感主要由共振峰决定（而不是音高），所以「合成女声合唱」就靠这张表 + 更亮的音色。
+ */
+export const FEMALE_VOWELS = {
+  a: [[850, 1, 120], [1220, 0.6, 140], [2810, 0.22, 190]],
+  o: [[500, 1, 110], [900, 0.5, 130], [2830, 0.16, 190]],
+  u: [[370, 1, 100], [950, 0.45, 120], [2670, 0.13, 180]],
+  e: [[500, 1, 100], [1800, 0.5, 140], [2700, 0.2, 180]],
+};
 
 /** 把任意声部标识稳定地映射到一个元音（同一份乐谱每次播放都一样）。 */
 export function vowelForPart(partKey) {
@@ -117,8 +161,14 @@ export const VIBRATO = { rate: 5.1, cents: 12 };
  */
 // 采样音色的响度在 sampler.js 里按力度单独标定（样本本身的动态已经录进去了），所以配平系数是 1。
 export const TIMBRE_GAIN = {
-  piano: 1, strings: 0.55, choir: 0.5, organ: 0.44, soft: 1.15,
-  piano_real: 1, strings_real: 1, choir_real: 1,
+  piano: 1, strings: 0.55, choir: 0.5, choir_female_synth: 0.52, organ: 0.44, soft: 1.15,
+  piano_real: 1, electric_piano_real: 1, harpsichord_real: 1, vibraphone_real: 1,
+  church_organ_real: 1, pad_real: 1,
+  strings_real: 1, violin_real: 1, viola_real: 1, cello_real: 1, contrabass_real: 1,
+  pizzicato_real: 1, tremolo_real: 1, harp_real: 1,
+  choir_real: 1, choir_female: 1, choir_male: 1, voice_oohs_real: 1, synth_choir_real: 1,
+  flute_real: 1, clarinet_real: 1, oboe_real: 1, bassoon_real: 1,
+  trumpet_real: 1, horn_real: 1, trombone_real: 1,
 };
 /** 混响：1.9 秒余音、指数衰减 2.8、20 ms 预延迟——接近小音乐厅。 */
 export const REVERB = { seconds: 1.9, decay: 2.8, preDelay: 0.02, wet: 0.17, tone: 5200 };

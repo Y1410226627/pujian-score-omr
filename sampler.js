@@ -1,14 +1,13 @@
-// 采样音源（真实钢琴 / 合唱人声 / 弦乐）的加载与音符映射。
+// 采样音源（真实钢琴 / 人声 / 弦乐 / 管乐 / 键盘…）的加载与音符映射。
 //
 // 数据从哪来：由 `tools/install_soundfonts.py` 在本机下载到 `.assets/soundfonts/`
 // （不进 git；许可与署名见那个目录里的 LICENSES.md）。没装的话本模块的所有函数都返回空，
 // 应用自动退回合成音色——不会因为缺音源而播不出声。
 //
 // 为什么是「采样器」而不是直接放音频文件：
-//   · 样本只有 30 个基础音（钢琴，每 3 个半音一个）或 88 个音（人声/弦乐），
-//     播放任意音高要靠 playbackRate 变速（±1.5 个半音的变速听不出破绽）；
-//   · 力度靠「分层采样 + 增益」表达（钢琴有 soft/loud 两层，人声/弦乐一层再按力度调增益）；
-//   · 人声/弦乐是持续音，样本只有 3.13 秒，长音要在零交叉点循环（否则会有"啪"的接缝）。
+//   · 样本只有几十个基础音，播放任意音高要靠 playbackRate 变速（每 1–3 个半音一个采样点）；
+//   · 力度靠「分层采样 + 增益」表达（钢琴有 soft/loud 两层，其他乐器一层再按力度调增益）；
+//   · 持续音（人声/弦乐/管乐/管风琴）样本只有几秒，长音要在循环点循环。
 //
 // 本文件里「纯函数」部分（nearestSampleIndex / playbackRateFor / pickLayerIndex /
 // snapToZeroCrossing）可以直接在 node 里单测，见 tests/sampler.test.mjs。
@@ -25,11 +24,41 @@ export const SAMPLE_ROOT = ".assets/soundfonts/";
  */
 export const SAMPLED_TARGET_RMS = 0.22;
 
-/** 哪些音色是「采样音源」，以及没加载好时该退回哪个合成音色。 */
+/**
+ * 所有「采样音源」音色：fallback = 没装/没加载好时用哪个合成音色兜底；
+ * continuous = 是否需要循环撑住长音（人声、弓弦、管乐、管风琴等持续音）。
+ */
 export const SAMPLED_TIMBRES = {
+  // 钢琴 / 键盘
   piano_real: { fallback: "piano", continuous: false },
-  choir_real: { fallback: "choir", continuous: true },
+  electric_piano_real: { fallback: "soft", continuous: false },
+  harpsichord_real: { fallback: "soft", continuous: false },
+  vibraphone_real: { fallback: "soft", continuous: false },
+  church_organ_real: { fallback: "organ", continuous: true },
+  pad_real: { fallback: "strings", continuous: true },
+  // 弦乐（细分）
   strings_real: { fallback: "strings", continuous: true },
+  violin_real: { fallback: "strings", continuous: true },
+  viola_real: { fallback: "strings", continuous: true },
+  cello_real: { fallback: "strings", continuous: true },
+  contrabass_real: { fallback: "strings", continuous: true },
+  pizzicato_real: { fallback: "strings", continuous: false },
+  tremolo_real: { fallback: "strings", continuous: true },
+  harp_real: { fallback: "strings", continuous: false },
+  // 人声（女声 / 男声 / 混声）
+  choir_real: { fallback: "choir", continuous: true },
+  choir_female: { fallback: "choir", continuous: true },
+  choir_male: { fallback: "choir", continuous: true },
+  voice_oohs_real: { fallback: "choir", continuous: true },
+  synth_choir_real: { fallback: "choir", continuous: true },
+  // 管乐
+  flute_real: { fallback: "organ", continuous: true },
+  clarinet_real: { fallback: "organ", continuous: true },
+  oboe_real: { fallback: "organ", continuous: true },
+  bassoon_real: { fallback: "organ", continuous: true },
+  trumpet_real: { fallback: "organ", continuous: true },
+  horn_real: { fallback: "organ", continuous: true },
+  trombone_real: { fallback: "organ", continuous: true },
 };
 
 /** 音色名是不是采样音源。 */
@@ -131,13 +160,24 @@ export async function fetchSampleManifest(fetchImpl = fetch) {
   }
 }
 
+/** 解析清单里的一个音符条目：兼容旧格式（字符串路径）与新格式（{path, tune, loopStart, loopEnd, gainDb}）。 */
+function noteEntry(value) {
+  if (typeof value === "string") return { path: value };
+  return value && typeof value === "object" ? value : null;
+}
+
+/** 分贝 → 线性增益。 */
+function dbToGain(db) {
+  return 10 ** (Number(db) / 20);
+}
+
 /**
- * 加载一个采样音源（把 mp3 解码成内存里的 AudioBuffer）。
+ * 加载一个采样音源（把 mp3/wav 解码成内存里的 AudioBuffer）。
  *
  * @param manifest fetchSampleManifest() 的结果
- * @param name     piano_real / choir_real / strings_real
+ * @param name     bank 名（piano_real / choir_female / violin_real …）
  * @param options  { onProgress({done,total}) }
- * @returns 形如 { name, continuous, layers: [{velocity, samples: [{midi, buffer, loopStart, loopEnd}]}] }；
+ * @returns 形如 { name, continuous, layers: [{velocity, samples: [{midi, tune, buffer, loopStart, loopEnd, trim}]}] }；
  *          没装该音源时返回 null。
  */
 export async function loadSampleBank(manifest, name, { onProgress = () => {} } = {}) {
@@ -163,57 +203,84 @@ export async function loadSampleBank(manifest, name, { onProgress = () => {} } =
   const bank = { name, label: spec.label || name, continuous: Boolean(spec.continuous), layers: [] };
   for (const layer of layers) {
     const entries = Object.entries(layer.notes || {})
-      .map(([midiText, path]) => [Number(midiText), path])
+      .map(([midiText, value]) => [Number(midiText), noteEntry(value)])
+      .filter(([, entry]) => entry && entry.path)
       .sort((a, b) => a[0] - b[0]);
     const samples = [];
     const layerRms = [];
-    for (const [midi, path] of entries) {
-      const response = await fetch(SAMPLE_ROOT + path);
-      if (!response.ok) throw new Error("采样音源加载失败：" + path);
-      const decoded = await decode(await response.arrayBuffer());
-      const sampleRate = decoded.sampleRate;
-      const mono = downmixToMono(decoded);
-      const buffer = buildPlayableBuffer(mono, sampleRate, {
-        trimSeconds: spec.trimSeconds || 0,
-        fadeOutSeconds: spec.trimSeconds ? 0.3 : 0,
-      });
-      // FluidR3 对超出乐器音域的高音会渲染成整段静音（实测人声/弦乐 C7 以上 12 个），
-      // 这种"哑样本"要是留下来，靠近它的音会变成没声音——直接剔除，让最近的可用样本顶上。
-      const sampleData = buffer.getChannelData(0);
-      let energy = 0;
-      for (let index = 0; index < sampleData.length; index += 1) energy += sampleData[index] * sampleData[index];
-      const rms = Math.sqrt(energy / Math.max(1, sampleData.length));
-      if (rms < 0.0005) {
-        done += 1;
-        onProgress({ done, total });
-        continue;
-      }
-      layerRms.push(rms);
-      // 同层不同音高的录音电平并不一致（实测 A4 比 C4 轻 2 倍多），
-      // 记一个温和的配平系数：完全拉平会丢掉钢琴本身的音区差异，所以只按 0.8 次方修正。
-      const sample = { midi, buffer, rms };
-      if (bank.continuous) {
-        // 持续音：在指定区间循环。循环点吸附到过零点，避免接缝爆音。
-        const [startSeconds, endSeconds] = spec.loopSeconds || [1.0, 2.5];
-        const monoData = buffer.getChannelData(0);
-        sample.loopStart = snapToZeroCrossing(monoData, sampleRate, Math.min(startSeconds, buffer.duration * 0.5));
-        sample.loopEnd = snapToZeroCrossing(monoData, sampleRate, Math.min(endSeconds, buffer.duration - 0.05));
-        if (sample.loopEnd - sample.loopStart < 0.1) {
-          sample.loopStart = buffer.duration * 0.3;
-          sample.loopEnd = buffer.duration * 0.9;
+    const layerGainDb = [];
+    for (const [midi, entry] of entries) {
+      try {
+        const response = await fetch(SAMPLE_ROOT + entry.path);
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const decoded = await decode(await response.arrayBuffer());
+        const sampleRate = decoded.sampleRate;
+        const mono = downmixToMono(decoded);
+        const buffer = buildPlayableBuffer(mono, sampleRate, {
+          trimSeconds: spec.trimSeconds || 0,
+          fadeOutSeconds: spec.trimSeconds ? 0.3 : 0,
+        });
+        // FluidR3 对超出乐器音域的高音会渲染成整段静音：剔除，否则靠近它的音会没声音。
+        const data = buffer.getChannelData(0);
+        let energy = 0;
+        for (let index = 0; index < data.length; index += 1) energy += data[index] * data[index];
+        const rms = Math.sqrt(energy / Math.max(1, data.length));
+        if (rms < 0.0005) {
+          done += 1;
+          onProgress({ done, total });
+          continue;
         }
+        layerRms.push(rms);
+        if (Number.isFinite(entry.gainDb)) layerGainDb.push(entry.gainDb);
+        const sample = {
+          midi,
+          buffer,
+          rms,
+          tune: Number(entry.tune) || 0,   // 样本本身的音准偏差（半音）
+          gainDb: Number.isFinite(entry.gainDb) ? Number(entry.gainDb) : null,
+        };
+        if (bank.continuous) {
+          // 持续音：优先用清单里给的循环点（SSO 的 SFZ 就有精确循环点），
+          // 没有就按 bank 的 loopSeconds 找零交叉点。
+          const monoData = buffer.getChannelData(0);
+          if (Number.isFinite(entry.loopStart) && Number.isFinite(entry.loopEnd)) {
+            const limit = buffer.duration - 0.02;
+            const start = Math.min(Math.max(0.02, Number(entry.loopStart)), limit - 0.1);
+            const end = Math.min(Math.max(start + 0.1, Number(entry.loopEnd)), limit);
+            sample.loopStart = snapToZeroCrossing(monoData, sampleRate, start);
+            sample.loopEnd = snapToZeroCrossing(monoData, sampleRate, end);
+          } else {
+            const [startSeconds, endSeconds] = spec.loopSeconds || [1.0, 2.5];
+            sample.loopStart = snapToZeroCrossing(monoData, sampleRate, Math.min(startSeconds, buffer.duration * 0.5));
+            sample.loopEnd = snapToZeroCrossing(monoData, sampleRate, Math.min(endSeconds, buffer.duration - 0.05));
+          }
+          if (sample.loopEnd - sample.loopStart < 0.1) {
+            sample.loopStart = buffer.duration * 0.3;
+            sample.loopEnd = buffer.duration * 0.9;
+          }
+        }
+        samples.push(sample);
+      } catch (error) {
+        console.info("采样加载失败（已跳过）：" + entry.path, error);
       }
-      samples.push(sample);
       done += 1;
       onProgress({ done, total });
     }
     // 这一层样本的典型响度（中位数，避免个别极端样本带偏增益标定）
     const sortedRms = layerRms.slice().sort((a, b) => a - b);
     const medianRms = sortedRms.length ? sortedRms[Math.floor(sortedRms.length / 2)] : 0.01;
-    // 每个样本再按自身 RMS 做温和配平（0.8 次方：只压掉明显的电平差，保留音区差异）
+    const sortedGain = layerGainDb.slice().sort((a, b) => a - b);
+    const medianGainDb = sortedGain.length ? sortedGain[Math.floor(sortedGain.length / 2)] : 0;
+    // 每个样本的音量配平：
+    //   · 清单里带 gainDb（SSO 合唱，SFZ 作者算好的相对音量）→ 用它，最贴近原意；
+    //   · 否则按自身 RMS 做温和配平（0.8 次方：只压掉明显的电平差，保留音区差异）。
     for (const sample of samples) {
-      const ratio = medianRms / Math.max(0.0008, sample.rms || medianRms);
-      sample.trim = Math.min(2.5, Math.max(0.4, ratio ** 0.8));
+      if (sample.gainDb !== null) {
+        sample.trim = Math.min(4, Math.max(0.25, dbToGain(sample.gainDb - medianGainDb)));
+      } else {
+        const ratio = medianRms / Math.max(0.0008, sample.rms || medianRms);
+        sample.trim = Math.min(2.5, Math.max(0.4, ratio ** 0.8));
+      }
     }
     bank.layers.push({ velocity: layer.velocity, samples, medianRms });
   }
@@ -228,5 +295,6 @@ export function lookupSample(bank, midi, velocity) {
   const sampleIndex = nearestSampleIndex(layer.samples, midi);
   if (sampleIndex < 0) return null;
   const sample = layer.samples[sampleIndex];
-  return { sample, layer, playbackRate: playbackRateFor(midi, sample.midi) };
+  // 样本自己的音准偏差（tune，单位半音）也要算进去，否则整体会偏高/偏低几十音分。
+  return { sample, layer, playbackRate: playbackRateFor(midi, sample.midi + (sample.tune || 0)) };
 }

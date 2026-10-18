@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  TIMBRE_LABELS, TIMBRE_ORDER, TIMBRE_GAIN, PIANO_HARMONICS, PIANO_STRINGS, STRINGS_DETUNE,
-  ORGAN_HARMONICS, VOWELS, VOWEL_ORDER, VIBRATO, REVERB, COMPRESSOR, HUMANIZE,
-  CHOIR_ENVELOPE, ORGAN_ENVELOPE, STRINGS_ENVELOPE, SCHEDULER,
+  TIMBRE_LABELS, TIMBRE_ORDER, TIMBRE_GROUPS, TIMBRE_GAIN, PIANO_HARMONICS, PIANO_STRINGS,
+  STRINGS_DETUNE, ORGAN_HARMONICS, VOWELS, FEMALE_VOWELS, VOWEL_ORDER, VIBRATO, REVERB,
+  COMPRESSOR, HUMANIZE, CHOIR_ENVELOPE, ORGAN_ENVELOPE, STRINGS_ENVELOPE, SCHEDULER,
   vowelForPart, pianoDamperSeconds, pianoBrightness, pianoDecayShape, harmonicSeries,
 } from "../timbre.js";
 
@@ -12,23 +12,58 @@ import {
 // 泛音必须递减、共振峰必须 F1<F2<F3、低音制音必须比高音慢……
 // 真正的发声（Oscillator/BiquadFilter）由端到端脚本验证，见 tests/e2e-audio.mjs。
 
-test("音色名单：合成五种 + 采样三种，都有中文名，顺序稳定，且都有响度配平", () => {
-  // 顺序约定：合成音色在前，同类的采样音色紧跟其后（界面下拉按这个顺序显示）。
-  assert.deepEqual(TIMBRE_ORDER, [
-    "piano", "piano_real", "strings", "strings_real", "choir", "choir_real", "organ", "soft",
-  ]);
+test("音色分组：分组展开 == 顺序表，全部有中文名与响度配平，采样音色名字标明「真实/采样」", () => {
+  assert.ok(TIMBRE_GROUPS.length >= 4, "音色应分成至少 4 组（钢琴/弦乐/人声/管乐）");
+  const flat = TIMBRE_GROUPS.flatMap((group) => group.ids);
+  assert.deepEqual(flat, TIMBRE_ORDER, "TIMBRE_ORDER 必须等于分组的顺序展开");
+  assert.equal(new Set(flat).size, flat.length, "同一个音色不能出现在两个分组里");
+  for (const group of TIMBRE_GROUPS) {
+    assert.equal(typeof group.label, "string");
+    assert.ok(group.ids.length > 0);
+  }
   for (const name of TIMBRE_ORDER) {
-    assert.equal(typeof TIMBRE_LABELS[name], "string");
+    assert.equal(typeof TIMBRE_LABELS[name], "string", name + " 缺少中文名");
     assert.ok(TIMBRE_GAIN[name] > 0, name + " 缺少响度配平系数");
   }
-  assert.equal(TIMBRE_LABELS.piano, "钢琴");
-  assert.equal(TIMBRE_LABELS.strings, "弦乐");
-  assert.equal(TIMBRE_LABELS.choir, "合唱人声");
-  // 采样音色的名字要明确标出「真实」「采样」，否则用户分不清两种钢琴
+  // 合成音色在前、采样音色在后的约定
+  assert.equal(TIMBRE_LABELS.piano, "钢琴（合成）");
+  assert.equal(TIMBRE_LABELS.choir, "混声合唱（合成）");
+  assert.equal(TIMBRE_LABELS.choir_female_synth, "女声合唱（合成）");
+  // 采样音色的名字要明确标出「采样」，合成音色标出「合成」，否则用户分不清两种钢琴
+  const SYNTH_IDS = new Set(["piano", "strings", "choir", "choir_female_synth", "organ", "soft"]);
+  for (const name of TIMBRE_ORDER) {
+    if (SYNTH_IDS.has(name)) {
+      assert.match(TIMBRE_LABELS[name], /合成/, name + " 是合成音色，名字里要标「合成」");
+    } else {
+      assert.match(TIMBRE_LABELS[name], /采样/, name + " 是采样音色，名字里要标「采样」");
+    }
+  }
+  // 和合成音色重名的三种采样音色，再额外标出「真实」
   for (const name of ["piano_real", "strings_real", "choir_real"]) {
     assert.match(TIMBRE_LABELS[name], /真实/);
-    assert.match(TIMBRE_LABELS[name], /采样/);
   }
+  // 合唱要能区分女声/男声/混声（用户反馈「人声音源偏男声」）
+  assert.match(TIMBRE_LABELS.choir_female, /女声/);
+  assert.match(TIMBRE_LABELS.choir_male, /男声/);
+  assert.match(TIMBRE_LABELS.choir_real, /混声/);
+});
+
+test("女声共振峰：比混声整体更高（性别听感主要由共振峰决定）", () => {
+  for (const vowel of Object.keys(VOWELS)) {
+    assert.ok(FEMALE_VOWELS[vowel], "缺少女声元音：" + vowel);
+    const mixed = VOWELS[vowel];
+    const female = FEMALE_VOWELS[vowel];
+    assert.equal(female.length, 3, "女声也应有 3 个共振峰");
+    const [f1, f2, f3] = female.map((entry) => entry[0]);
+    assert.ok(f1 < f2 && f2 < f3, "女声共振峰必须从低到高排列");
+    assert.ok(female[0][0] > mixed[0][0], "女声第一共振峰应高于混声（" + vowel + "）");
+    assert.ok(female[1][0] > mixed[1][0], "女声第二共振峰应高于混声（" + vowel + "）");
+    assert.ok(f1 >= 300 && f3 <= 3200, "女声共振峰应落在人声频率范围内");
+    for (const [frequency, strength, bandwidth] of female) {
+      assert.ok(frequency > 0 && strength > 0 && strength <= 1 && bandwidth > 0);
+    }
+  }
+  assert.equal(Object.keys(FEMALE_VOWELS).length, Object.keys(VOWELS).length);
 });
 
 test("钢琴/弦乐的微失谐：主弦不失谐、副弦在 1–15 音分内（产生拍音才像真的）", () => {

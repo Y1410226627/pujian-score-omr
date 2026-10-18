@@ -48,7 +48,7 @@ def read_musicxml_from_mxl(mxl_path):
 
 
 # 只允许直接暴露给浏览器的静态资源后缀。.py/.bat/.exe/.pth 等一律不可下载。
-ALLOWED_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs", ".json", ".md", ".svg", ".ico", ".png", ".webmanifest", ".mp3"}
+ALLOWED_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs", ".json", ".md", ".svg", ".ico", ".png", ".webmanifest", ".mp3", ".wav"}
 # 这些目录里含有源码、虚拟环境、模型与依赖，任何情况下都不应通过 HTTP 暴露。
 DENIED_SEGMENTS = {".venv", ".git", "node_modules", "__pycache__", "tests", ".workbuddy-ai", "deliverables"}
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -242,7 +242,8 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         parts = [part for part in decoded.replace("\\", "/").split("/") if part not in ("", ".")]
         if not parts:
             return False
-        # 隐藏文件一律拒绝，但 .assets 例外：它是「真实音色」采样音源的存放目录（只放 mp3/json，由安装器下载，不进 git）。
+        # 隐藏文件一律拒绝，但 .assets 例外：它是「真实音色」采样音源的存放目录（只放 mp3/wav/json，
+        # 由安装器下载，不进 git）。wav 是 SSO 男女声合唱样本：SFZ 只提供 wav，安装器转成 24 kHz 单声道后直接回放。
         if any((part.startswith(".") and part != ".assets") or part.lower() in DENIED_SEGMENTS
                for part in parts):
             return False
