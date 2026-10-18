@@ -380,7 +380,15 @@ export function pageLengthBeats(page) {
  * @param {(object|null)[]} pages 每页的 scoreInfo（含 notes/measureCount/totalBeats）；
  *        某页识别失败时该位置传 null，合并结果会把它记入 failedPages。
  */
-export function mergePageScores(pages) {
+/**
+ * 跨页合并。
+ *
+ * @param pages 每页的 scoreInfo（识别失败的页放 null）
+ * @param skippedPages 可选：明确「跳过」的页码集合（例如混合谱里的简谱页）。
+ *        这些页不算「识别失败」——它们本来就不该由五线谱流程处理，
+ *        否则界面会同时报「第 N 页识别失败」和「第 N 页没有五线谱已跳过」，自相矛盾。
+ */
+export function mergePageScores(pages, skippedPages = null) {
   const notes = [];
   const warnings = new Set();
   const failedPages = [];
@@ -390,7 +398,7 @@ export function mergePageScores(pages) {
 
   pages.forEach((page, index) => {
     if (!page) {
-      failedPages.push(index + 1);
+      if (!(skippedPages && skippedPages.has(index + 1))) failedPages.push(index + 1);
       return;
     }
     if (!first) first = page;

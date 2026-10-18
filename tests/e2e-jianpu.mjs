@@ -81,6 +81,28 @@ try {
     timbres.push({ timbre, sources: during.sources, buses: during.buses });
   }
 
+  // 滚动调度护栏：整本 500+ 音符时，音频图里同时只能有"窗口内"的节点。
+  // 回归背景：一次性调度会在点击播放时卡 800ms，并把上千个节点塞进音频图 → 爆音。
+  await page.selectOption("#timbreSelect", "piano");
+  await page.click("#playButton");
+  await page.waitForTimeout(1500);
+  const scheduling = await page.evaluate(() => ({
+    playing: window.__pujian.state.isPlaying,
+    sources: window.__pujian.state.sources.size,
+    notes: window.__pujian.state.notes.length,
+    timbreInputs: document.querySelectorAll(".part-timbre-select").length,
+  }));
+  await page.click("#stopButton");
+  await page.waitForTimeout(300);
+  console.log("滚动调度：", JSON.stringify(scheduling));
+  if (!scheduling.playing) throw new Error("整本播放没有进入播放状态");
+  if (scheduling.sources === 0) throw new Error("整本播放没有音频节点");
+  if (scheduling.sources > 400) {
+    throw new Error("音频图里堆了太多节点（" + scheduling.sources + " / " + scheduling.notes
+      + " 个音），说明滚动调度失效了");
+  }
+  if (scheduling.timbreInputs < 1) throw new Error("声部面板里没有逐声部音色下拉");
+
   // 循环播放一次，确认重新调度不会出错（反复试听会让音频图膨胀的经典场景）。
   await page.selectOption("#timbreSelect", "piano");
   await page.check("#loopToggle");

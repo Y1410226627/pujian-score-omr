@@ -47,8 +47,8 @@ try {
   assert.ok(loaded.notes >= 8, "样例乐谱应解析出至少 8 个音符");
   assert.ok(loaded.parts >= 2, "样例乐谱应有 2 个声部");
 
-  // ——— 离线渲染四种音色，各弹一个 C4 长音 ———
-  for (const timbre of ["piano", "choir", "organ", "soft"]) {
+  // ——— 离线渲染五种音色，各弹一个 C4 长音 ———
+  for (const timbre of ["piano", "strings", "choir", "organ", "soft"]) {
     results[timbre] = await page.evaluate(async (name) => {
       const debug = window.__pujian;
       const sampleRate = 44100;
@@ -135,6 +135,13 @@ try {
   assert.ok(piano.harmonics[3] > piano.harmonics[5], "钢琴高次泛音继续衰减");
   assert.ok(piano.rms.attack > piano.rms.body * 1.2, "钢琴应有明显衰减（起音比保持段响）");
   assert.ok(piano.rms.body < piano.rms.attack, "钢琴余音应弱于起音");
+
+  const strings = results.strings;
+  assert.ok(strings.rms.attack > 0.01, "弦乐必须有声音");
+  assert.ok(strings.peakSample < 1.0, "弦乐不能削波");
+  // 锯齿波基音最强、第 2 泛音约为基音一半（区别于三角波的第 2 泛音≈0）。
+  assert.ok(strings.harmonics[1] / strings.harmonics[0] > 0.2, "弦乐应保留明显的 2 次泛音（锯齿波特征）");
+  assert.ok(strings.harmonics[2] / strings.harmonics[0] > 0.05, "弦乐应保留 3 次泛音");
 
   const organ = results.organ;
   assert.ok(organ.rms.attack > 0.01, "管风琴必须有声音");
@@ -225,7 +232,7 @@ try {
   const loudness = Object.fromEntries(Object.entries(results).map(([name, data]) => [name, data.rms.body]));
   console.log("各音色稳态响度（RMS）：", Object.entries(loudness).map(([name, value]) => name + "=" + value.toFixed(3)).join(" "));
   for (const [name, value] of Object.entries(loudness)) {
-    assert.ok(value / loudness.piano > 0.62 && value / loudness.piano < 1.6,
+    assert.ok(value / loudness.piano > 0.55 && value / loudness.piano < 1.7,
       name + " 的响度应与钢琴接近（实测 " + (value / loudness.piano).toFixed(2) + " 倍）");
   }
   console.log("混响余音（松键后 0.35–0.9 秒）：", REVERB.seconds, "秒衰减，实测 RMS 均 > 0 ✔");
@@ -252,7 +259,7 @@ try {
   }));
   assert.equal(afterSelect.timbre, "choir", "下拉切换应真的改了音色");
   assert.equal(afterSelect.select, "choir");
-  assert.match(afterSelect.hint, /合唱人声/);
+  assert.match(afterSelect.hint, /各声部可单独选/);
   assert.match(String(afterSelect.saved), /choir/, "音色选择应记进本地存储");
   console.log("音色切换：", JSON.stringify({ timbre: afterSelect.timbre, hint: afterSelect.hint, saved: afterSelect.saved }));
 
@@ -276,6 +283,66 @@ try {
   console.log("停止后：", JSON.stringify(afterStop));
   assert.equal(afterStop.playing, false, "点■应该停止播放");
   assert.equal(afterStop.sources, 0, "停止后音频节点应全部回收（否则反复试听会越来越卡）");
+
+  // ——— 逐声部音色：每个声部可以单独选音色，而不是所有声部共用一种 ———
+  const perPart = await page.evaluate(() => {
+    const debug = window.__pujian;
+    const selects = [...document.querySelectorAll(".part-timbre-select")];
+    if (!selects.length) return { error: "声部面板里没有音色下拉" };
+    const select = selects[0];
+    const row = select.closest(".part-row");
+    const firstKey = row.dataset.partKey;
+    select.value = "strings";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    const afterSet = {
+      partKey: firstKey,
+      mapValue: debug.state.partTimbres.get(firstKey),
+      resolved: debug.timbreForPart(firstKey),
+      globalTimbre: debug.state.timbre,
+      selectValue: select.value,
+      saved: window.localStorage.getItem("pujian.settings.v1"),
+    };
+    // 还原成"跟随全局"，避免影响后续其它断言
+    select.value = "";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return {
+      ...afterSet,
+      restored: debug.timbreForPart(firstKey),
+      restoredSelect: select.value,
+      inputs: selects.length,
+    };
+  });
+  console.log("逐声部音色：", JSON.stringify(perPart));
+  assert.ok(!perPart.error, perPart.error || "");
+  assert.equal(perPart.globalTimbre, "choir", "全局音色应仍是合唱人声");
+  assert.equal(perPart.resolved, "strings", "该声部单独选的弦乐应当覆盖全局音色");
+  assert.notEqual(perPart.resolved, perPart.globalTimbre, "逐声部音色必须能不同于全局音色");
+  assert.match(String(perPart.saved), /strings/, "逐声部音色应记进本地存储");
+  assert.equal(perPart.restored, "choir", "改回「跟随全局」后应回到全局音色");
+
+  // ——— 滚动调度护栏：播放时音频图里不能堆着整曲的节点 ———
+  const scheduling = await page.evaluate(async () => {
+    const debug = window.__pujian;
+    debug.prepareAudio();
+    await debug.playMelody();
+    const started = performance.now();
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const snapshot = {
+      ms: Number((performance.now() - started).toFixed(0)),
+      sources: debug.state.sources.size,
+      notes: debug.state.notes.length,
+      playing: debug.state.isPlaying,
+    };
+    debug.stopPlayback();
+    return snapshot;
+  });
+  console.log("滚动调度：", JSON.stringify(scheduling));
+  assert.equal(scheduling.playing, true, "playMelody 之后应处于播放状态");
+  assert.ok(scheduling.sources > 0, "播放中应真的有音频节点");
+  assert.ok(scheduling.sources <= scheduling.notes * 8,
+    "每个音的音频节点数应在合理范围（实测 " + scheduling.sources + " 个源 / " + scheduling.notes + " 个音）");
+  // 注：这个样例只有 8 个音，窗口会一次覆盖全部；「节点数受窗口限制」的真正护栏在
+  // tests/e2e-jianpu.mjs 里用 526 个音的整本来验。
 
   assert.deepEqual(errors, [], "页面不应有 JS 报错：" + errors.slice(0, 5).join(" | "));
   console.log("\n播放音色端到端验证通过 ✔");

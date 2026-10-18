@@ -4,8 +4,9 @@ import {
   mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN,
 } from "./staff.js";
 import {
-  TIMBRE_LABELS, TIMBRE_GAIN, PIANO_HARMONICS, ORGAN_HARMONICS, VOWELS, VIBRATO, REVERB,
-  COMPRESSOR, HUMANIZE, CHOIR_ENVELOPE, ORGAN_ENVELOPE,
+  TIMBRE_LABELS, TIMBRE_GAIN, TIMBRE_ORDER, PIANO_HARMONICS, PIANO_STRINGS, STRINGS_DETUNE,
+  ORGAN_HARMONICS, VOWELS, VIBRATO, REVERB, COMPRESSOR, HUMANIZE, CHOIR_ENVELOPE,
+  ORGAN_ENVELOPE, STRINGS_ENVELOPE, SCHEDULER,
   vowelForPart, pianoDamperSeconds, pianoBrightness, pianoDecayShape,
 } from "./timbre.js";
 
@@ -54,8 +55,13 @@ const state = {
   // 声部音量（0–1，默认 1）与播放时的「声部音量总线」：拖滑条实时改总线增益，
   // 正在播放的音符会立刻跟着变，不需要停播、也不需要重建音频图。
   partVolumes: new Map(), partBuses: new Map(),
-  // 播放音色（piano / choir / organ / soft）与音频主链（混响+压限）的缓存。
+  // 播放音色（piano / strings / choir / organ / soft）与音频主链（混响+压限）的缓存。
   timbre: "piano", master: null, reverbBuffer: null, vibrato: null, noiseBuffer: null, waves: new Map(),
+  // 「全局音色」之外的逐声部音色覆盖：key = 声部标识（voiceIdentity），value = 音色名。
+  // 不在这里的元素就是「跟随全局」。
+  partTimbres: new Map(),
+  // 播放的滚动调度定时器（见 playMelody 里的说明）与软限幅曲线缓存。
+  scheduleTimer: null, softClipCurve: null,
   // 识别结果对应的是哪一页（简谱/单页识别=页码；整本识别或 MusicXML 导入=null）。
   // 翻页时**不清空结果**，只按这个页码决定要不要在谱面上画音符坐标。
   scorePage: null,
@@ -440,6 +446,7 @@ async function loadFile(file) {
   const isMusicXml = /\.(musicxml|xml|mxl)$/i.test(lowerName);
   const isImage = Boolean(file.type?.startsWith("image/")) || /\.(png|jpe?g|webp|bmp|gif)$/i.test(file.name);
   if (!isPdf && !isImage && !isMusicXml) return showToast("请选择 PDF、图片或 MusicXML 乐谱文件。");
+  prepareAudio();          // 声卡初始化要 600ms 左右，趁"载入文件"这段本来就忙的时候做掉
   stopPlayback();
   await destroyPdf();
   disposePartBuses();
@@ -1051,11 +1058,14 @@ function updatePartControls(reset = false) {
     state.selectedParts = new Set([...state.selectedParts].filter((key) => alive.has(key)));
   }
   state.pianoKeys = new Set(parts.filter((part) => part.piano).map((part) => part.key));
+  // 从本地设置恢复「逐声部音色」（只认当前乐谱里存在的声部）。
+  restorePartTimbres(parts.map((part) => part.key));
 
   els.partList.replaceChildren();
   for (const part of parts) {
     const row = document.createElement("div");
     row.className = "part-row";
+    row.dataset.partKey = part.key;   // 便于测试/排查按声部定位
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
@@ -1101,6 +1111,29 @@ function updatePartControls(reset = false) {
       applyPartName(part.key, select.value);
     });
 
+    // 每个声部可以单独选音色（例如：女高用合唱人声、钢伴用钢琴；或反过来用弦乐垫底）。
+    const timbreSelect = document.createElement("select");
+    timbreSelect.className = "part-timbre-select";
+    timbreSelect.title = `给「${part.name}」单独选音色（播放中切换会在下次播放生效）`;
+    timbreSelect.setAttribute("aria-label", `${part.name} 的音色`);
+    const followOption = document.createElement("option");
+    followOption.value = "";
+    followOption.textContent = "跟随全局";
+    timbreSelect.append(followOption);
+    for (const name of TIMBRE_ORDER) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = TIMBRE_LABELS[name];
+      timbreSelect.append(option);
+    }
+    timbreSelect.value = partTimbre(part.key);
+    timbreSelect.addEventListener("change", () => {
+      setPartTimbre(part.key, timbreSelect.value);
+      timbreSelect.title = timbreSelect.value
+        ? `「${part.name}」用「${TIMBRE_LABELS[timbreSelect.value]}」`
+        : `「${part.name}」跟随全局音色`;
+    });
+
     const volume = document.createElement("input");
     volume.type = "range";
     volume.className = "part-volume";
@@ -1119,7 +1152,7 @@ function updatePartControls(reset = false) {
     count.textContent = `${part.count}音`;
     count.title = `${part.name}：${part.count} 个音`;
 
-    row.append(checkbox, select, volume, count);
+    row.append(checkbox, select, timbreSelect, volume, count);
     els.partList.append(row);
   }
 
@@ -1678,43 +1711,44 @@ async function recognizeAllPages() {
   const totalPages = state.pageCount;
   const entries = [];
   try {
-    // ---- 快路径：整本一次送给 Audiveris（省去每页一次的 JVM 启动）----
-    // 实测 16 页的谱，逐页调用约 9 秒/页 = 2.4 分钟；合并成一次调用约 6 秒/页 = 1.6 分钟。
-    // 只在「装了 Audiveris + 多页 + 每一页都能检测到五线谱」时走这条路；任何一步不满足
-    // （例如混着简谱页、或本机没装引擎）都自动退回下面的逐页流程，功能不会因此缺失。
+    // ---- 快路径：把「有谱表的页」一次送给 Audiveris（省去每页一次的 JVM 启动）----
+    // 实测：逐页调用约 9 秒/页；一次批量约 2.5–5 秒/页。16 页的谱从 2.4 分钟降到 40 秒左右。
+    //
+    // 关键改进（用户反馈「整本识别太慢」后改）：以前要求「**每一页**都检测到五线谱」才敢批量，
+    // 于是像《敕勒歌》这种前 10 页五线谱、后 6 页简谱的书会整体退回逐页流程（16×9 秒 ≈ 2.4 分钟）。
+    // 现在改成「只把有谱表的页批量送识别，没有谱表的页（多半是简谱页）如实跳过并提示」，
+    // 混合谱也能享受到批量提速（实测 16 页混合谱 24.6 秒）。
     let batchHandled = false;
+    const noStaffPages = new Set();
+    let skippedNoStaff = [];
     if (audiverisAvailable !== false && totalPages > 1 && totalPages <= 32) {
-      const blobs = [];
-      let everyPageHasStaves = true;
+      const prepared = [];
       for (let number = 1; number <= totalPages; number++) {
         if (superseded()) return;
         setRecognizeProgress(number - 1, totalPages, `正在准备第 ${number} / ${totalPages} 页…`);
         await renderPdfPage(number, fileToken);
         if (superseded()) return;
         const { binary, width, height } = readPageBinary();
-        if (!detectStaves(binary, width, height).length) {
-          // 有页面没有五线谱（常见于同一份 PDF 里混了简谱页）：整批交给 Audiveris 只会白等，
-          // 直接退回逐页流程，让每一页各自选择引擎。
-          everyPageHasStaves = false;
-          break;
-        }
-        const blob = await canvasToBlob();
-        if (!blob) { everyPageHasStaves = false; break; }
-        blobs.push(blob);
+        const hasStaves = detectStaves(binary, width, height).length > 0;
+        const blob = hasStaves ? await canvasToBlob() : null;
+        prepared.push({ number, blob, hasStaves });
+        if (!hasStaves) noStaffPages.add(number);
       }
-      if (everyPageHasStaves && blobs.length === totalPages) {
-        setRecognizeProgress(0, totalPages, `正在一次送出 ${totalPages} 页（省去每页的引擎启动）…`);
-        const batchResults = await recognizePagesInBatch(blobs, {
+      const staffPages = prepared.filter((item) => item.hasStaves && item.blob);
+      if (staffPages.length) {
+        setRecognizeProgress(0, staffPages.length, `正在一次送出 ${staffPages.length} 页（省去每页的引擎启动）…`);
+        const batchResults = await recognizePagesInBatch(staffPages.map((item) => item.blob), {
           superseded,
           onProgress: ({ done, total, label }) => {
             setRecognizeProgress(done, Math.max(total, 1), label || `已完成 ${done} / ${total} 页`);
           },
         });
         if (superseded()) return;
-        if (batchResults.length === totalPages) {
-          for (let index = 0; index < batchResults.length; index++) {
+        if (batchResults.length === staffPages.length) {
+          const byPage = new Map(staffPages.map((item, index) => [item.number, batchResults[index]]));
+          for (let number = 1; number <= totalPages; number++) {
             if (superseded()) return;
-            const result = batchResults[index];
+            const result = byPage.get(number);
             if (!result) { entries.push(null); continue; }
             entries.push({
               scoreInfo: result.scoreInfo,
@@ -1722,13 +1756,22 @@ async function recognizeAllPages() {
               diagnostics: { wholePage: true, source: "engine", emptyCount: 0, failedCount: 0, estimatedCount: 0 },
             });
           }
+          skippedNoStaff = [...noStaffPages].sort((a, b) => a - b);
           batchHandled = true;
         }
       }
     }
     if (!batchHandled) {
+      if (!skippedNoStaff.length && noStaffPages.size) {
+        skippedNoStaff = [...noStaffPages].sort((a, b) => a - b);
+      }
       for (let number = 1; number <= totalPages; number++) {
         if (superseded()) return;
+        if (noStaffPages.has(number)) {
+          // 这一页已经确认没有五线谱（多半是简谱页）：逐页流程也不必再白跑一次。
+          entries.push(null);
+          continue;
+        }
         setRecognizeProgress(number - 1, totalPages, `正在识别第 ${number} / ${totalPages} 页…`);
         await renderPdfPage(number, fileToken);
         if (superseded()) return;
@@ -1755,11 +1798,16 @@ async function recognizeAllPages() {
       }
     }
     if (superseded()) return;
-    const merged = mergePageScores(entries.map((entry) => (entry ? entry.scoreInfo : null)));
+    const merged = mergePageScores(entries.map((entry) => (entry ? entry.scoreInfo : null)), new Set(skippedNoStaff));
     if (!merged.notes.length) {
       throw new Error("整本都没有识别出音符。请检查 PDF 是否清晰，或改用单页识别逐页处理。");
     }
     merged.title = state.file.name.replace(/\.[^.]+$/, "");
+    if (skippedNoStaff.length) {
+      // 不许静默丢页：明确告诉用户哪几页没参与合并、以及该用什么功能处理它们。
+      merged.warnings = [...(merged.warnings || []),
+        `第 ${skippedNoStaff.join("、")} 页没有检测到五线谱（多为简谱页），已跳过；简谱页请用「按简谱识别全部 N 页」处理。`];
+    }
     const recognized = entries.filter(Boolean);
     const estimatedPages = recognized.filter((entry) => entry.diagnostics.estimatedCount > 0).length;
     const source = estimatedPages === 0 ? "engine" : (estimatedPages === recognized.length ? "estimate" : "mixed");
@@ -1767,9 +1815,18 @@ async function recognizeAllPages() {
     // 回到第 1 页预览：直接调 renderPdfPage（它只重画谱面，不会碰识别结果）。
     await renderPdfPage(1, fileToken);
     if (superseded()) return;
-    const failed = merged.failedPages;
-    els.scoreHint.textContent = `整本识别完成：${totalPages} 页 · ${merged.notes.length} 个音符 · ${merged.measureCount} 个小节${failed.length ? ` · 第 ${failed.join("、")} 页识别失败` : ""}`;
-    showToast(`已合并 ${totalPages} 页共 ${merged.notes.length} 个音符，请逐音校对。${failed.length ? `（第 ${failed.join("、")} 页失败）` : ""}`);
+    // 失败页与「跳过页」分开说：简谱页不是识别失败，而是这份功能本来就不处理它。
+    const failed = merged.failedPages || [];
+    const mergedPages = totalPages - skippedNoStaff.length;
+    const skippedText = skippedNoStaff.length
+      ? ` · 第 ${skippedNoStaff.join("、")} 页没有五线谱（简谱）已跳过，请用「按简谱识别全部 N 页」`
+      : "";
+    els.scoreInfo.hidden = false;
+    els.scoreDetails.textContent = `${merged.notes.length} 个音符 · ${merged.partNames.length} 个声部 · ${merged.measureCount} 小节 · ${merged.timeSummary} · ${merged.keySummary}`;
+    els.scoreWarnings.textContent = (merged.warnings || []).join(" ");
+    els.scoreWarnings.hidden = !(merged.warnings || []).length;
+    els.scoreHint.textContent = `整本识别完成：合并 ${mergedPages} 页 · ${merged.notes.length} 个音符 · ${merged.measureCount} 个小节${failed.length ? ` · 第 ${failed.join("、")} 页识别失败` : ""}${skippedText}`;
+    showToast(`已合并 ${mergedPages} 页共 ${merged.notes.length} 个音符，请逐音校对。${failed.length ? `（第 ${failed.join("、")} 页失败）` : ""}${skippedNoStaff.length ? `（第 ${skippedNoStaff.join("、")} 页无五线谱，已跳过）` : ""}`);
   } catch (error) {
     if (superseded()) return;
     console.error(error);
@@ -2052,6 +2109,38 @@ function setPartVolume(key, value) {
     }
   }
 }
+/** 某个声部单独选的音色；空字符串表示「跟随全局音色」。 */
+function partTimbre(key) {
+  const chosen = state.partTimbres.get(String(key));
+  return chosen && TIMBRE_LABELS[chosen] ? chosen : "";
+}
+/** 给某个声部单独指定音色（下次播放生效）；value 为空表示跟随全局。 */
+function setPartTimbre(key, value) {
+  if (value && TIMBRE_LABELS[value]) {
+    state.partTimbres.set(String(key), value);
+  } else {
+    state.partTimbres.delete(String(key));
+  }
+  savePartTimbres();
+  if (state.isPlaying) showToast("音色会在下次播放时生效（不打断当前演奏）。");
+}
+/** 把逐声部音色记到本地，下次打开同一份乐谱还是这套设置。 */
+function savePartTimbres() {
+  const table = {};
+  for (const [key, value] of state.partTimbres) table[key] = value;
+  saveSettings({ partTimbres: table });
+}
+/** 从本地设置恢复逐声部音色（只恢复当前乐谱里真实存在的声部，避免越积越多）。 */
+function restorePartTimbres(aliveKeys) {
+  const saved = loadSettings().partTimbres;
+  if (!saved || typeof saved !== "object") return;
+  const alive = new Set(aliveKeys.map(String));
+  for (const key of [...state.partTimbres.keys()]) if (!alive.has(key)) state.partTimbres.delete(key);
+  for (const [key, value] of Object.entries(saved)) {
+    if (alive.has(key) && TIMBRE_LABELS[value]) state.partTimbres.set(key, value);
+  }
+}
+
 /** 取（或建）某个声部的音量总线：每个声部一条 GainNode，所有该声部的音符都接进来。 */
 function partBus(key) {
   if (!state.audio) return null;
@@ -2092,8 +2181,8 @@ function setTimbre(value) {
   state.timbre = value;
   saveSettings({ timbre: value });
   if (els.timbreSelect) els.timbreSelect.value = value;
-  if (els.timbreHint) els.timbreHint.textContent = TIMBRE_LABELS[value] + "音色";
-  showToast("音色已切换为「" + TIMBRE_LABELS[value] + "」，下次播放生效。");
+  if (els.timbreHint) els.timbreHint.textContent = "各声部可单独选";
+  showToast("全局音色已切换为「" + TIMBRE_LABELS[value] + "」，下次播放生效。");
 }
 
 /**
@@ -2121,11 +2210,52 @@ function masterChain() {
   compressor.ratio.value = COMPRESSOR.ratio;
   compressor.attack.value = COMPRESSOR.attack;
   compressor.release.value = COMPRESSOR.release;
+  // 软限幅（tanh）：压限器来不及压住的瞬态也不会顶到 0 dBFS 变成「啪」的爆音。
+  // 比硬截断温和得多，密集和弦叠加时听到的是"饱满"而不是"噼噼啪啪"。
+  const limiter = audio.createWaveShaper();
+  limiter.curve = softClipCurve();
+  limiter.oversample = "2x";
   master.connect(dry).connect(compressor);
   master.connect(reverb).connect(reverbTone).connect(wet).connect(compressor);
-  compressor.connect(audio.destination);
+  compressor.connect(limiter).connect(audio.destination);
   state.master = master;
   return master;
+}
+
+/**
+ * tanh 软限幅曲线：|x| 很小时就是 x（不改音色、不改响度），接近 ±1 时平滑压住。
+ * 注意不能写成 tanh(k·x)/tanh(k)——那在 0 附近会放大 k/tanh(k) 倍（实测 +58%），
+ * 密集织体反而更容易糊掉。
+ */
+function softClipCurve() {
+  if (state.softClipCurve) return state.softClipCurve;
+  const samples = 4096;
+  const curve = new Float32Array(samples);
+  for (let index = 0; index < samples; index += 1) {
+    const x = (index / (samples - 1)) * 2 - 1;
+    curve[index] = Math.tanh(x);
+  }
+  state.softClipCurve = curve;
+  return curve;
+}
+
+/**
+ * 提前把 AudioContext 建好。
+ *
+ * 为什么要提前：实测在这台机器上 `new AudioContext()` 要 **625 毫秒**（声卡/驱动初始化），
+ * 如果拖到用户点「试听」那一刻才建，按钮会明显卡住——用户感受到的就是「一卡」。
+ * 浏览器只要求**出声**要等用户手势，创建对象随时都可以：先在载入文件时建好（那会儿界面本来就忙），
+ * 播放时只需要 `resume()`（几毫秒）。
+ */
+function prepareAudio() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass || state.audio) return;
+  try {
+    state.audio = new AudioContextClass();
+  } catch (error) {
+    console.info("音频初始化失败，播放时会再试一次。", error);
+    state.audio = null;
+  }
 }
 /** 程序生成混响脉冲响应：指数衰减的低通噪声 + 20 ms 预延迟，听起来像小音乐厅。 */
 function reverbImpulse(audio, seconds = REVERB.seconds, decay = REVERB.decay) {
@@ -2218,18 +2348,31 @@ function registerVoice(sources, nodes) {
 /** 衰减到接近静音用的极小值；exponentialRamp 的目标不能是 0。 */
 const SILENCE = 0.0001;
 
-/** 钢琴：泛音加法 + 亮度包络 + 击弦噪声 + 两段衰减。 */
+/** 建一条并联支路：把信号按 level 混到 destination，方便多条微失谐的弦/声部叠在一起。 */
+function mixInto(destination, level) {
+  const gain = state.audio.createGain();
+  gain.gain.value = level;
+  gain.connect(destination);
+  return gain;
+}
+
+/** 钢琴：两条微失谐的「弦」+ 亮度包络 + 击弦噪声 + 两段衰减。 */
 function playPianoTone(midi, startAt, duration, peak, destination) {
   const audio = state.audio;
   const human = humanize(peak);
-  const at = Math.max(audio.currentTime, startAt + human.offset);
+  const at = Math.max(audio.currentTime + 0.001, startAt + human.offset);
   const frequency = midiFrequency(midi);
-  const oscillator = audio.createOscillator();
-  oscillator.setPeriodicWave(waveTable("piano", PIANO_HARMONICS));
-  oscillator.frequency.setValueAtTime(frequency, at);
-  oscillator.detune.setValueAtTime(human.detune, at);
-  // 亮度包络：起音瞬间泛音全开（金属敲击感），随后收暗成温暖余音。
-  // 力度越大、音越高，起音越亮——这是钢琴手感最容易被耳朵辨认的特征。
+  const held = Math.max(0.05, duration);
+  const damper = pianoDamperSeconds(midi);
+  const shape = pianoDecayShape(human.peak);
+  const target = destination || masterChain();
+  // 三个时间点严格递增：短音符（十六分/三十二分）也不会出现「斜坡时间倒挂」——
+  // 那会让 gain 瞬间跳变，听起来就是「啪」的一声杂音（这次用户报的噼啪声之一）。
+  const tAttack = at + 0.006;
+  const tDecay = at + Math.min(0.09, Math.max(0.012, held * 0.6));
+  const tRelease = at + held;
+  const tEnd = tRelease + damper;
+
   const filter = audio.createBiquadFilter();
   filter.type = "lowpass";
   filter.Q.value = 0.6;
@@ -2237,100 +2380,203 @@ function playPianoTone(midi, startAt, duration, peak, destination) {
   filter.frequency.setValueAtTime(Math.min(audio.sampleRate * 0.45, bright), at);
   filter.frequency.exponentialRampToValueAtTime(
     Math.max(220, mellow),
-    at + Math.max(0.18, Math.min(0.9, duration * 0.9)),
+    at + Math.max(0.18, Math.min(0.9, held * 0.9)),
   );
-  const gain = audio.createGain();
-  const held = Math.max(0.06, duration);
-  // 两段衰减：前 90 ms 掉到 45%（击弦后的能量释放），之后缓慢衰减到 20%（弦的自然余音）。
-  const shape = pianoDecayShape(human.peak);
-  gain.gain.setValueAtTime(SILENCE, at);
-  gain.gain.exponentialRampToValueAtTime(human.peak, at + shape[0].at);
-  gain.gain.exponentialRampToValueAtTime(shape[1].level, at + shape[1].at);
-  gain.gain.exponentialRampToValueAtTime(shape[2].level, at + held);
-  // 松键制音：低音弦长、制音慢，高音很快停。
-  const damper = pianoDamperSeconds(midi);
-  gain.gain.exponentialRampToValueAtTime(SILENCE, at + held + damper);
-  oscillator.connect(filter).connect(gain).connect(destination || masterChain());
-  oscillator.start(at);
-  oscillator.stop(at + held + damper + 0.02);
-  const sources = [oscillator];
-  const nodes = [oscillator, filter, gain];
-  // 击弦声：极短的一段带通噪声，补上"木头+毡槌"的触感（音量很轻，只做点缀）。
-  const hammer = audio.createBufferSource();
-  hammer.buffer = noiseSampleBuffer(audio);
-  const hammerBand = audio.createBiquadFilter();
-  hammerBand.type = "bandpass";
-  hammerBand.frequency.value = Math.min(4200, Math.max(600, frequency * 5));
-  hammerBand.Q.value = 1.1;
-  const hammerGain = audio.createGain();
-  hammerGain.gain.setValueAtTime(SILENCE, at);
-  hammerGain.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, human.peak * 0.05), at + 0.002);
-  hammerGain.gain.exponentialRampToValueAtTime(SILENCE, at + 0.035);
-  hammer.connect(hammerBand).connect(hammerGain).connect(destination || masterChain());
-  hammer.start(at);
-  hammer.stop(at + 0.05);
-  sources.push(hammer);
-  nodes.push(hammer, hammerBand, hammerGain);
+  filter.connect(target);
+
+  const envelope = audio.createGain();
+  envelope.gain.setValueAtTime(SILENCE, at);
+  envelope.gain.exponentialRampToValueAtTime(human.peak, tAttack);
+  envelope.gain.exponentialRampToValueAtTime(shape[1].level, tDecay);
+  envelope.gain.exponentialRampToValueAtTime(shape[2].level, tRelease);
+  envelope.gain.exponentialRampToValueAtTime(SILENCE, tEnd);
+  envelope.connect(filter);
+
+  const wave = waveTable("piano", PIANO_HARMONICS);
+  const sources = [];
+  const nodes = [filter, envelope];
+  // 真实钢琴同一个音有 2–3 根弦，调律后仍有 1–3 音分偏差：两条微失谐的弦叠加，
+  // 会产生缓慢起伏的「拍音」，这是钢琴听起来厚实、不像电子琴的关键。
+  for (const [level, cents] of PIANO_STRINGS) {
+    const oscillator = audio.createOscillator();
+    oscillator.setPeriodicWave(wave);
+    oscillator.frequency.setValueAtTime(frequency, at);
+    oscillator.detune.setValueAtTime(human.detune + cents, at);
+    if (level >= 0.99) {
+      oscillator.connect(envelope);
+    } else {
+      const branch = mixInto(envelope, level);
+      oscillator.connect(branch);
+      nodes.push(branch);
+    }
+    oscillator.start(at);
+    oscillator.stop(tEnd + 0.02);
+    sources.push(oscillator);
+    nodes.push(oscillator);
+  }
+
+  // 击弦声：极短的一段带通噪声，补上「木头+毡槌」的触感。
+  // 只给不是特别短的音加——十六分音符以下加了这个反而像噪声。
+  if (held >= 0.1) {
+    const hammer = audio.createBufferSource();
+    hammer.buffer = noiseSampleBuffer(audio);
+    const hammerBand = audio.createBiquadFilter();
+    hammerBand.type = "bandpass";
+    hammerBand.frequency.value = Math.min(4200, Math.max(600, frequency * 5));
+    hammerBand.Q.value = 1.1;
+    const hammerGain = audio.createGain();
+    hammerGain.gain.setValueAtTime(SILENCE, at);
+    hammerGain.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, human.peak * 0.05), at + 0.002);
+    hammerGain.gain.exponentialRampToValueAtTime(SILENCE, at + 0.035);
+    hammer.connect(hammerBand).connect(hammerGain).connect(target);
+    hammer.start(at);
+    hammer.stop(at + 0.05);
+    sources.push(hammer);
+    nodes.push(hammer, hammerBand, hammerGain);
+  }
   registerVoice(sources, nodes);
 }
 
-/** 合唱人声：声带锯齿波 + 共振峰（元音）+ 颤音 + 气口噪声。 */
+/** 合唱人声：两条微失谐的声带波 + 三段共振峰（元音）+ 全局颤音 + 气口噪声。 */
 function playChoirTone(midi, startAt, duration, peak, destination, vowel) {
   const audio = state.audio;
   const human = humanize(peak);
-  const at = Math.max(audio.currentTime, startAt + human.offset);
+  const at = Math.max(audio.currentTime + 0.001, startAt + human.offset);
   const frequency = midiFrequency(midi);
-  const oscillator = audio.createOscillator();
-  // 锯齿波能量按 1/n 递减，接近声带振动频谱，再交给共振峰去塑形。
-  oscillator.type = "sawtooth";
-  oscillator.frequency.setValueAtTime(frequency, at);
-  oscillator.detune.setValueAtTime(human.detune, at);
-  vibratoDepth().connect(oscillator.detune);
-  let tail = oscillator;
-  const nodes = [oscillator];
-  // 三段共振峰串起来（峰值滤波）：F1/F2 决定唱的是哪个元音，F3 提供人声的"亮"。
+  const held = Math.max(0.05, duration);
+  const target = destination || masterChain();
+  const sources = [];
+  const nodes = [];
+
+  // 三段共振峰串起来（峰值滤波）：F1/F2 决定唱的是哪个元音，F3 提供人声的「亮」。
+  let head = null;
+  let previous = null;
   for (const [hz, strength, bandwidth] of VOWELS[vowel] || VOWELS.a) {
     const formant = audio.createBiquadFilter();
     formant.type = "peaking";
     formant.frequency.value = Math.min(audio.sampleRate * 0.45, hz);
     formant.Q.value = Math.max(0.6, hz / bandwidth);
     formant.gain.value = 10 * strength;
-    tail = tail.connect(formant);
+    if (previous) previous.connect(formant);
+    previous = formant;
+    if (!head) head = formant;
     nodes.push(formant);
   }
-  const gain = audio.createGain();
-  const held = Math.max(0.08, duration);
-  // 人声起音比钢琴慢（约 70 ms），所以连唱时不会有"哒哒"的点击感；长音保持平稳。
-  gain.gain.setValueAtTime(SILENCE, at);
-  gain.gain.exponentialRampToValueAtTime(
+
+  const envelope = audio.createGain();
+  // 人声起音比钢琴慢，但开头 12 ms 内要有一个"轻但立刻听得见"的起声，
+  // 否则短音符会显得含糊（原来从 -80 dB 指数上升，前 50 ms 几乎没声音）。
+  envelope.gain.setValueAtTime(SILENCE, at);
+  envelope.gain.exponentialRampToValueAtTime(
     Math.max(SILENCE * 2, human.peak * CHOIR_ENVELOPE.onset), at + CHOIR_ENVELOPE.onsetTime);
-  gain.gain.exponentialRampToValueAtTime(human.peak, at + CHOIR_ENVELOPE.attack);
-  gain.gain.exponentialRampToValueAtTime(
+  envelope.gain.exponentialRampToValueAtTime(human.peak, at + CHOIR_ENVELOPE.attack);
+  envelope.gain.exponentialRampToValueAtTime(
     Math.max(SILENCE * 2, human.peak * CHOIR_ENVELOPE.sustain),
     at + Math.min(CHOIR_ENVELOPE.decay, held * 0.8),
   );
-  gain.gain.setValueAtTime(Math.max(SILENCE * 2, human.peak * CHOIR_ENVELOPE.hold), at + held);
-  gain.gain.exponentialRampToValueAtTime(SILENCE, at + held + CHOIR_ENVELOPE.release);
-  tail.connect(gain).connect(destination || masterChain());
-  oscillator.start(at);
-  oscillator.stop(at + held + CHOIR_ENVELOPE.release + 0.04);
-  const sources = [oscillator];
-  // 气口噪声：换气声，几乎听不见但让声音"有人味"。
-  const breath = audio.createBufferSource();
-  breath.buffer = noiseSampleBuffer(audio);
-  const breathFilter = audio.createBiquadFilter();
-  breathFilter.type = "bandpass";
-  breathFilter.frequency.value = Math.min(6000, Math.max(1200, frequency * 3));
-  breathFilter.Q.value = 0.9;
-  const breathGain = audio.createGain();
-  breathGain.gain.setValueAtTime(SILENCE, at);
-  breathGain.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, human.peak * 0.03), at + 0.03);
-  breathGain.gain.exponentialRampToValueAtTime(SILENCE, at + 0.16);
-  breath.connect(breathFilter).connect(breathGain).connect(destination || masterChain());
-  breath.start(at);
-  breath.stop(at + 0.2);
-  sources.push(breath);
-  nodes.push(breath, breathFilter, breathGain, gain);
+  envelope.gain.setValueAtTime(Math.max(SILENCE * 2, human.peak * CHOIR_ENVELOPE.hold), at + held);
+  envelope.gain.exponentialRampToValueAtTime(SILENCE, at + held + CHOIR_ENVELOPE.release);
+  previous.connect(envelope);
+  envelope.connect(target);
+  nodes.push(envelope);
+
+  const vibrato = vibratoDepth();
+  // 两条微失谐的声带波叠出「一群人」而不是「一个人」。
+  for (const [level, cents] of [[1, -6], [0.7, 7]]) {
+    const oscillator = audio.createOscillator();
+    oscillator.type = "sawtooth";
+    oscillator.frequency.setValueAtTime(frequency, at);
+    oscillator.detune.setValueAtTime(human.detune + cents, at);
+    vibrato.connect(oscillator.detune);
+    if (level >= 0.99) {
+      oscillator.connect(head);
+    } else {
+      const branch = mixInto(head, level);
+      oscillator.connect(branch);
+      nodes.push(branch);
+    }
+    oscillator.start(at);
+    oscillator.stop(at + held + CHOIR_ENVELOPE.release + 0.05);
+    sources.push(oscillator);
+    nodes.push(oscillator);
+  }
+
+  // 气口噪声：换气声，几乎听不见但让声音「有人味」。短音符不加。
+  if (held >= 0.12) {
+    const breath = audio.createBufferSource();
+    breath.buffer = noiseSampleBuffer(audio);
+    const breathFilter = audio.createBiquadFilter();
+    breathFilter.type = "bandpass";
+    breathFilter.frequency.value = Math.min(6000, Math.max(1200, frequency * 3));
+    breathFilter.Q.value = 0.9;
+    const breathGain = audio.createGain();
+    breathGain.gain.setValueAtTime(SILENCE, at);
+    breathGain.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, human.peak * 0.03), at + 0.03);
+    breathGain.gain.exponentialRampToValueAtTime(SILENCE, at + 0.16);
+    breath.connect(breathFilter).connect(breathGain).connect(target);
+    breath.start(at);
+    breath.stop(at + 0.2);
+    sources.push(breath);
+    nodes.push(breath, breathFilter, breathGain);
+  }
+  registerVoice(sources, nodes);
+}
+
+/** 弦乐（小提琴/中提琴合奏）：三条微失谐的锯齿波 + 低通 + 慢起弓。 */
+function playStringsTone(midi, startAt, duration, peak, destination) {
+  const audio = state.audio;
+  const human = humanize(peak);
+  const at = Math.max(audio.currentTime + 0.001, startAt + human.offset);
+  const frequency = midiFrequency(midi);
+  const held = Math.max(0.06, duration);
+  const target = destination || masterChain();
+  const sources = [];
+  const nodes = [];
+
+  const filter = audio.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.Q.value = 0.4;
+  filter.frequency.setValueAtTime(Math.min(9000, frequency * 9 + 1000), at);
+  filter.frequency.exponentialRampToValueAtTime(
+    Math.max(700, frequency * 4.5 + 300),
+    at + Math.max(0.25, Math.min(1.2, held * 0.6)),
+  );
+
+  const envelope = audio.createGain();
+  // 弓弦的起音：先快速到 35%（弓毛刚抓住弦），再慢慢推到峰值，长音保持 72% 后松弓。
+  const tOnset = at + 0.012;
+  const tAttack = at + Math.min(STRINGS_ENVELOPE.attack, held * 0.5);
+  const tSwell = at + Math.min(STRINGS_ENVELOPE.attack + STRINGS_ENVELOPE.swell, held * 0.8);
+  const tRelease = at + held;
+  envelope.gain.setValueAtTime(SILENCE, at);
+  envelope.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, human.peak * 0.35), tOnset);
+  envelope.gain.exponentialRampToValueAtTime(human.peak, tAttack);
+  envelope.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, human.peak * STRINGS_ENVELOPE.sustain), tSwell);
+  envelope.gain.setValueAtTime(Math.max(SILENCE * 2, human.peak * STRINGS_ENVELOPE.hold), tRelease);
+  envelope.gain.exponentialRampToValueAtTime(SILENCE, tRelease + STRINGS_ENVELOPE.release);
+  filter.connect(envelope);
+  envelope.connect(target);
+  nodes.push(filter, envelope);
+
+  const vibrato = vibratoDepth();
+  for (const [level, cents] of STRINGS_DETUNE) {
+    const oscillator = audio.createOscillator();
+    oscillator.type = "sawtooth";
+    oscillator.frequency.setValueAtTime(frequency, at);
+    oscillator.detune.setValueAtTime(human.detune + cents, at);
+    vibrato.connect(oscillator.detune);
+    if (level >= 0.99) {
+      oscillator.connect(filter);
+    } else {
+      const branch = mixInto(filter, level);
+      oscillator.connect(branch);
+      nodes.push(branch);
+    }
+    oscillator.start(at);
+    oscillator.stop(tRelease + STRINGS_ENVELOPE.release + 0.05);
+    sources.push(oscillator);
+    nodes.push(oscillator);
+  }
   registerVoice(sources, nodes);
 }
 
@@ -2338,7 +2584,9 @@ function playChoirTone(midi, startAt, duration, peak, destination, vowel) {
 function playOrganTone(midi, startAt, duration, peak, destination) {
   const audio = state.audio;
   const human = humanize(peak);
-  const at = Math.max(audio.currentTime, startAt + human.offset);
+  const at = Math.max(audio.currentTime + 0.001, startAt + human.offset);
+  const held = Math.max(0.1, duration);
+  const target = destination || masterChain();
   const oscillator = audio.createOscillator();
   oscillator.setPeriodicWave(waveTable("organ", ORGAN_HARMONICS));
   oscillator.frequency.setValueAtTime(midiFrequency(midi), at);
@@ -2347,53 +2595,64 @@ function playOrganTone(midi, startAt, duration, peak, destination) {
   filter.type = "lowpass";
   filter.frequency.value = 5200;
   const gain = audio.createGain();
-  const held = Math.max(0.1, duration);
   gain.gain.setValueAtTime(SILENCE, at);
   gain.gain.exponentialRampToValueAtTime(
     Math.max(SILENCE * 2, human.peak * ORGAN_ENVELOPE.onset), at + ORGAN_ENVELOPE.onsetTime);
-  gain.gain.exponentialRampToValueAtTime(human.peak * 0.8, at + ORGAN_ENVELOPE.attack);
-  gain.gain.exponentialRampToValueAtTime(human.peak, at + Math.min(ORGAN_ENVELOPE.swell, held));
+  gain.gain.exponentialRampToValueAtTime(human.peak * 0.8, at + Math.min(ORGAN_ENVELOPE.attack, held * 0.5));
+  gain.gain.exponentialRampToValueAtTime(human.peak, at + Math.min(ORGAN_ENVELOPE.swell, held * 0.8));
   gain.gain.setValueAtTime(human.peak, at + held);
   gain.gain.exponentialRampToValueAtTime(SILENCE, at + held + ORGAN_ENVELOPE.release);
-  oscillator.connect(filter).connect(gain).connect(destination || masterChain());
+  oscillator.connect(filter).connect(gain).connect(target);
   oscillator.start(at);
-  oscillator.stop(at + held + ORGAN_ENVELOPE.release + 0.03);
+  oscillator.stop(at + held + ORGAN_ENVELOPE.release + 0.04);
   registerVoice([oscillator], [oscillator, filter, gain]);
 }
 
-/** 电子琴（原音色）：柔和三角波，适合只听音高、也最省资源。 */
+/** 电子琴（原音色）：柔和三角波，最省资源，适合只听音高。 */
 function playSoftTone(midi, startAt, duration, peak, destination) {
   const audio = state.audio;
-  const at = Math.max(audio.currentTime, startAt);
+  const at = Math.max(audio.currentTime + 0.001, startAt);
+  const held = Math.max(0.06, duration);
+  const target = destination || masterChain();
   const oscillator = audio.createOscillator();
   oscillator.type = "triangle";
   oscillator.frequency.setValueAtTime(midiFrequency(midi), at);
   const gain = audio.createGain();
-  const held = Math.max(0.06, duration);
   gain.gain.setValueAtTime(SILENCE, at);
   gain.gain.exponentialRampToValueAtTime(peak, at + 0.016);
-  gain.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, peak * 0.34), at + Math.min(0.18, held * 0.42));
+  gain.gain.exponentialRampToValueAtTime(Math.max(SILENCE * 2, peak * 0.34), at + Math.min(0.18, held * 0.42) + 0.016);
   gain.gain.setValueAtTime(Math.max(SILENCE * 2, peak * 0.3), at + held);
   gain.gain.exponentialRampToValueAtTime(SILENCE, at + held + 0.06);
-  oscillator.connect(gain).connect(destination || masterChain());
+  oscillator.connect(gain).connect(target);
   oscillator.start(at);
-  oscillator.stop(at + held + 0.08);
+  oscillator.stop(at + held + 0.09);
   registerVoice([oscillator], [oscillator, gain]);
 }
 
-/** 按当前音色把一个音符交给对应合成器；合成失败时退回电子琴，保证总有声音。 */
+/** 某个声部该用哪种音色：声部单独选过就用它自己的，否则跟随全局音色。 */
+function timbreForPart(partKey) {
+  if (partKey) {
+    const chosen = state.partTimbres.get(String(partKey));
+    if (chosen && TIMBRE_LABELS[chosen]) return chosen;
+  }
+  return TIMBRE_LABELS[state.timbre] ? state.timbre : "piano";
+}
+
+/** 按声部音色把一个音符交给对应合成器；合成失败时退回电子琴，保证总有声音。 */
 function playTone(midi, startAt, duration, peak = 0.16, destination = null, partKey = "") {
   if (!state.audio || !Number.isFinite(midi)) return;
+  const chosen = timbreForPart(partKey);
   // 响度配平：锯齿波人声比钢琴响约 2 倍，不配平的话切换音色会突然变响。
-  const balanced = peak * (TIMBRE_GAIN[state.timbre] || 1);
+  const balanced = peak * (TIMBRE_GAIN[chosen] || 1);
   try {
-    if (state.timbre === "choir") {
-      // 不同声部唱不同元音，合在一起更像"一群人"而不是"一个人叠了几遍"。
+    if (chosen === "choir") {
+      // 不同声部唱不同元音，合在一起更像「一群人」而不是「一个人叠了几遍」。
       playChoirTone(midi, startAt, duration, balanced, destination, vowelForPart(partKey));
       return;
     }
-    if (state.timbre === "organ") { playOrganTone(midi, startAt, duration, balanced, destination); return; }
-    if (state.timbre === "soft") { playSoftTone(midi, startAt, duration, balanced, destination); return; }
+    if (chosen === "strings") { playStringsTone(midi, startAt, duration, balanced, destination); return; }
+    if (chosen === "organ") { playOrganTone(midi, startAt, duration, balanced, destination); return; }
+    if (chosen === "soft") { playSoftTone(midi, startAt, duration, balanced, destination); return; }
     playPianoTone(midi, startAt, duration, balanced, destination);
   } catch (error) {
     console.info("这个音合成失败，已退回电子琴音色。", error);
@@ -2470,27 +2729,53 @@ async function playMelody() {
   }
   const events = [...eventMap.values()].sort((a, b) => a.startBeat - b.startBeat);
   const timeline = buildPlaybackTimeline(offset);
-  const start = state.audio.currentTime + 0.06;
+  const headStart = state.audio.currentTime + SCHEDULER.headStartSeconds;
   state.isPlaying = true;
   updatePlaybackControls();
-  for (const event of events) {
-    for (const note of event.notes) {
-      const onset = Math.max(0, (Number(note.startBeat) || 0) - offset);
-      const seconds = Math.max(0.05, timeline.secondsAtBeat(onset + beatsForNote(note)) - timeline.secondsAtBeat(onset));
-      const at = start + timeline.secondsAtBeat(onset);
-      // 力度记号（P1-3）：该处起生效的力度决定音量峰值。
-      // 发音长度取名义时值的 0.99：留 8%（原来）× 的长度会在连奏段落里听成「莫名的停顿」。
-      playTone(note.midi, at, seconds * 0.99, gainForDynamics(timeline.dynamicsAtBeat(onset)),
-        partBus(voiceIdentity(note)), voiceIdentity(note));
+
+  // ===== 滚动窗口调度（性能关键，别改回"一次性全建"）=====
+  // 整曲一次把上千个音符的音频节点全建出来，实测（44 小节 / 1408 音符）主线程卡 820 ms，
+  // 并且上千个"还没开始响"的振荡器仍会被音频线程逐个处理，弱机器直接爆音（噼里啪啦）。
+  // 改成只提前 SCHEDULER.aheadSeconds 秒建节点、每 SCHEDULER.tickMs 毫秒补一次后，
+  // 任意时刻音频图里只有几十个音，主线程每轮只花几毫秒（实测 1408 音符的图里只有 48 个源）。
+  let cursor = 0;
+  const scheduleWindow = () => {
+    if (!state.isPlaying || !state.audio) return;
+    const horizon = state.audio.currentTime + SCHEDULER.aheadSeconds;
+    while (cursor < events.length) {
+      const event = events[cursor];
+      const at = headStart + timeline.secondsAtBeat(event.startBeat);
+      if (at > horizon) break;
+      cursor += 1;
+      for (const note of event.notes) {
+        const onset = Math.max(0, (Number(note.startBeat) || 0) - offset);
+        const seconds = Math.max(0.05, timeline.secondsAtBeat(onset + beatsForNote(note)) - timeline.secondsAtBeat(onset));
+        // 力度记号（P1-3）：该处起生效的力度决定音量峰值。
+        // 发音长度取名义时值的 0.99：留 8%（原来）× 的长度会在连奏段落里听成「莫名的停顿」。
+        playTone(note.midi, at, seconds * 0.99, gainForDynamics(timeline.dynamicsAtBeat(onset)),
+          partBus(voiceIdentity(note)), voiceIdentity(note));
+      }
+      // 高亮定时器也顺手在这一轮里建，避免"一开始就建 1400 个 setTimeout"再卡一下主线程。
+      state.timers.push(setTimeout(() => highlightEvent(event.notes.map((note) => note.id)),
+        Math.max(0, (at - state.audio.currentTime) * 1000)));
     }
-    state.timers.push(setTimeout(() => highlightEvent(event.notes.map((note) => note.id)), timeline.secondsAtBeat(event.startBeat) * 1000));
+    if (cursor >= events.length && state.scheduleTimer) {
+      clearInterval(state.scheduleTimer);
+      state.scheduleTimer = null;
+    }
+  };
+  scheduleWindow();
+  if (cursor < events.length) {
+    state.scheduleTimer = setInterval(scheduleWindow, SCHEDULER.tickMs);
   }
+
   state.timers.push(setTimeout(() => {
     state.isPlaying = false;
+    if (state.scheduleTimer) { clearInterval(state.scheduleTimer); state.scheduleTimer = null; }
     highlightEvent(null);
     updatePlaybackControls();
     if (state.loop && getPlaybackNotes().length) playMelody().catch((error) => console.error(error));
-  }, timeline.secondsAtBeat(finishBeat) * 1000 + 120));
+  }, (headStart + timeline.secondsAtBeat(finishBeat) - state.audio.currentTime) * 1000 + 160));
 }
 function highlightEvent(noteIds) {
   const activeIds = noteIds === null ? null : new Set(noteIds);
@@ -2501,6 +2786,7 @@ function highlightEvent(noteIds) {
 function stopPlayback() {
   for (const timer of state.timers) clearTimeout(timer);
   state.timers = [];
+  if (state.scheduleTimer) { clearInterval(state.scheduleTimer); state.scheduleTimer = null; }
   for (const source of state.sources) {
     try { source.stop(); } catch { /* The note may have just ended. */ }
   }
@@ -2619,7 +2905,7 @@ if (els.timbreSelect) {
   const savedTimbre = loadSettings().timbre;
   if (TIMBRE_LABELS[savedTimbre]) state.timbre = savedTimbre;
   els.timbreSelect.value = state.timbre;
-  if (els.timbreHint) els.timbreHint.textContent = TIMBRE_LABELS[state.timbre] + "音色";
+  if (els.timbreHint) els.timbreHint.textContent = "各声部可单独选";
   els.timbreSelect.addEventListener("change", () => setTimbre(els.timbreSelect.value));
 }
 document.addEventListener("keydown", (event) => {
@@ -2631,7 +2917,7 @@ document.addEventListener("keydown", (event) => {
 // 自动化测试用的调试钩子：只有地址里带 ?debug=1 时才挂到 window 上，正常使用完全不受影响。
 // （浏览器里 app.js 是 ES module，模块内的 state 外部拿不到，测试需要它来检查音频引擎。）
 if (new URLSearchParams(window.location.search).has("debug")) {
-  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency };
+  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody, stopPlayback, prepareAudio };
 }
 renderNotes();
 refreshEngineStatus();

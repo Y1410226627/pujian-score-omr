@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  TIMBRE_LABELS, TIMBRE_ORDER, PIANO_HARMONICS, ORGAN_HARMONICS, VOWELS, VOWEL_ORDER,
-  VIBRATO, REVERB, COMPRESSOR, HUMANIZE, CHOIR_ENVELOPE, ORGAN_ENVELOPE,
+  TIMBRE_LABELS, TIMBRE_ORDER, TIMBRE_GAIN, PIANO_HARMONICS, PIANO_STRINGS, STRINGS_DETUNE,
+  ORGAN_HARMONICS, VOWELS, VOWEL_ORDER, VIBRATO, REVERB, COMPRESSOR, HUMANIZE,
+  CHOIR_ENVELOPE, ORGAN_ENVELOPE, STRINGS_ENVELOPE, SCHEDULER,
   vowelForPart, pianoDamperSeconds, pianoBrightness, pianoDecayShape, harmonicSeries,
 } from "../timbre.js";
 
@@ -11,11 +12,46 @@ import {
 // 泛音必须递减、共振峰必须 F1<F2<F3、低音制音必须比高音慢……
 // 真正的发声（Oscillator/BiquadFilter）由端到端脚本验证，见 tests/e2e-audio.mjs。
 
-test("音色名单：四种音色都有中文名，顺序稳定", () => {
-  assert.deepEqual(TIMBRE_ORDER, ["piano", "choir", "organ", "soft"]);
-  for (const name of TIMBRE_ORDER) assert.equal(typeof TIMBRE_LABELS[name], "string");
+test("音色名单：五种音色都有中文名，顺序稳定，且都有响度配平", () => {
+  assert.deepEqual(TIMBRE_ORDER, ["piano", "strings", "choir", "organ", "soft"]);
+  for (const name of TIMBRE_ORDER) {
+    assert.equal(typeof TIMBRE_LABELS[name], "string");
+    assert.ok(TIMBRE_GAIN[name] > 0, name + " 缺少响度配平系数");
+  }
   assert.equal(TIMBRE_LABELS.piano, "钢琴");
+  assert.equal(TIMBRE_LABELS.strings, "弦乐");
   assert.equal(TIMBRE_LABELS.choir, "合唱人声");
+});
+
+test("钢琴/弦乐的微失谐：主弦不失谐、副弦在 1–15 音分内（产生拍音才像真的）", () => {
+  assert.ok(PIANO_STRINGS.length >= 2, "钢琴至少要两根弦才听得出拍音");
+  assert.equal(PIANO_STRINGS[0][1], 0, "第一根弦应当是主弦（不失谐）");
+  assert.equal(PIANO_STRINGS[0][0], 1, "主弦相对音量应为 1");
+  for (const [level, cents] of PIANO_STRINGS.slice(1)) {
+    assert.ok(level > 0 && level < 1, "副弦音量必须小于主弦");
+    assert.ok(Math.abs(cents) > 0.5 && Math.abs(cents) <= 15, "副弦失谐应在 0.5–15 音分");
+  }
+  assert.ok(STRINGS_DETUNE.length >= 2, "弦乐合奏至少要两把琴");
+  for (const [level, cents] of STRINGS_DETUNE) {
+    assert.ok(level > 0 && level <= 1);
+    assert.ok(Math.abs(cents) <= 20);
+  }
+});
+
+test("弦乐包络：弓弦起音比钢琴慢、比人声快，长音保持后松弓", () => {
+  assert.ok(STRINGS_ENVELOPE.attack > 0.01 && STRINGS_ENVELOPE.attack < CHOIR_ENVELOPE.attack,
+    "弦乐起音应慢于钢琴、快于人声");
+  assert.ok(STRINGS_ENVELOPE.swell > 0, "弦乐要有渐强");
+  assert.ok(STRINGS_ENVELOPE.hold > 0 && STRINGS_ENVELOPE.hold < 1, "长音保持电平在 0–1");
+  assert.ok(STRINGS_ENVELOPE.release >= 0.1, "松弓要留有余音");
+});
+
+test("播放调度窗口：提前量要够覆盖网络/主线程抖动，间隔要小于提前量", () => {
+  assert.ok(SCHEDULER.aheadSeconds >= 1 && SCHEDULER.aheadSeconds <= 4,
+    "提前 1–4 秒是 Web Audio 调度的常用安全区");
+  assert.ok(SCHEDULER.tickMs > 0 && SCHEDULER.tickMs < SCHEDULER.aheadSeconds * 1000 / 2,
+    "调度间隔必须明显小于提前量，否则会来不及补窗口");
+  assert.ok(SCHEDULER.headStartSeconds >= 0.1, "第一声要有足够起步时间");
 });
 
 test("钢琴泛音表：单调递减、基音最响、高次泛音被压掉", () => {

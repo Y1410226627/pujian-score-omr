@@ -151,9 +151,14 @@ def omr_worker_count(page_count):
     if page_count < 3:
         return 1
     try:
-        desired = int(os.environ.get("PUJIAN_OMR_WORKERS", "2"))
+        desired = int(os.environ.get("PUJIAN_OMR_WORKERS", "0"))
     except ValueError:
-        desired = 2
+        desired = 0
+    if desired <= 0:
+        # 没指定就按 CPU 自适应：12 核以上开 3 个（实测 10 页：2 进程 25.0 秒、4 进程 22.8 秒，
+        # 再往上收益很小，而每个 JVM 要占 1 GB 上下内存，所以留一档余量）。
+        cores = os.cpu_count() or 4
+        desired = 3 if cores >= 12 else (2 if cores >= 6 else 1)
     desired = min(4, max(1, desired))
     return min(desired, max(1, (page_count + 2) // 3))
 

@@ -12,9 +12,11 @@
 //   附近加强，听起来就是「啊」；换成 450 / 800 / 2830 就是「哦」。
 
 /** 音色名（界面下拉选项用的显示文字）。 */
-export const TIMBRE_LABELS = { piano: "钢琴", choir: "合唱人声", organ: "管风琴", soft: "电子琴" };
+export const TIMBRE_LABELS = {
+  piano: "钢琴", strings: "弦乐", choir: "合唱人声", organ: "管风琴", soft: "电子琴",
+};
 /** 界面下拉的显示顺序。 */
-export const TIMBRE_ORDER = ["piano", "choir", "organ", "soft"];
+export const TIMBRE_ORDER = ["piano", "strings", "choir", "organ", "soft"];
 
 /**
  * 钢琴泛音强度：第 n 次泛音约 1/n^1.35 递减，第 7 次以上再压到 0.7。
@@ -25,6 +27,19 @@ export const TIMBRE_ORDER = ["piano", "choir", "organ", "soft"];
 export const PIANO_HARMONICS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(
   (n) => (1 / (n ** 1.35)) * (n >= 7 ? 0.7 : 1),
 );
+
+/**
+ * 钢琴同音弦的微失谐：真实钢琴一个音有 2–3 根弦，调律后仍有 1–3 音分偏差，
+ * 两根弦叠加会产生缓慢的「拍音」（beating），这是钢琴听起来「厚」的关键。
+ * [相对音量, 失谐音分]；第一个是主弦（不失谐）。
+ */
+export const PIANO_STRINGS = [[1, 0], [0.55, 1.9]];
+
+/**
+ * 弦乐（小提琴/中提琴合奏）的失谐：合奏里每个演奏者都不会完全齐，
+ * 两把琴差 4–8 音分时最像「一群人拉弦」。
+ */
+export const STRINGS_DETUNE = [[1, -5], [0.8, 5], [0.5, 11]];
 
 /** 管风琴：基音 + 八度 + 十二度（八度+五度）混合音栓，越高的音栓越弱。 */
 export const ORGAN_HARMONICS = [1, 0.5, 0.34, 0.22, 0.14, 0.1, 0.07];
@@ -86,6 +101,8 @@ export function pianoDecayShape(peak) {
 export const CHOIR_ENVELOPE = { onset: 0.3, onsetTime: 0.012, attack: 0.07, decay: 0.32, sustain: 0.86, hold: 0.8, release: 0.16 };
 /** 管风琴起音/释放（秒）：管风琴靠气箱推动，起音比钢琴还慢一点。 */
 export const ORGAN_ENVELOPE = { onset: 0.35, onsetTime: 0.015, attack: 0.06, swell: 0.25, release: 0.12 };
+/** 弦乐的起音/释放（秒）：比钢琴慢、比人声快，典型的弓弦起奏。 */
+export const STRINGS_ENVELOPE = { attack: 0.05, swell: 0.14, sustain: 0.82, hold: 0.72, release: 0.2 };
 /** 颤音：5.1 Hz、12 音分（约 0.12 个半音），接近人声自然颤音。 */
 export const VIBRATO = { rate: 5.1, cents: 12 };
 /**
@@ -94,9 +111,9 @@ export const VIBRATO = { rate: 5.1, cents: 12 };
  * 用户一切换音色就会被"轰"一下。这些系数用端到端脚本实测的 RMS 定出来，
  * 目标是切换音色时听感响度基本不变。
  */
-export const TIMBRE_GAIN = { piano: 1, choir: 0.5, organ: 0.44, soft: 1.15 };
+export const TIMBRE_GAIN = { piano: 1, strings: 0.55, choir: 0.5, organ: 0.44, soft: 1.15 };
 /** 混响：1.9 秒余音、指数衰减 2.8、20 ms 预延迟——接近小音乐厅。 */
-export const REVERB = { seconds: 1.9, decay: 2.8, preDelay: 0.02, wet: 0.2, tone: 5200 };
+export const REVERB = { seconds: 1.9, decay: 2.8, preDelay: 0.02, wet: 0.17, tone: 5200 };
 /** 主链压限（多声部叠加不削波）。 */
 export const COMPRESSOR = { threshold: -12, knee: 22, ratio: 2.6, attack: 0.005, release: 0.24 };
 
@@ -105,6 +122,16 @@ export const COMPRESSOR = { threshold: -12, knee: 22, ratio: 2.6, attack: 0.005,
  * offset=时点抖动（秒）、peak=力度抖动比例、detune=音高抖动（音分）。
  */
 export const HUMANIZE = { offset: 0.014, peak: 0.2, detune: 9 };
+
+/**
+ * 播放调度窗口（秒）与调度间隔（毫秒）。
+ *
+ * 为什么要有这个：整曲一次把上千个音符的音频节点全建出来，实测（44 小节 / 1408 音符）
+ * 主线程要卡 **820 毫秒**，而且上千个「还没开始响」的振荡器仍会被音频线程每个周期遍历，
+ * 弱机器上直接爆音（噼里啪啦）。改成「只提前 2 秒建节点、每 200 ms 补一次」后，
+ * 任意时刻音频图里只有几十个音，主线程每轮只花几毫秒。
+ */
+export const SCHEDULER = { aheadSeconds: 2.0, tickMs: 200, headStartSeconds: 0.18 };
 
 /** 生成一个「第 n 次泛音按 1/n^exponent 递减」的泛音表，供需要定制的音色使用。 */
 export function harmonicSeries(count, exponent = 1.35) {
