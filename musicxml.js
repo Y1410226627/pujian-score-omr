@@ -293,7 +293,8 @@ export function parseMusicXmlText(source, options = {}) {
   for (const track of partTracks) {
     for (const note of track.notes) {
       const { measureIndex, startInMeasure, ...rest } = note;
-      notes.push({ ...rest, startBeat: (globalBaseBeats[measureIndex] || 0) + startInMeasure });
+      // startInMeasure 留着：后续「节奏量化」（把散乱的时值吸附到拍号网格）要用它。
+      notes.push({ ...rest, startInMeasure, startBeat: (globalBaseBeats[measureIndex] || 0) + startInMeasure });
     }
   }
 
@@ -312,6 +313,9 @@ export function parseMusicXmlText(source, options = {}) {
   if (descendantsNamed(root, "lyric").some(hasContent)) warnings.add("歌词保留在原 MusicXML 文件中，但当前音色不能演唱歌词。");
   if (descendantsNamed(root, "articulations").some(hasContent) || descendantsNamed(root, "ornaments").some(hasContent)) warnings.add("奏法和装饰记号保留在源文件中，当前试听不会模拟这些效果。");
   const tempo = uniqueTempoMarks.find((mark) => mark.beat <= 0.00001)?.bpm || 84;
+  // tempoDetected：速度是不是**从谱面读到的**（而不是兜底的 84）。
+  // 扫描谱要靠 OCR 才能读出「♩ = 66」这类文字；没读到时界面要如实提醒用户手动填 BPM。
+  const tempoDetected = uniqueTempoMarks.length > 0;
   const mergedNotes = mergeTiedNotes(notes.sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi));
   let eventId = -1, previousBeat = Number.NaN;
   for (const [index, note] of mergedNotes.entries()) {
@@ -329,7 +333,7 @@ export function parseMusicXmlText(source, options = {}) {
   const timeSummary = timeSignatures.size === 1 ? [...timeSignatures][0] : timeSignatures.size ? "有多种拍号" : "拍号未标明";
   const keySummary = keySignatures.size === 1 ? [...keySignatures][0] : keySignatures.size ? "有多种调性" : "调号未标明";
   return {
-    title, notes: mergedNotes, tempo, measureCount, partNames: musicParts.map((part) => partNames.get(part.getAttribute("id")) || part.getAttribute("id") || "声部"),
+    title, notes: mergedNotes, tempo, tempoDetected, measureCount, partNames: musicParts.map((part) => partNames.get(part.getAttribute("id")) || part.getAttribute("id") || "声部"),
     // totalBeats：本页总时长（拍），供跨页合并时把后一页整体平移。
     totalBeats: runningBeat,
     // tempoMarks（中途速度变化）/ dynamicsMarks（力度）供播放调度按拍取用。

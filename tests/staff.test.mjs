@@ -10,6 +10,7 @@ import {
   transposeNotes,
   mergeSystemScores,
   mergePageScores,
+  quantizeScoreRhythm,
   pageLengthBeats,
   medianOf,
   diatonicIndex,
@@ -273,4 +274,34 @@ test("pageLengthBeats 优先用 totalBeats，缺省时用最后一个音符的�
   assert.equal(pageLengthBeats({ totalBeats: 12, notes: [] }), 12);
   assert.equal(pageLengthBeats({ notes: [{ startBeat: 0, durationBeats: 4 }, { startBeat: 4, durationBeats: 2 }] }), 6);
   assert.equal(pageLengthBeats(null), 0);
+});
+// —— 2026-10-19：扫描谱「节奏量化」（把散乱的时值吸附到拍号网格，修复"听起来散"）——
+test("节奏量化：起拍吸附网格、时值补到下一个音、同音重复去重、弱起小节不被拉长", () => {
+  const scoreInfo = {
+    timeSummary: "4/4",
+    notes: [
+      // 弱起小节（measure 0）：只有一个音，不能因为「补齐 4 拍」就把它拉长/挪动
+      { partId: "P1", measure: "0", midi: 60, voice: "1", startBeat: 0, startInMeasure: 0, durationBeats: 0.75 },
+      // 第 1 小节：两个同音高的重复音（引擎把一个字读成两个），应只保留一个
+      { partId: "P1", measure: "1", midi: 62, voice: "1", startBeat: 4 + 1.375, startInMeasure: 1.375, durationBeats: 0.375 },
+      { partId: "P1", measure: "1", midi: 62, voice: "1", startBeat: 4 + 1.375, startInMeasure: 1.375, durationBeats: 0.5 },
+      // 起拍 2.6 应吸附到 2.5；时值 1.4 应补到小节末（到下一个起拍/末尾的间隔）
+      { partId: "P1", measure: "1", midi: 64, voice: "1", startBeat: 4 + 2.6, startInMeasure: 2.6, durationBeats: 1.4 },
+    ],
+  };
+  const result = quantizeScoreRhythm(scoreInfo);
+  assert.equal(result.notes.length, 3, "重复音应去重（4 个音变 3 个）");
+  const pickup = result.notes.find((note) => note.midi === 60);
+  assert.equal(pickup.startBeat, 0, "弱起音不能被挪走");
+  assert.ok(pickup.durationBeats <= 1, "弱起音不能被强行拉满 4 拍");
+  const repeated = result.notes.filter((note) => note.midi === 62);
+  assert.equal(repeated.length, 1, "同小节同起拍同音高只保留一个");
+  assert.equal(repeated[0].startBeat, 5.5, "1.375 拍应吸附到 1.5 拍（第 2 小节的 5.5）");
+  assert.equal(repeated[0].durationBeats, 0.5, "原时值 0.5 拍保留（不硬拉长到下一拍，留出休止）");
+  const last = result.notes.find((note) => note.midi === 64);
+  assert.equal(last.startBeat, 6.5, "2.6 拍应吸附到 2.5 拍");
+  assert.equal(last.durationBeats, 1.5, "最后一个音补到小节末（2.5 → 4）");
+  for (const note of result.notes) {
+    assert.ok(Math.abs(note.startBeat * 4 - Math.round(note.startBeat * 4)) < 1e-6, "起拍应在 1/4 拍网格上");
+  }
 });

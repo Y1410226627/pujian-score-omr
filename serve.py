@@ -116,6 +116,22 @@ def find_audiveris():
     return shutil.which("Audiveris")
 
 
+OCR_TESSDATA_DIR = PROJECT_DIR / ".tools" / "audiveris" / "tessdata"
+
+
+def audiveris_ocr_languages():
+    """Audiveris 的 OCR 语言包（*.traineddata）装了哪些。
+
+    为什么要 OCR：Audiveris 的 TEXTS 步骤用 Tesseract 读谱面文字；
+    **谱面左上角的「♩ = 66」这类速度标记也是文字**，没有 OCR 就读不出来，
+    识别结果只能退回默认 84 BPM（用户反馈「演奏怎么这么快」的根因）。装了 eng 语言包后，
+    Audiveris 会把速度标记还原成 MusicXML 的 <metronome>/<sound tempo>，我们就能自动填 BPM。
+    """
+    if not OCR_TESSDATA_DIR.is_dir():
+        return []
+    return sorted(item.stem for item in OCR_TESSDATA_DIR.glob("*.traineddata") if item.stat().st_size > 100000)
+
+
 def find_jianpu_python():
     """简谱识别（jianpu.py）需要 opencv-python 与 Pillow，它们随 homr 装在项目 .venv 里。
 
@@ -178,6 +194,9 @@ def omr_child_env(temporary_path):
     job_temp = str(temporary_path)
     for name in ("TMP", "TEMP", "TMPDIR"):
         env[name] = job_temp
+    # 装了声学文字识别（OCR）语言包就指给它，Audiveris 才能读出谱面上的速度标记/歌词。
+    if audiveris_ocr_languages():
+        env["TESSDATA_PREFIX"] = str(OCR_TESSDATA_DIR)
     return env
 
 
@@ -261,6 +280,7 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             self.send_json(200, {
                 "homrAvailable": find_homr() is not None,
                 "audiverisAvailable": find_audiveris() is not None,
+                "audiverisOcr": audiveris_ocr_languages(),
                 "jianpuAvailable": jianpu_available(),
             })
             return

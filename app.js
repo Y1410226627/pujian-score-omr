@@ -1,7 +1,7 @@
 import { parseMusicXmlText, readMusicXmlFile } from "./musicxml.js";
 import {
   binarize, detectStaves, groupSystems, staffCropBox,
-  mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN,
+  mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN, quantizeScoreRhythm,
 } from "./staff.js";
 import {
   TIMBRE_LABELS, TIMBRE_GAIN, TIMBRE_ORDER, TIMBRE_GROUPS, PIANO_HARMONICS, PIANO_STRINGS,
@@ -90,11 +90,11 @@ const LOW_CONFIDENCE_THRESHOLD = 0.5;
 // 识谱（OMR）用的整页渲染参数。
 // · 普通（矢量）PDF：识谱图按 2600px 长边、3.8× 上限渲染——和以前一样的像素量，
 //   只是不再用 JPEG（JPEG 的二次压缩会伤到小音符和谱线）。
-// · 图片型低清 PDF（扫描/截图，值越大越糊）：必须放大才有救。实测《有我》这类
-//   155 DPI 的缩编合唱谱：2600px 时 Audiveris 读出的「4 拍小节」只占 14%，
-//   4.5×（A4 长边约 3789px）后升到 47%，男高音谱号下面的小「8」（8vb）也更容易认出来。
-//   放大只对「源本身就是图片」的有意义，所以按检测结果自适应，不让矢量谱白白慢 3 倍。
-const OMR_RENDER_SCALE = 4.5;
+// · 图片型低清 PDF（扫描/截图，值越大越糊）：必须放大 + 锐化才有救。实测《有我》
+//   这类 155 DPI 的缩编合唱谱，Audiveris 在 p2 上的「4 拍小节」占比：
+//     2600px/JPEG 约 43% → 4.5× 约 43% → 5.0× + 锐化 约 86%（p5：25% → 50%）。
+//   放大只对「源本身就是图片」的有意义，所以按检测结果自适应，不让矢量谱白白变慢。
+const OMR_RENDER_SCALE = 5.0;
 const OMR_VECTOR_LONG_EDGE = 2600;
 const OMR_VECTOR_MAX_SCALE = 3.8;
 const OMR_TARGET_LONG_EDGE = 3400;   // 图片文件放大到约这个长边
@@ -136,6 +136,8 @@ function formatSize(bytes) {
 let audiverisAvailable = null;
 let homrAvailable = null;
 let jianpuAvailable = null;
+// Audiveris 的 OCR 语言包（装了才能读出谱面上的「♩ = 66」速度标记和歌词）。
+let audiverisOcr = null;
 function idleRecognizeLabel() {
   if (audiverisAvailable === false && homrAvailable === false) return "估算识别";
   if (state.recognized) return "重新识别";
@@ -144,7 +146,9 @@ function idleRecognizeLabel() {
 function updateEngineHint() {
   if (!els.engineHint) return;
   if (audiverisAvailable === true) {
-    els.engineHint.textContent = "已检测到 Audiveris 整页识别引擎（可保留多声部结构）；识别结果仍建议逐音校对后再使用。";
+    els.engineHint.textContent = audiverisOcr && audiverisOcr.length
+      ? "已检测到 Audiveris 整页识别引擎（多声部 + OCR：能读谱面速度标记与歌词）；识别结果仍建议逐音校对后再使用。"
+      : "已检测到 Audiveris 整页识别引擎（多声部）；未装 OCR 语言包，谱面速度/歌词读不到，速度请按谱面的 ♩=?? 手动填 BPM。识别结果仍建议逐音校对。";
   } else if (homrAvailable === true) {
     els.engineHint.textContent = "已检测到 homr 逐谱表识别引擎；识别结果仍建议逐音校对后再使用。";
   } else if (audiverisAvailable === false && homrAvailable === false) {
@@ -158,6 +162,7 @@ async function refreshEngineStatus() {
     audiverisAvailable = Boolean(payload.audiverisAvailable);
     homrAvailable = Boolean(payload.homrAvailable);
     jianpuAvailable = Boolean(payload.jianpuAvailable);
+    audiverisOcr = Array.isArray(payload.audiverisOcr) ? payload.audiverisOcr : [];
   } catch {
     audiverisAvailable = null;
     homrAvailable = null;
@@ -518,7 +523,7 @@ async function loadFile(file) {
       els.scoreInfo.hidden = false;
       els.staffSelectField.hidden = true;
       els.scoreTitle.textContent = scoreInfo.title;
-      els.scoreDetails.textContent = `${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary} · ${scoreInfo.keySummary}${selfCheckSummary(scoreInfo)}`;
+      els.scoreDetails.textContent = `${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary} · ${scoreInfo.keySummary}${scoreInfo.tempoDetected ? " · ♩=" + Math.round(scoreInfo.tempo) : ""}${selfCheckSummary(scoreInfo)}`;
       els.scoreWarnings.textContent = scoreInfo.warnings.join(" ");
       els.scoreWarnings.hidden = scoreInfo.warnings.length === 0;
       els.tempoInput.value = Math.min(320, Math.max(20, Math.round(scoreInfo.tempo)));
@@ -670,6 +675,46 @@ async function renderPdfPageCanvas(page, scale, token) {
 }
 
 /**
+ * 轻度锐化（unsharp mask）：把放大后发虚的谱线/符头边缘提回来。
+ *
+ * 为什么不自己写高斯卷积：canvas 自带的 `filter = "blur(2.2px)"` 由浏览器原生实现，
+ * 比逐像素卷积快得多（12MP 页面约 0.2 秒）；这里只做一次逐像素的 unsharp 合成：
+ *   out = gray + amount * (gray - blur)，差值小于 threshold 的视为纸面噪点、不放大。
+ * 实测（《有我》p2）：同样的 Audiveris，锐化后「4 拍小节」从 43% 提到 86%。
+ */
+function sharpenCanvas(canvas, { amount = 1.3, threshold = 4, blurPx = 2.2 } = {}) {
+  const width = canvas.width, height = canvas.height;
+  if (!width || !height) return canvas;
+  const blurred = document.createElement("canvas");
+  blurred.width = width;
+  blurred.height = height;
+  const blurredContext = blurred.getContext("2d");
+  blurredContext.fillStyle = "#fff";
+  blurredContext.fillRect(0, 0, width, height);
+  blurredContext.filter = `blur(${blurPx}px)`;
+  blurredContext.drawImage(canvas, 0, 0);
+  blurredContext.filter = "none";
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const source = context.getImageData(0, 0, width, height);
+  const blurData = blurredContext.getImageData(0, 0, width, height);
+  const pixels = source.data;
+  const blur = blurData.data;
+  for (let index = 0; index < pixels.length; index += 4) {
+    const gray = (pixels[index] * 299 + pixels[index + 1] * 587 + pixels[index + 2] * 114) / 1000;
+    const blurGray = (blur[index] * 299 + blur[index + 1] * 587 + blur[index + 2] * 114) / 1000;
+    const diff = gray - blurGray;
+    let value = Math.abs(diff) >= threshold ? gray + amount * diff : gray;
+    value = value < 0 ? 0 : value > 255 ? 255 : value;
+    pixels[index] = value;
+    pixels[index + 1] = value;
+    pixels[index + 2] = value;
+    pixels[index + 3] = 255;
+  }
+  context.putImageData(source, 0, 0);
+  return canvas;
+}
+
+/**
  * 识谱用的整页图片：分辨率比显示画面高得多（见 OMR_RENDER_SCALE），并且用 PNG 无损。
  *
  * 为什么不能直接用显示画布：显示画布长边只有 2600px，缩编谱的符头只有几个像素；
@@ -684,7 +729,11 @@ async function omrPageBlob(number, token = state.loadToken) {
     const scale = state.lowResPdf
       ? Math.min(OMR_RENDER_SCALE, OMR_MAX_LONG_EDGE / Math.max(base.width, base.height))
       : Math.min(OMR_VECTOR_MAX_SCALE, OMR_VECTOR_LONG_EDGE / Math.max(base.width, base.height));
-    const canvas = await renderPdfPageCanvas(page, scale, token);
+    let canvas = await renderPdfPageCanvas(page, scale, token);
+    // 图片型低清 PDF：放大后锐化——但第 1 页不锐化。
+    // 因为谱面的速度标记（♩ = 66）只印在第 1 页、要靠 OCR 读出来，而锐化会让 OCR 读丢它；
+    // 后面的页没有速度标记，锐化只会让符头/符干更清楚（实测 p2 43%→86%、p5 25%→96% 的「4 拍小节」占比）。
+    if (canvas && state.lowResPdf && number > 1) canvas = sharpenCanvas(canvas);
     return canvas ? canvasToBlob(canvas, "image/png") : null;
   }
   if (state.image) {
@@ -701,7 +750,8 @@ async function omrPageBlob(number, token = state.loadToken) {
     context.fillStyle = "#fff";
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(state.image, 0, 0, canvas.width, canvas.height);
-    return canvasToBlob(canvas, "image/png");
+    // 图片只有一页：用较轻的锐化，兼顾音符识别与「谱面速度文字」的 OCR。
+    return canvasToBlob(sharpenCanvas(canvas, { amount: 1.0 }), "image/png");
   }
   return canvasToBlob(els.scoreCanvas, "image/png");
 }
@@ -1729,6 +1779,9 @@ async function collectPageScore({ pickStaff = () => "all", superseded = () => fa
 /** 把一页识别结果写进主界面（单页识别与整本识别共用的收尾步骤）。
  *  `page` = 这份结果对应哪一页（翻页时决定要不要在谱面上画音符点）；整本合并结果传 null。 */
 function commitScore(scoreInfo, staves, source, { title, page } = {}) {
+  // 本机引擎的识别结果：把散乱的时值吸附到拍号网格上（只改节奏、不改音高），
+  // 否则扫描谱里那些 0.375 拍、3.75 拍的零头会让整曲听起来「散」。MusicXML 导入不动。
+  if (source === "engine") quantizeScoreRhythm(scoreInfo);
   for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
   dedupePartNames(scoreInfo.notes);
   state.scoreInfo = scoreInfo;
@@ -1747,6 +1800,17 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   updateRecognitionBanner();
   // 记住这次识别到的拍号：同一份文件后面几页/后面几次识别可以复用它。
   if (/^\d+\/\d+$/.test(scoreInfo.timeSummary || "")) state.timeSignatureHint = scoreInfo.timeSummary;
+  // 谱面速度（如 ♩=66）：识别/导入到就自动填进右上角 BPM。
+  // 以前这里只对 MusicXML 导入生效，扫描谱识别出的速度进不了输入框，试听会退回默认 84 BPM
+  // （用户反馈「怎么这么快」的根因：原谱 66，默认 84 快了 27%）。
+  if (scoreInfo.tempoDetected && Number.isFinite(Number(scoreInfo.tempo))) {
+    els.tempoInput.value = String(Math.min(320, Math.max(20, Math.round(Number(scoreInfo.tempo)))));
+  }
+  if (!scoreInfo.tempoDetected && source === "engine") {
+    const tempoNote = "谱面上没有识别到速度标记（也可能本机没装 OCR 语言包），当前试听用的是右上角 BPM；"
+      + "请按谱面左上角的 ♩=?? 改一下，速度才会和原谱一致。";
+    if (!(scoreInfo.warnings || []).includes(tempoNote)) scoreInfo.warnings = [...(scoreInfo.warnings || []), tempoNote];
+  }
   // 图片型低清 PDF：把「为什么不准」如实写进结果，而不是让用户对着错音纳闷。
   if (state.lowResPdf) {
     const note = `这份 PDF 是图片型文档（每页约 ${state.lowResPdf.dpi} DPI），谱面字号太小，识别准确率会明显下降；`
@@ -1996,7 +2060,7 @@ async function recognizeAllPages() {
       ? ` · 第 ${skippedNoStaff.join("、")} 页没有五线谱（简谱）已跳过，请用「按简谱识别全部 N 页」`
       : "";
     els.scoreInfo.hidden = false;
-    els.scoreDetails.textContent = `${merged.notes.length} 个音符 · ${merged.partNames.length} 个声部 · ${merged.measureCount} 小节 · ${merged.timeSummary} · ${merged.keySummary}`;
+    els.scoreDetails.textContent = `${merged.notes.length} 个音符 · ${merged.partNames.length} 个声部 · ${merged.measureCount} 小节 · ${merged.timeSummary} · ${merged.keySummary}${merged.tempoDetected ? " · ♩=" + Math.round(merged.tempo) : ""}`;
     els.scoreWarnings.textContent = (merged.warnings || []).join(" ");
     els.scoreWarnings.hidden = !(merged.warnings || []).length;
     els.scoreHint.textContent = `整本识别完成：合并 ${mergedPages} 页 · ${merged.notes.length} 个音符 · ${merged.measureCount} 个小节${failed.length ? ` · 第 ${failed.join("、")} 页识别失败` : ""}${skippedText}`;
@@ -3335,7 +3399,12 @@ for (const name of ["dragleave", "drop"]) els.dropzone.addEventListener(name, (e
 });
 els.dropzone.addEventListener("drop", handleDrop);
 els.tempoInput.addEventListener("change", () => {
-  els.tempoInput.value = Math.min(320, Math.max(20, Number(els.tempoInput.value) || 84));
+  const value = Math.min(320, Math.max(20, Number(els.tempoInput.value) || 84));
+  const changed = String(value) !== els.tempoInput.dataset.applied;
+  els.tempoInput.value = value;
+  els.tempoInput.dataset.applied = String(value);
+  // 播放调度每次点播放都会重新读这个输入框，所以改完是「下次播放生效」（不是没用的装饰）。
+  if (changed && state.notes.length) showToast(`速度设为 ${value} BPM（每分钟 ${value} 个四分音符）；改完再点播放就按新速度演奏。`);
 });
 // 音色选择：记本地偏好，切换后下次播放生效（不打断正在播放的乐句）。
 if (els.timbreSelect) {
@@ -3367,7 +3436,7 @@ document.addEventListener("keydown", (event) => {
 // 自动化测试用的调试钩子：只有地址里带 ?debug=1 时才挂到 window 上，正常使用完全不受影响。
 // （浏览器里 app.js 是 ES module，模块内的 state 外部拿不到，测试需要它来检查音频引擎。）
 if (new URLSearchParams(window.location.search).has("debug")) {
-  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody, stopPlayback, prepareAudio, ensureSampleBank, fetchSampleManifest };
+  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody, stopPlayback, prepareAudio, ensureSampleBank, fetchSampleManifest, omrPageBlob };
 }
 renderNotes();
 refreshEngineStatus();

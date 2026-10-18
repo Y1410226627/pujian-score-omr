@@ -348,6 +348,7 @@ export function mergeSystemScores(systems, results) {
     warnings: [...warnings],
     partNames,
     tempo: tempo || 84,
+    tempoDetected: Boolean(tempo),
     measureCount,
     // 本页总时长（拍），供跨页合并时把后一页整体平移。
     totalBeats: offsetBeats,
@@ -356,6 +357,82 @@ export function mergeSystemScores(systems, results) {
   };
 }
 
+/**
+ * 把本机引擎识别结果的节奏「吸附」到拍号网格上（只改节奏，不改音高/声部）。
+ *
+ * 为什么需要：扫描谱识别出的时值常带零头（某小节 3.75 拍、某个音 0.375 拍），
+ * 直接播放会「散」；而且扫描谱的拍号只印在第一页，后面各页的时值是引擎猜的。
+ * 这里按拍号（如 4/4 = 每小节 4 拍）：
+ *   · 起拍吸附到最近的网格（该声部最小时值 < 半拍就按 1/4 拍，否则按 1/2 拍）；
+ *   · 时值改为「到下一个音（或小节末）的间隔」，且保留原时值的取整结果（短音不会被拉成长音）；
+ *   · 同声部、同小节、同起拍、同音高的重复音去重。
+ * 弱起小节不受影响：每个音都按它自己的「小节内相对位置」吸附，不假设第 1 小节是整小节。
+ */
+export function quantizeScoreRhythm(scoreInfo) {
+  const matched = /^(\d+)\/(\d+)$/.exec(String((scoreInfo && scoreInfo.timeSummary) || ""));
+  const measureBeats = matched ? (Number(matched[1]) * 4) / Number(matched[2]) : 4;
+  if (!(measureBeats > 0) || !scoreInfo || !Array.isArray(scoreInfo.notes)) return scoreInfo;
+
+  const groups = new Map();   // partId -> measureKey -> notes
+  for (const note of scoreInfo.notes) {
+    const measureKey = String(note.measure == null || note.measure === "" ? "?" : note.measure);
+    if (!groups.has(note.partId)) groups.set(note.partId, new Map());
+    const byMeasure = groups.get(note.partId);
+    if (!byMeasure.has(measureKey)) byMeasure.set(measureKey, []);
+    byMeasure.get(measureKey).push(note);
+  }
+
+  const quantized = [];
+  for (const byMeasure of groups.values()) {
+    for (const notes of byMeasure.values()) {
+      // 该组（同声部同小节）的网格：有比八分音符更短的音就用 1/4 拍，否则 1/2 拍。
+      let smallest = Infinity;
+      for (const note of notes) {
+        const value = Number(note.durationBeats);
+        if (Number.isFinite(value) && value > 0) smallest = Math.min(smallest, value);
+      }
+      const grid = smallest < 0.49 ? 0.25 : 0.5;
+      const onsets = new Map();   // 吸附后的起拍 -> 该起拍上的音
+      for (const note of notes) {
+        const relative = relativeOffset(note, measureBeats);
+        const snapped = Math.min(measureBeats - grid, Math.round(relative / grid) * grid);
+        if (!onsets.has(snapped)) onsets.set(snapped, []);
+        onsets.get(snapped).push(note);
+      }
+      const ordered = [...onsets.keys()].sort((a, b) => a - b);
+      ordered.forEach((onset, index) => {
+        const nextOnset = index + 1 < ordered.length ? ordered[index + 1] : measureBeats;
+        const gap = Math.max(grid, nextOnset - onset);
+        const seen = new Set();
+        for (const note of onsets.get(onset)) {
+          const key = note.midi + "@" + note.voice;
+          if (seen.has(key)) continue;   // 同音高同起拍重复（引擎偶尔会把一个字读成两个音）
+          seen.add(key);
+          const original = Number(note.durationBeats);
+          const rounded = Number.isFinite(original) && original > 0
+            ? Math.max(grid, Math.round(original / grid) * grid)
+            : gap;
+          const duration = Math.min(gap, rounded);
+          note.startBeat = (Number(note.startBeat) || 0) - relativeOffset(note, measureBeats) + onset;
+          note.durationBeats = Number(duration.toFixed(4));
+          quantized.push(note);
+        }
+      });
+    }
+  }
+  // 保持最终的起拍顺序（播放/界面都按 startBeat 排）。
+  quantized.sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
+  scoreInfo.notes = quantized;
+  return scoreInfo;
+}
+
+/** 取这个音原来的「小节内相对起拍」；没有 startInMeasure 时用 startBeat 对拍号取模兜底。 */
+function relativeOffset(note, measureBeats) {
+  const raw = Number(note.startInMeasure);
+  if (Number.isFinite(raw)) return Math.max(0, Math.min(measureBeats, raw));
+  const beat = Number(note.startBeat) || 0;
+  return beat - Math.floor(beat / measureBeats) * measureBeats;
+}
 /** 一页识别结果的总时长（拍）。优先用解析出的总时长，缺省时用最后一个音符的结束拍兜底。 */
 export function pageLengthBeats(page) {
   if (!page) return 0;
@@ -435,6 +512,8 @@ export function mergePageScores(pages, skippedPages = null) {
     warnings: [...warnings],
     partNames: first && first.partNames ? [...first.partNames] : [],
     tempo: (first && first.tempo) || 84,
+    // 速度是否是从谱面读到的（合并结果沿用第 1 页的判断）。
+    tempoDetected: Boolean(first && first.tempoDetected),
     measureCount: offsetMeasures,
     totalBeats: offsetBeats,
     pageCount: pages.length,
