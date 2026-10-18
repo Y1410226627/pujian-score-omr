@@ -37,6 +37,12 @@ function noteDurationBeats(note, divisions) {
   return result;
 }
 
+/** 只接受形如 "4/4" 的单一拍号；"有多种拍号"/"拍号未标明" 之类一律返回空串。 */
+function plainTimeSignature(value) {
+  const matched = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(String(value || ""));
+  return matched ? matched[1] + "/" + matched[2] : "";
+}
+
 function measureLength(timeSignature, maxCursor, implicit) {
   if (implicit) return maxCursor;
   const [beatsText = "", beatTypeText = ""] = String(timeSignature || "").split("/");
@@ -85,7 +91,16 @@ function mergeTiedNotes(notes) {
   return merged;
 }
 
-export function parseMusicXmlText(source) {
+/**
+ * 解析 MusicXML。
+ *
+ * @param {string} source
+ * @param {{timeSignature?: string}} [options]
+ *   timeSignature：**已知拍号**（来自前面几页）。后面的页面通常不再印拍号，
+ *   Audiveris 在没有拍号时会把小节时值按谱面宽度猜（实测整小节休止被猜成 5–11 拍），
+ *   越往后错得越多。传入已知拍号后，这些页面的小节就按拍号算长度。
+ */
+export function parseMusicXmlText(source, options = {}) {
   const documentNode = new DOMParser().parseFromString(source, "application/xml");
   if (descendantsNamed(documentNode, "parsererror").length) throw new Error("MusicXML 文件格式无法读取。");
   const root = documentNode.documentElement;
@@ -103,6 +118,11 @@ export function parseMusicXmlText(source) {
   const tempoMarks = [], dynamicsMarks = [], timeSignatures = new Set(), keySignatures = new Set();
   const warnings = new Set();
   let measureCount = 0, skippedNotes = 0;
+  // 调用方传入的「已知拍号」（通常来自第 1 页）：只作为没有印拍号页面的兜底。
+  const inheritedTime = plainTimeSignature(options && options.timeSignature);
+  const inheritedOnly = Boolean(inheritedTime) && !descendantsNamed(root, "time").some(hasContent);
+  // 只有本页确实没印拍号时才把继承值写进结果（本页自己印了拍号时以谱面为准）。
+  if (inheritedOnly) timeSignatures.add(inheritedTime);
 
   // 第一遍：解析各声部的音符（记录"小节内起拍"）与该声部推算出的各小节长度。
   // 不在这里决定全局起拍，因为多声部/多谱表必须共享同一份小节长度表才能对齐。
@@ -111,9 +131,11 @@ export function parseMusicXmlText(source) {
   for (const part of musicParts) {
     const partId = part.getAttribute("id") || `part-${partNames.size + 1}`;
     const partName = partNames.get(partId) || partId;
-    let divisions = 1, currentTime = null, transpose = 0;
+    let divisions = 1, currentTime = inheritedTime || null, transpose = 0;
     let measureNumber = 0;
     const trackNotes = [], measureLengths = [];
+    // 每个小节的时间缩放（只在「本页没印拍号、时值又被猜长」的小节上小于 1）。
+    const measureScales = [];
     for (const measure of childrenNamed(part, "measure")) {
       measureNumber++;
       measureCount = Math.max(measureCount, measureNumber);
@@ -227,7 +249,28 @@ export function parseMusicXmlText(source) {
       // 弱起（anacrusis）小节：制谱软件常标 implicit="yes"，但也有不少文件不标。
       // 首小节未标 implicit 且实际内容短于标称长度时，按实际内容计，否则后面所有小节都会整体右移。
       if (!implicit && measureNumber === 1 && maxCursor > 0 && maxCursor < nominal) nominal = maxCursor;
-      measureLengths.push(Math.max(nominal, maxCursor));
+      let length = Math.max(nominal, maxCursor);
+      let scale = 1;
+      // 拍号是从前面几页「借」来的、本页并没有印：Audiveris 的时值是按谱面宽度猜的，
+      // 常把整小节休止/长音猜长。这里把超出标称拍数的小节等比缩回标称长度，
+      // 否则页与页之间的起拍会越飘越远（实测 8 页累计漂移 30+ 拍，整曲节奏就散了）。
+      if (inheritedOnly && !implicit) {
+        const nominalLength = measureLength(inheritedTime, 0, false);
+        if (nominalLength > 0 && maxCursor > nominalLength + 0.01) {
+          length = nominalLength;
+          scale = nominalLength / maxCursor;
+        }
+      }
+      measureLengths.push(length);
+      measureScales.push(scale);
+    }
+    // 把「猜长小节」里的音符位置/时值等比缩回标称长度（保持小节内的相对节奏）。
+    for (const note of trackNotes) {
+      const scale = measureScales[note.measureIndex] || 1;
+      if (scale !== 1) {
+        note.startInMeasure *= scale;
+        note.durationBeats *= scale;
+      }
     }
     partTracks.push({ partId, partName, notes: trackNotes, measureLengths });
   }

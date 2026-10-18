@@ -64,6 +64,10 @@ const state = {
   // 「全局音色」之外的逐声部音色覆盖：key = 声部标识（voiceIdentity），value = 音色名。
   // 不在这里的元素就是「跟随全局」。
   partTimbres: new Map(),
+  // 逐声部八度修正：key = 声部标识，value = ±1（个八度）。
+  // 识别引擎偶尔会把「8vb 谱号」（男高音谱号下的小 8）漏掉，导致整个声部高八度；
+  // 这里允许用户按声部单独校回，不影响其它声部。
+  partOctaves: new Map(),
   // 播放的滚动调度定时器（见 playMelody 里的说明）与软限幅曲线缓存。
   scheduleTimer: null, softClipCurve: null,
   // 采样音源：清单、已加载的样本表、正在加载的 Promise、加载顺序（用于内存上限 LRU）。
@@ -73,9 +77,28 @@ const state = {
   scorePage: null,
   // 逐谱表识别相关：谱表几何、进度、取消标志、整体移调量
   staffBoxes: null, recognizeProgress: { done: 0, total: 0 }, cancelRecognize: false, transposeOffset: 0,
+  // 图片文件的原图（显示画布会缩到 2600px；识谱要用更清晰的原图另行缩放渲染）。
+  image: null,
+  // 「图片型」低清 PDF 的检测结果：{dpi}。太低时把原因如实写进识别结果，而不是让用户对着错音猜。
+  lowResPdf: null,
+  // 上一次识别成功得到的拍号（同一份文件内复用）：后面几页通常不印拍号，
+  // 交给解析器当「已知拍号」，小节长度才不会按识别出来的内容瞎猜。
+  timeSignatureHint: "",
 };
 // 粗略估算得到的符头置信分低于此值即标为"待校对"
 const LOW_CONFIDENCE_THRESHOLD = 0.5;
+// 识谱（OMR）用的整页渲染参数。
+// · 普通（矢量）PDF：识谱图按 2600px 长边、3.8× 上限渲染——和以前一样的像素量，
+//   只是不再用 JPEG（JPEG 的二次压缩会伤到小音符和谱线）。
+// · 图片型低清 PDF（扫描/截图，值越大越糊）：必须放大才有救。实测《有我》这类
+//   155 DPI 的缩编合唱谱：2600px 时 Audiveris 读出的「4 拍小节」只占 14%，
+//   4.5×（A4 长边约 3789px）后升到 47%，男高音谱号下面的小「8」（8vb）也更容易认出来。
+//   放大只对「源本身就是图片」的有意义，所以按检测结果自适应，不让矢量谱白白慢 3 倍。
+const OMR_RENDER_SCALE = 4.5;
+const OMR_VECTOR_LONG_EDGE = 2600;
+const OMR_VECTOR_MAX_SCALE = 3.8;
+const OMR_TARGET_LONG_EDGE = 3400;   // 图片文件放大到约这个长边
+const OMR_MAX_LONG_EDGE = 4200;      // 页面再大也不超过这个长边（内存/请求体上限）
 const durations = [
   ["breve", "倍全音符", 8], ["dottedWhole", "附点全音符", 6], ["whole", "全音符", 4],
   ["doubleDottedHalf", "双附点二分音符", 3.5], ["dottedHalf", "附点二分音符", 3], ["half", "二分音符", 2],
@@ -463,6 +486,10 @@ async function loadFile(file) {
   state.objectUrl = (isPdf || isMusicXml) ? null : URL.createObjectURL(file);
   state.pageNumber = 1;
   state.pageCount = 1;
+  state.image = null;
+  state.lowResPdf = null;
+  state.timeSignatureHint = "";
+  state.partOctaves = new Map();
   clearScore();
   els.clefSelect.disabled = isMusicXml;
   els.jianpuField.hidden = true;   // 简谱设置只在图片/PDF 页面上出现，MusicXML 不需要
@@ -542,6 +569,7 @@ async function loadImage(file, token) {
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, width, height);
   ctx.drawImage(image, 0, 0, width, height);
+  state.image = image;   // 识谱时用原图重新缩放到更清晰的分辨率（见 omrPageBlob）
   els.fileInfo.textContent = "图片文件 · " + formatSize(file.size) + " · " + image.naturalWidth + " × " + image.naturalHeight;
 }
 async function loadPdf(file, token) {
@@ -554,13 +582,21 @@ async function loadPdf(file, token) {
   }
   if (token !== state.loadToken) return;
   pdfjs.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
-  const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pdfBytes = await file.arrayBuffer();
+  // 注意：pdf.js 会接管（detach）传进去的 ArrayBuffer，之后不能再读；
+  // 分辨率检测要用原始字节，所以给它一份副本。
+  const document = await pdfjs.getDocument({ data: pdfBytes.slice(0) }).promise;
   if (token !== state.loadToken) {
     try { await document.destroy(); } catch { /* 已被取代，尽力释放即可 */ }
     return;
   }
   state.pdf = document;
   state.pageCount = document.numPages;
+  // 图片型（扫描/截图）PDF：先量一下每页位图的有效分辨率，太低就提前提醒用户。
+  state.lowResPdf = detectLowResolutionPdf(pdfBytes, state.pageCount);
+  if (state.lowResPdf) {
+    showToast(`这份 PDF 是「图片型」文档：每页只是一张约 ${state.lowResPdf.dpi} DPI 的位图，谱面字号很小，识别准确率会明显下降。想更准请换 300 DPI 以上的清晰扫描件或矢量 PDF。`);
+  }
   els.pageControls.hidden = state.pageCount <= 1;
   await renderPdfPage(1, token);
   if (token !== state.loadToken) return;
@@ -568,6 +604,108 @@ async function loadPdf(file, token) {
   // 一次操作把整本谱识别并跨页拼成一份连续乐谱（否则单页识别只会替换当前结果）。
   updateBatchButtons();
 }
+/**
+ * 判断这份 PDF 是不是「图片型」文档、以及每页位图的有效分辨率。
+ *
+ * 为什么要在意：有些 PDF 每页只是一张位图（扫描件、截图、手机导出的谱）。pdf.js 渲染时
+ * 只能把它放大——放大不会长出细节，而 OMR 引擎（Audiveris）恰恰对字号/线宽很敏感。
+ * 实测一份 154 DPI 的合唱缩编谱：读出的「4 拍小节」只占 14%；正常扫描件（300 DPI）不会这样。
+ * 明确告诉用户「是源文件分辨率不够」，比让用户以为识别功能坏了更有用。
+ *
+ * 做法：直接看 PDF 字节里的图片对象（/Subtype /Image 的 /Width、/Height）和页面尺寸
+ * （/MediaBox），估算 DPI。对象流压缩过的 PDF 找不到这些关键字就返回 null（宁可不说，也不误报）。
+ */
+function detectLowResolutionPdf(bytes, pageCount) {
+  try {
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const text = new TextDecoder("latin1").decode(data);
+    const images = [];
+    const marker = /\/Subtype\s*\/Image/g;
+    let matched;
+    while ((matched = marker.exec(text)) && images.length < 64) {
+      const slice = text.slice(matched.index, matched.index + 800);
+      const width = /\/Width\s+(\d+)/.exec(slice);
+      const height = /\/Height\s+(\d+)/.exec(slice);
+      if (width && height) images.push({ width: Number(width[1]), height: Number(height[1]) });
+    }
+    // 不是「每页一张图」的版式（例如矢量谱 + 个别装饰图），不在这一条里判断。
+    if (images.length < pageCount) return null;
+    if (/\/Font/.test(text)) return null;
+    const mediaBox = /\/MediaBox\s*\[\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\]/.exec(text);
+    if (!mediaBox) return null;
+    const pageWidthPt = Math.abs(Number(mediaBox[3]) - Number(mediaBox[1]));
+    const pageHeightPt = Math.abs(Number(mediaBox[4]) - Number(mediaBox[2]));
+    if (!(pageWidthPt > 0 && pageHeightPt > 0)) return null;
+    const dpis = images
+      .map((image) => Math.max(image.width / (pageWidthPt / 72), image.height / (pageHeightPt / 72)))
+      .sort((a, b) => a - b);
+    const dpi = dpis[Math.floor(dpis.length / 2)];
+    return dpi > 0 && dpi < 220 ? { dpi: Math.round(dpi), pages: images.length } : null;
+  } catch (error) {
+    console.info("PDF 分辨率检测跳过：", error);
+    return null;
+  }
+}
+
+/**
+ * 把 PDF 的某一页渲染到离屏画布（显示与识谱共用）。
+ * @param {object} page pdf.js 的 page 对象
+ * @param {number} scale 渲染倍率
+ */
+async function renderPdfPageCanvas(page, scale, token) {
+  const viewport = page.getViewport({ scale });
+  const width = Math.ceil(viewport.width), height = Math.ceil(viewport.height);
+  const offscreen = document.createElement("canvas");
+  offscreen.width = width;
+  offscreen.height = height;
+  const context = offscreen.getContext("2d", { willReadFrequently: true });
+  // 高分辨率整页渲染时开启高质量平滑：位图型 PDF 放大后边缘更干净，利于二值化。
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, width, height);
+  await page.render({ canvasContext: context, viewport }).promise;
+  if (token !== state.loadToken) return null;
+  return offscreen;
+}
+
+/**
+ * 识谱用的整页图片：分辨率比显示画面高得多（见 OMR_RENDER_SCALE），并且用 PNG 无损。
+ *
+ * 为什么不能直接用显示画布：显示画布长边只有 2600px，缩编谱的符头只有几个像素；
+ * 而且显示画布导出的是 JPEG（0.92），小音符上的压缩噪点会让引擎认错符头/符干。
+ * 实测这份文件（《有我》）：JPEG 2600px 时第 1 页连拍号都读丢；PNG + 4.5× 后拍号、8vb 谱号都能读对。
+ */
+async function omrPageBlob(number, token = state.loadToken) {
+  if (state.pdf) {
+    const page = await state.pdf.getPage(Math.max(1, Math.min(number, state.pageCount)));
+    const base = page.getViewport({ scale: 1 });
+    // 图片型低清 PDF：放大渲染（见常量处的实测）；正常 PDF：保持原像素量、只换 PNG。
+    const scale = state.lowResPdf
+      ? Math.min(OMR_RENDER_SCALE, OMR_MAX_LONG_EDGE / Math.max(base.width, base.height))
+      : Math.min(OMR_VECTOR_MAX_SCALE, OMR_VECTOR_LONG_EDGE / Math.max(base.width, base.height));
+    const canvas = await renderPdfPageCanvas(page, scale, token);
+    return canvas ? canvasToBlob(canvas, "image/png") : null;
+  }
+  if (state.image) {
+    // 图片文件：用原图重新缩放（放大到约 OMR_TARGET_LONG_EDGE；特别大的图缩到上限），
+    // 而不是用缩到 2600px 的显示画布。
+    const longEdge = Math.max(state.image.naturalWidth, state.image.naturalHeight);
+    const scale = Math.min(2.5, OMR_TARGET_LONG_EDGE / Math.max(1, longEdge));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(state.image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(state.image.naturalHeight * scale));
+    const context = canvas.getContext("2d");
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(state.image, 0, 0, canvas.width, canvas.height);
+    return canvasToBlob(canvas, "image/png");
+  }
+  return canvasToBlob(els.scoreCanvas, "image/png");
+}
+
 async function renderPdfPage(number, token = state.loadToken) {
   if (!state.pdf) return;
   const targetPage = Math.max(1, Math.min(number, state.pageCount));
@@ -575,19 +713,14 @@ async function renderPdfPage(number, token = state.loadToken) {
   const renderToken = ++state.renderToken;
   const page = await state.pdf.getPage(targetPage);
   const base = page.getViewport({ scale: 1 });
-  // Audiveris 需要较高分辨率才能可靠检测谱线（实测 scale ≥3.0 才稳定），
-  // 这里按 A4 折算成约 2600px 长边，显示时由 CSS 缩放，不影响观感。
-  const viewport = page.getViewport({ scale: Math.min(3.8, 2600 / Math.max(base.width, base.height)) });
+  // 显示只需要 2600px 长边（CSS 再缩放）；识谱另走 omrPageBlob 的高分辨率渲染。
+  const scale = Math.min(3.8, 2600 / Math.max(base.width, base.height));
+  const viewport = page.getViewport({ scale });
   if (renderToken !== state.renderToken || token !== state.loadToken) return;
   const width = Math.ceil(viewport.width), height = Math.ceil(viewport.height);
   // 先渲染到离屏画布，再把最终结果贴到可见画布：这样连点翻页时不会对同一画布并发调用 render()。
-  const offscreen = document.createElement("canvas");
-  offscreen.width = width;
-  offscreen.height = height;
-  const offscreenContext = offscreen.getContext("2d", { willReadFrequently: true });
-  offscreenContext.fillStyle = "#fff";
-  offscreenContext.fillRect(0, 0, width, height);
-  await page.render({ canvasContext: offscreenContext, viewport }).promise;
+  const offscreen = await renderPdfPageCanvas(page, scale, token);
+  if (!offscreen) return;
   if (renderToken !== state.renderToken || token !== state.loadToken) return;
   setCanvasSize(width, height);
   const ctx = els.scoreCanvas.getContext("2d", { willReadFrequently: true });
@@ -1134,6 +1267,25 @@ function updatePartControls(reset = false) {
         : `「${part.name}」跟随全局音色`;
     });
 
+    // 逐声部八度修正：识别引擎漏读男高音谱号的 8vb 时，整个声部会高八度，这里一键校回。
+    const octaveSelect = document.createElement("select");
+    octaveSelect.className = "part-octave-select";
+    octaveSelect.title = `「${part.name}」听起来整体高/低八度时用它修正（只改这个声部）`;
+    octaveSelect.setAttribute("aria-label", `${part.name} 的八度`);
+    for (const [value, label] of [["0", "原八度"], ["-1", "低八度"], ["1", "高八度"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      octaveSelect.append(option);
+    }
+    octaveSelect.value = String(partOctave(part.key));
+    octaveSelect.addEventListener("change", () => {
+      setPartOctave(part.key, Number(octaveSelect.value));
+      octaveSelect.title = partOctave(part.key) === 0
+        ? `「${part.name}」原八度`
+        : `「${part.name}」已${partOctave(part.key) > 0 ? "升" : "降"}八度`;
+    });
+
     const volume = document.createElement("input");
     volume.type = "range";
     volume.className = "part-volume";
@@ -1152,7 +1304,7 @@ function updatePartControls(reset = false) {
     count.textContent = `${part.count}音`;
     count.title = `${part.name}：${part.count} 个音`;
 
-    row.append(checkbox, select, timbreSelect, volume, count);
+    row.append(checkbox, select, timbreSelect, octaveSelect, volume, count);
     els.partList.append(row);
   }
 
@@ -1264,11 +1416,12 @@ function applyTranspose(nextSemitones) {
   showToast(`已整体移调 ${value > 0 ? "+" : ""}${value} 个半音。`);
 }
 /** 把一张图片交给本机引擎识别，返回解析后的乐谱。engine: "audiveris" 整页 / "homr" 单谱表。 */
-async function recognizeImageBlob(blob, engine = "homr", attempt = 0) {
+async function recognizeImageBlob(blob, engine = "homr", attempt = 0, timeSignature = "") {
   try {
     const response = await fetch("/api/omr/recognize?engine=" + engine, {
       method: "POST",
-      headers: { "Content-Type": "image/jpeg" },
+      // 必须和实际图片格式一致：服务端按 Content-Type 校验图片头。识谱图现在是 PNG。
+      headers: { "Content-Type": blob.type || "image/jpeg" },
       body: blob,
     });
     const payload = await response.json();
@@ -1277,14 +1430,14 @@ async function recognizeImageBlob(blob, engine = "homr", attempt = 0) {
       // 只是"任务繁忙"：稍等后重试，不要因为一次抖动就放弃整页的专业识别。
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 700 * (attempt + 1)));
-        return recognizeImageBlob(blob, engine, attempt + 1);
+        return recognizeImageBlob(blob, engine, attempt + 1, timeSignature);
       }
       return { error: payload.error || "本机识谱任务繁忙，请稍后重试。" };
     }
     // 整行没有符头（休止/声部未进入）是正常结果，不算故障。
     if (payload.empty) return { empty: true };
     if (!response.ok) return { error: payload.error || "本机 OMR 引擎没有完成识谱。", engine };
-    const scoreInfo = parseMusicXmlText(payload.musicxml);
+    const scoreInfo = parseMusicXmlText(payload.musicxml, timeSignature ? { timeSignature } : undefined);
     return { scoreInfo, engine };
   } catch (error) {
     console.info("本机 OMR 未响应，改用浏览器粗略估算。", error);
@@ -1294,14 +1447,18 @@ async function recognizeImageBlob(blob, engine = "homr", attempt = 0) {
 
 /** 整页交给 Audiveris 识别：一次调用得到完整的多声部结构，不再需要逐行裁切。 */
 async function recognizeWholePage() {
-  const blob = await canvasToBlob();
+  const blob = await omrPageBlob(state.pageNumber);
   if (!blob) return { error: "当前页面无法导出为图片。" };
-  return recognizeImageBlob(blob, "audiveris");
+  // 拍号提示：同一份文件里第 1 页识别过以后，后面几页即使没印拍号也能按拍号算小节长度。
+  return recognizeImageBlob(blob, "audiveris", 0, state.timeSignatureHint);
 }
 
-/** 把可见的谱面画布整张转成 JPEG（供整页识别使用）。 */
-function canvasToBlob() {
-  return new Promise((resolve) => els.scoreCanvas.toBlob(resolve, "image/jpeg", 0.92));
+/**
+ * 把一张画布导出成图片。
+ * 默认给简谱识别用 JPEG（体积小、够用）；五线谱识谱走 PNG 无损（见 omrPageBlob）。
+ */
+function canvasToBlob(canvas = els.scoreCanvas, type = "image/jpeg", quality = 0.92) {
+  return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
 }
 
 /** 把 Blob 读成 base64（去掉 data: 前缀），供整本批量识别接口使用。 */
@@ -1358,6 +1515,9 @@ async function recognizePagesInBatch(blobs, { superseded = () => false, onProgre
   }
   const pages = Array.isArray(payload.pages) ? payload.pages : [];
   const results = [];
+  // 逐页解析时「继承拍号」：第 1 页通常印了 `4/4`，后面几页不再印；
+  // 把第 1 页读到的拍号传给后面几页，它们的小节长度才能按拍号算（否则会越往后越飘）。
+  let contextTime = "";
   for (let index = 0; index < blobs.length; index++) {
     if (superseded()) return [];
     const page = pages[index];
@@ -1367,7 +1527,8 @@ async function recognizePagesInBatch(blobs, { superseded = () => false, onProgre
       continue;
     }
     try {
-      const scoreInfo = parseMusicXmlText(page.musicxml);
+      const scoreInfo = parseMusicXmlText(page.musicxml, contextTime ? { timeSignature: contextTime } : undefined);
+      if (scoreInfo && /^\d+\/\d+$/.test(scoreInfo.timeSummary || "")) contextTime = scoreInfo.timeSummary;
       results.push(scoreInfo && scoreInfo.notes.length ? { scoreInfo } : null);
     } catch {
       results.push(null);
@@ -1515,7 +1676,7 @@ async function collectPageScore({ pickStaff = () => "all", superseded = () => fa
     if (!engineMissing && homrAvailable !== false) {
       const blob = await cropToBlob(box);
       if (superseded()) return null;
-      const engineResult = blob ? await recognizeImageBlob(blob) : { unavailable: true };
+      const engineResult = blob ? await recognizeImageBlob(blob, "homr", 0, state.timeSignatureHint) : { unavailable: true };
       if (superseded()) return null;
       if (engineResult.unavailable) {
         engineMissing = true;
@@ -1584,6 +1745,14 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   renderNotes();
   refreshScoreOverlay();
   updateRecognitionBanner();
+  // 记住这次识别到的拍号：同一份文件后面几页/后面几次识别可以复用它。
+  if (/^\d+\/\d+$/.test(scoreInfo.timeSummary || "")) state.timeSignatureHint = scoreInfo.timeSummary;
+  // 图片型低清 PDF：把「为什么不准」如实写进结果，而不是让用户对着错音纳闷。
+  if (state.lowResPdf) {
+    const note = `这份 PDF 是图片型文档（每页约 ${state.lowResPdf.dpi} DPI），谱面字号太小，识别准确率会明显下降；`
+      + "建议换 300 DPI 以上的清晰扫描件或矢量 PDF，并逐音校对后再使用。";
+    if (!(scoreInfo.warnings || []).includes(note)) scoreInfo.warnings = [...(scoreInfo.warnings || []), note];
+  }
 }
 
 /**
@@ -1630,6 +1799,11 @@ async function recognizeScore() {
 
     if (diagnostics.wholePage) {
       commitScore(scoreInfo, staves, "engine");
+      // 详情/警告要和整本识别一样显示出来（例如「这份 PDF 是图片型文档，只有 155 DPI」）。
+      els.scoreInfo.hidden = false;
+      els.scoreDetails.textContent = `${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary} · ${scoreInfo.keySummary}${selfCheckSummary(scoreInfo)}`;
+      els.scoreWarnings.textContent = (scoreInfo.warnings || []).join(" ");
+      els.scoreWarnings.hidden = !(scoreInfo.warnings || []).length;
       els.scoreHint.textContent = `Audiveris 整页识别完成：${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节`;
       const warning = scoreInfo.warnings[0] ? ` ${scoreInfo.warnings[0]}` : "";
       showToast(`Audiveris 识别到 ${scoreInfo.notes.length} 个音符（${scoreInfo.partNames.length} 个声部），请逐音校对。${warning}`);
@@ -1730,7 +1904,7 @@ async function recognizeAllPages() {
         if (superseded()) return;
         const { binary, width, height } = readPageBinary();
         const hasStaves = detectStaves(binary, width, height).length > 0;
-        const blob = hasStaves ? await canvasToBlob() : null;
+        const blob = hasStaves ? await omrPageBlob(number, fileToken) : null;
         prepared.push({ number, blob, hasStaves });
         if (!hasStaves) noStaffPages.add(number);
       }
@@ -2118,6 +2292,35 @@ function partTimbre(key) {
  * 给某个声部单独指定音色（下次播放生效）；value 为空表示跟随全局。
  * 返回 false 表示这次选择没被接受（例如选了「真实钢琴」但采样音源还没安装）。
  */
+/** 这个声部当前的八度修正量（±几）。 */
+function partOctave(key) {
+  return state.partOctaves.get(String(key)) || 0;
+}
+
+/** 把某个声部的所有音符整体升降八度（识别结果整声部高/低八度时用；不影响其它声部）。 */
+function setPartOctave(key, octaves) {
+  const id = String(key);
+  const target = Math.max(-2, Math.min(2, Math.round(Number(octaves) || 0)));
+  const delta = target - partOctave(id);
+  if (!delta) {
+    state.partOctaves.set(id, target);
+    return;
+  }
+  stopPlayback();
+  for (const note of state.notes) {
+    if (voiceIdentity(note) !== id) continue;
+    note.midi = Math.max(0, Math.min(127, note.midi + delta * 12));
+    note.pitch = midiToPitchName(note.midi);
+  }
+  state.partOctaves.set(id, target);
+  renderNotes();
+  refreshScoreOverlay();
+  const name = partDisplayName(id, id);
+  showToast(target === 0
+    ? `「${name}」已还原到原八度。`
+    : `「${name}」已${target > 0 ? "升" : "降"} ${Math.abs(target)} 个八度（只改这个声部，可再选「原八度」还原）。`);
+}
+
 function setPartTimbre(key, value) {
   if (value && isSampledTimbre(value) && state.sampleManifest && !state.sampleManifest.banks[value]) {
     showToast("还没安装真实音源：双击项目里的「安装真实音源.bat」，装好后刷新页面再选。");

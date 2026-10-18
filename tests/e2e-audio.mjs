@@ -376,6 +376,37 @@ try {
   assert.match(String(perPart.saved), /strings/, "逐声部音色应记进本地存储");
   assert.equal(perPart.restored, "choir", "改回「跟随全局」后应回到全局音色");
 
+  // ——— 逐声部八度修正：OMR 漏读 8vb 谱号时整个声部会高八度，要能按声部校回 ———
+  const octaveShift = await page.evaluate(() => {
+    const debug = window.__pujian;
+    const select = document.querySelector(".part-octave-select");
+    if (!select) return { error: "声部面板里没有八度下拉" };
+    const key = select.closest(".part-row").dataset.partKey;
+    const partNotes = () => debug.state.notes.filter((note) => (note.partId || note.partName || "旋律") === key);
+    const before = partNotes().map((note) => note.midi);
+    select.value = "-1";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    const after = partNotes().map((note) => note.midi);
+    const afterValue = select.value;
+    select.value = "0";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    const restored = partNotes().map((note) => note.midi);
+    return {
+      key, count: before.length,
+      deltas: after.map((midi, index) => midi - before[index]),
+      afterValue,
+      restoredEqual: restored.every((midi, index) => midi === before[index]),
+      restoredValue: select.value,
+    };
+  });
+  console.log("逐声部八度修正：", JSON.stringify({ ...octaveShift, deltas: octaveShift.deltas ? [...new Set(octaveShift.deltas)] : null }));
+  assert.ok(!octaveShift.error, octaveShift.error || "");
+  assert.ok(octaveShift.count > 0, "该声部应有音符");
+  assert.ok(octaveShift.deltas.every((delta) => delta === -12), "降八度后该声部每个音都应低 12 个半音");
+  assert.equal(octaveShift.afterValue, "-1");
+  assert.equal(octaveShift.restoredEqual, true, "还原后应完全回到原音高");
+  assert.equal(octaveShift.restoredValue, "0");
+
   // ——— 音色下拉：必须按组显示，而且「女声合唱」所有音色都能选到 ———
   const menu = await page.evaluate(() => {
     const select = document.querySelector("#timbreSelect");

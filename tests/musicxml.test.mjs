@@ -171,3 +171,42 @@ test("OMR 素材的 ground truth 自洽（拍数、起拍连续、音名合法�
     assert.ok(Number.isInteger(item.octave));
   }
 });
+
+// —— 2026-10-18：图片型 PDF/多页谱的「后几页不印拍号」问题（用户反馈《有我》识别不准）——
+test("后几页没印拍号时：传入已知拍号，猜长的小节按拍号缩回，页与页起拍不再越飘越远", () => {
+  // 模拟 Audiveris 在没有拍号的页面上的输出：整小节休止的 duration 被按谱面宽度猜成 7 拍（28/4）。
+  const noTimeSignaturePage = `<score-partwise>${partList([["P1", "女高"]])}<part id="P1">
+    <measure number="1"><attributes><divisions>4</divisions></attributes>
+      <note><rest measure="yes"/><duration>28</duration><voice>1</voice></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+  </part></score-partwise>`;
+
+  const guessed = parseMusicXmlText(noTimeSignaturePage);
+  assert.equal(guessed.timeSummary, "拍号未标明", "本页确实没有印拍号");
+  assert.equal(guessed.totalBeats, 9, "没有拍号时只能按内容猜：第 1 小节被猜成 7 拍 + 第 2 小节 2 拍");
+
+  const inherited = parseMusicXmlText(noTimeSignaturePage, { timeSignature: "4/4" });
+  assert.equal(inherited.timeSummary, "4/4", "继承的拍号要算进本页结果");
+  assert.equal(inherited.measureCount, 2);
+  assert.equal(inherited.totalBeats, 8, "两小节都按 4/4 的 4 拍算，共 8 拍");
+  const c5 = inherited.notes.find((item) => item.pitch === "C5");
+  const d5 = inherited.notes.find((item) => item.pitch === "D5");
+  assert.equal(c5.startBeat, 4, "第 2 小节应从第 4 拍开始（而不是第 7 拍）");
+  assert.equal(d5.startBeat, 5);
+  assert.equal(d5.startBeat - c5.startBeat, 1, "小节内相对节奏保持不变（等比缩回）");
+});
+
+test("本页自己印了拍号时，不套用继承的拍号（中途变拍号仍按谱面算）", () => {
+  const pageWithOwnTime = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1">${measureAttributes(3, 4)}${note("C", 4, 3)}</measure>
+    <measure number="2">${note("D", 4, 3)}</measure>
+  </part></score-partwise>`;
+  const result = parseMusicXmlText(pageWithOwnTime, { timeSignature: "4/4" });
+  assert.equal(result.timeSummary, "3/4", "本页印的 3/4 优先，继承值只做兜底");
+  assert.equal(result.totalBeats, 6);
+  assert.equal(result.notes.find((item) => item.pitch === "D4").startBeat, 3);
+});
