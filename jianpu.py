@@ -560,6 +560,45 @@ def cluster(values, gap):
     return [float(np.mean(cluster)) for cluster in clusters]
 
 
+# ---------------- 识谱自检 ----------------
+
+def check_measure_lengths(measure_len, beats_per_measure, pickup=False, note_counts=None):
+    """逐小节核对总拍数（识谱自检）。
+
+    这是「准确率」的兜底：识别错误绝大多数会表现为某一小节的拍数对不上——
+    漏了一个数字、减时线看错、延长号被当成圆滑线……都会让该小节多出或少于拍号。
+    这里如实报出来，让使用者优先核对这几小节，而不是悄悄把错的地方补满。
+
+    乐理上合法的「不完整」不算错，必须放过：
+      - **弱起小节**（pickup=True 时的第 1 小节）：只含引导音，本来就短；
+      - **最后一小节不满**：可能是乐曲结束处，也可能只是这一页在这里换页；
+      - **不含任何音符的短小节**：里面只有休止/空白，补满拍号是正确做法，不是错误
+        （例如某声部还没进入的整小节休止）。只有「有音符却装不满」才是可疑的。
+
+    返回 ``{"ok": bool, "issues": [...]}``；issues 每项
+    ``{"measure": 小节号（从 1 起）, "kind": "over"/"short", "actual": 实际拍数, "expected": 拍号}``。
+    """
+    numbers = sorted(measure_len)
+    issues = []
+    for index, number in enumerate(numbers):
+        content = float(measure_len[number])
+        is_first, is_last = index == 0, index == len(numbers) - 1
+        note_count = None if note_counts is None else int(note_counts.get(number, 0))
+        if content > beats_per_measure + 0.01:
+            # 「多出拍数」无论在哪一小节都值得报：它会把后面所有小节的起拍整体推后。
+            issues.append({"measure": number + 1, "kind": "over",
+                           "actual": round(content, 3), "expected": beats_per_measure,
+                           "noteCount": note_count})
+        elif content < beats_per_measure - 0.01:
+            if is_last or (pickup and is_first):
+                continue
+            if note_count is not None and note_count == 0:
+                continue
+            issues.append({"measure": number + 1, "kind": "short",
+                           "actual": round(content, 3), "expected": beats_per_measure,
+                           "noteCount": note_count})
+    return {"ok": not issues, "issues": issues}
+
 # ---------------- 主流程 ----------------
 
 def recognize(png_path, do_midi=65, beats_per_measure=4.0):
@@ -791,24 +830,39 @@ def recognize(png_path, do_midi=65, beats_per_measure=4.0):
             warnings.append(
                 "第 1 小节按**弱起小节**处理（{0:g} 拍 + 末小节 {1:g} 拍 ≈ 一个 {2:g} 拍小节），"
                 "起拍从第 1 小节的第 0 拍开始。".format(first_len, last_len, beats_per_measure))
+    # ---- 识谱自检：逐小节核对拍数（最有效的错音定位手段）----
+    # 必须在下面「把小节补满拍号」之前做，否则短小节会被补成满小节，错误就看不出来了。
+    notes_per_measure = {}
+    for measure_notes in part_measures.values():
+        for measure_index, measure_notes_list in measure_notes.items():
+            notes_per_measure[measure_index] = notes_per_measure.get(measure_index, 0) + len(measure_notes_list)
+    self_check = check_measure_lengths(measure_len, beats_per_measure, pickup, notes_per_measure)
+    if self_check["issues"]:
+        over = [issue for issue in self_check["issues"] if issue["kind"] == "over"]
+        short = [issue for issue in self_check["issues"] if issue["kind"] == "short"]
+        def describe(issues):
+            """「第 3 小节（4.5 拍）、第 5 小节（5 拍）」这样的可读列表，最多列 6 处。"""
+            shown = "、".join("第 {} 小节（{:g} 拍）".format(issue["measure"], issue["actual"])
+                             for issue in issues[:6])
+            return shown + ("等 {} 处".format(len(issues)) if len(issues) > 6 else "")
+        if over:
+            warnings.append("{}超出拍号 {:g}/4。".format(describe(over), beats_per_measure))
+        if short:
+            warnings.append("{}少于拍号 {:g}/4。".format(describe(short), beats_per_measure))
+        # 超出/不足在像素层面最常见的两个结构性原因（都不是阈值问题，不要靠调阈值「消警告」）：
+        # ① 连音弧/延音线的平段被当成了减时线 → 某个音少算一半时值 → 总拍数变少；
+        # ② 反过来，连音弧被当成延长号「-」→ 多算拍数。
+        # 这里只如实提示「去核对哪一小节的哪一拍」，不做自动修正（自动改会把本来正确的小节带偏）。
+        warnings.append(
+            "　自检提示：以上小节的拍数与拍号对不上，通常是某个音的减时线/附点/延长号被读错"
+            "（漏读会变少、多看一条横线会变多）。请对照谱面优先核对这些小节；本工具不会自行改动时值。")
     for gmi in gmis:
-        content = measure_len[gmi]
-        if content > beats_per_measure + 0.01:
-            warnings.append("第 {} 小节内容为 {:g} 拍，超出拍号 {:g}/4。".format(gmi + 1, content, beats_per_measure))
-            # 超出拍数最常见的两个结构性原因（都不是阈值问题，不要靠调阈值「消警告」）：
-            #   ① 连音弧/延音线的平段被当成了减时线 → 某个音少算一半时值 → 总拍数反而变少；
-            #   ② 反过来，连音弧被当成延长号「-」→ 多算拍数。
-            # 这里只如实提示「去核对哪一小节的哪一拍」，不做自动修正（像素层面这两种情况
-            # 与真正的减时线/延长号形状几乎一样，自动改会把本来正确的小节带偏）。
-            warnings.append(
-                "　提示：第 {} 小节有 {:g} 拍（拍号是 {:g}），多出的部分通常是连音弧/延音线被读错，"
-                "请对照谱面核对该小节的音与减时线；本工具不会自行改动时值。".format(
-                    gmi + 1, content, beats_per_measure))
+        # 超出拍号的小节也按「至少一个完整小节」占位，避免后面所有小节的起拍被这次错误带偏。
         if pickup and gmi == gmis[0]:
             # 弱起小节只占它实际的拍数，不补满
-            measure_len[gmi] = max(content, 0.25)
+            measure_len[gmi] = max(measure_len[gmi], 0.25)
         else:
-            measure_len[gmi] = max(content, beats_per_measure)
+            measure_len[gmi] = max(measure_len[gmi], beats_per_measure)
     offsets, acc = {}, 0.0
     for gmi in gmis:
         offsets[gmi] = acc
@@ -835,7 +889,7 @@ def recognize(png_path, do_midi=65, beats_per_measure=4.0):
             "检测到同音高、首尾相接的音（{}{}）。乐理上这类可用**延音线**连成一个长音；"
             "但也可能只是同音反复或圆滑线，本工具不自动合并，请按谱面确认。".format(positions, more))
     return {"parts": parts, "measureCount": len(gmis), "beatsPerMeasure": beats_per_measure,
-            "warnings": warnings}
+            "warnings": warnings, "selfCheck": self_check}
 
 
 def find_tie_candidates(parts):
@@ -917,18 +971,38 @@ def summarize(result):
 
 def main():
     parser = argparse.ArgumentParser(description="简谱（数字谱）识别")
-    parser.add_argument("image", help="简谱页面 PNG/JPEG 路径")
+    parser.add_argument("image", nargs="+", help="简谱页面 PNG/JPEG 路径（可给多张，配合 --batch）")
     parser.add_argument("--json", dest="json_out", help="把结果写入 JSON 文件")
     parser.add_argument("--summary", action="store_true", help="打印紧凑摘要")
     parser.add_argument("--dump", action="store_true", help="打印版面结构（调试）")
+    parser.add_argument("--batch", action="store_true",
+                        help="多页模式：一次传入多张图片，输出 {\"pages\": [...]}；单页失败不影响其它页")
     parser.add_argument("--do", type=int, default=65, help="1=X 中 X 的 MIDI 音高（默认 65 = F4，即 1=F）")
     parser.add_argument("--beats", type=float, default=4.0, help="每小节拍数（默认 4）")
     args = parser.parse_args()
 
     if args.dump:
-        dump_structure(args.image)
+        dump_structure(args.image[0])
         return
-    result = recognize(args.image, do_midi=args.do, beats_per_measure=args.beats)
+    if args.batch:
+        pages = []
+        for path in args.image:
+            try:
+                pages.append(recognize(path, do_midi=args.do, beats_per_measure=args.beats))
+            except Exception as error:                            # noqa: BLE001
+                # 单页失败不中断整批：与前端「单页失败照常继续」的策略保持一致。
+                pages.append({"error": "简谱识别失败：{}".format(error)})
+        text = json.dumps({"pages": pages}, ensure_ascii=False, indent=1)
+        if args.json_out:
+            Path(args.json_out).write_text(text, encoding="utf-8")
+        print(text)
+        if pages and all("error" in page for page in pages):
+            sys.exit(1)
+        return
+    if len(args.image) > 1:
+        print("一次传入多张图片请加 --batch。", file=sys.stderr)
+        sys.exit(2)
+    result = recognize(args.image[0], do_midi=args.do, beats_per_measure=args.beats)
     text = json.dumps(result, ensure_ascii=False, indent=1)
     if args.json_out:
         Path(args.json_out).write_text(text, encoding="utf-8")

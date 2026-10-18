@@ -230,7 +230,7 @@
               <button class="play-button" id="playButton" type="button" disabled><span class="play-icon" id="playIcon" aria-hidden="true">▶</span><span id="playLabel">试听旋律</span><span class="space-hint">SPACE</span></button>
               <button class="stop-button" id="stopButton" type="button" disabled aria-label="停止播放">■</button>
             </div>
-            <div class="instrument-note"><span class="wave-icon" aria-hidden="true">〰</span><span>合成钢琴音色 · 音符可编辑</span></div>
+            <div class="instrument-note" id="instrumentNote"><span class="wave-icon" aria-hidden="true">〰</span><label class="instrument-field" for="timbreSelect"><span>音色</span><select id="timbreSelect" aria-label="播放音色"><option value="piano">钢琴</option><option value="choir">合唱人声</option><option value="organ">管风琴</option><option value="soft">电子琴</option></select></label><span id="timbreHint" class="instrument-hint">钢琴音色</span></div>
           </aside>
         </section>
 
@@ -239,7 +239,7 @@
           <div class="how-steps">
             <article><span class="how-number">01</span><div><strong>导入谱面</strong><p>支持 PDF、常见图片和 MusicXML/MXL 符号乐谱。</p></div></article>
             <article><span class="how-number">02</span><div><strong>识别并校对</strong><p>先把整页切成一行行谱表再逐行识别，避免多声部被压平成一条旋律；顶部徽标标明结果来源，置信度偏低的音符会被标出。</p></div></article>
-            <article><span class="how-number">03</span><div><strong>挑声部，听到它</strong><p>勾上要听的声部就能整曲播放，也可以只留一行单独听（例如只听女高）；不想听钢琴伴奏就把它去掉。还可以点音符序号选起点、Shift+点选终点，只播放或导出这一段，配合循环反复抠细节。</p></div></article>
+            <article><span class="how-number">03</span><div><strong>挑声部，听到它</strong><p>勾上要听的声部就能整曲播放，也可以只留一行单独听（例如只听女高）；不想听钢琴伴奏就把它去掉。播放面板还能换音色（钢琴 / 合唱人声 / 管风琴 / 电子琴），带一点音乐厅混响。还可以点音符序号选起点、Shift+点选终点，只播放或导出这一段，配合循环反复抠细节。</p></div></article>
           </div>
         </section>
       </main>

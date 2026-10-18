@@ -1,0 +1,251 @@
+{
+ "provenance": "由 jianpu.py 识别得到；除 chilele_p11_reference* 是人工逐小节核对过的基准外，其余记录的是当前管线输出（回归护栏，不是真值）。selfCheck.issues 列出的是已知需要人工核对的「拍数与拍号对不上」的小节，详见 下一步优化方向.md。",
+ "options": {
+  "do": 65,
+  "beats": 4
+ },
+ "pages": {
+  "chilele_p11_reference": {
+   "description": "《敕勒歌》第 11 页（简谱，已人工逐小节核对；3× 渲染）",
+   "notes": 119,
+   "partCounts": [
+    33,
+    24,
+    51,
+    11
+   ],
+   "measureCount": 12,
+   "beatsPerMeasure": 4.0,
+   "selfCheck": {
+    "ok": false,
+    "issues": [
+     {
+      "measure": 10,
+      "kind": "over",
+      "actual": 4.75,
+      "expected": 4.0,
+      "noteCount": 12
+     },
+     {
+      "measure": 12,
+      "kind": "over",
+      "actual": 4.5,
+      "expected": 4.0,
+      "noteCount": 19
+     }
+    ]
+   }
+  },
+  "chilele_p11_reference_2600": {
+   "description": "《敕勒歌》第 11 页（简谱，长边 2600px，与应用渲染一致）",
+   "notes": 119,
+   "partCounts": [
+    33,
+    24,
+    51,
+    11
+   ],
+   "measureCount": 12,
+   "beatsPerMeasure": 4.0,
+   "selfCheck": {
+    "ok": false,
+    "issues": [
+     {
+      "measure": 10,
+      "kind": "over",
+      "actual": 4.75,
+      "expected": 4.0,
+      "noteCount": 12
+     },
+     {
+      "measure": 12,
+      "kind": "over",
+      "actual": 4.5,
+      "expected": 4.0,
+      "noteCount": 19
+     }
+    ]
+   }
+  },
+  "congqianman_p01": {
+   "description": "《从前慢》第 1 页（长边 2600px）",
+   "notes": 111,
+   "partCounts": [
+    31,
+    22,
+    28,
+    30
+   ],
+   "measureCount": 13,
+   "beatsPerMeasure": 4.0,
+   "selfCheck": {
+    "ok": false,
+    "issues": [
+     {
+      "measure": 9,
+      "kind": "short",
+      "actual": 3.5,
+      "expected": 4.0,
+      "noteCount": 5
+     },
+     {
+      "measure": 12,
+      "kind": "over",
+      "actual": 5.0,
+      "expected": 4.0,
+      "noteCount": 18
+     }
+    ]
+   }
+  },
+  "congqianman_p02": {
+   "description": "《从前慢》第 2 页（长边 2600px）",
+   "notes": 167,
+   "partCounts": [
+    56,
+    44,
+    36,
+    31
+   ],
+   "measureCount": 12,
+   "beatsPerMeasure": 4.0,
+   "selfCheck": {
+    "ok": false,
+    "issues": [
+     {
+      "measure": 6,
+      "kind": "over",
+      "actual": 4.5,
+      "expected": 4.0,
+      "noteCount": 24
+     },
+     {
+      "measure": 7,
+      "kind": "short",
+      "actual": 3.5,
+      "expected": 4.0,
+      "noteCount": 14
+     }
+    ]
+   }
+  },
+  "congqianman_p03": {
+   "description": "《从前慢》第 3 页（长边 2600px）",
+   "notes": 217,
+   "partCounts": [
+    62,
+    54,
+    54,
+    47
+   ],
+   "measureCount": 14,
+   "beatsPerMeasure": 4.0,
+   "selfCheck": {
+    "ok": false,
+    "issues": [
+     {
+      "measure": 1,
+      "kind": "over",
+      "actual": 4.5,
+      "expected": 4.0,
+      "noteCount": 23
+     },
+     {
+      "measure": 2,
+      "kind": "over",
+      "actual": 4.5,
+      "expected": 4.0,
+      "noteCount": 23
+     },
+     {
+      "measure": 3,
+      "kind": "over",
+      "actual": 4.5,
+      "expected": 4.0,
+      "noteCount": 22
+     },
+     {
+      "measure": 5,
+      "kind": "over",
+      "actual": 4.5,
+      "expected": 4.0,
+      "noteCount": 30
+     },
+     {
+      "measure": 7,
+      "kind": "short",
+      "actual": 3.0,
+      "expected": 4.0,
+      "noteCount": 19
+     },
+     {
+      "measure": 9,
+      "kind": "short",
+      "actual": 3.0,
+      "expected": 4.0,
+      "noteCount": 4
+     },
+     {
+      "measure": 10,
+      "kind": "short",
+      "actual": 2.5,
+      "expected": 4.0,
+      "noteCount": 13
+     },
+     {
+      "measure": 11,
+      "kind": "short",
+      "actual": 1.5,
+      "expected": 4.0,
+      "noteCount": 8
+     },
+     {
+      "measure": 12,
+      "kind": "short",
+      "actual": 1.5,
+      "expected": 4.0,
+      "noteCount": 12
+     },
+     {
+      "measure": 13,
+      "kind": "short",
+      "actual": 3.0,
+      "expected": 4.0,
+      "noteCount": 8
+     }
+    ]
+   }
+  },
+  "congqianman_p04": {
+   "description": "《从前慢》第 4 页（长边 2600px）",
+   "notes": 30,
+   "partCounts": [
+    8,
+    8,
+    7,
+    7
+   ],
+   "measureCount": 5,
+   "beatsPerMeasure": 4.0,
+   "selfCheck": {
+    "ok": false,
+    "issues": [
+     {
+      "measure": 1,
+      "kind": "short",
+      "actual": 2.0,
+      "expected": 4.0,
+      "noteCount": 7
+     },
+     {
+      "measure": 2,
+      "kind": "short",
+      "actual": 3.0,
+      "expected": 4.0,
+      "noteCount": 20
+     }
+    ]
+   }
+  }
+ }
+}
