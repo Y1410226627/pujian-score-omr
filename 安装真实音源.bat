@@ -6,7 +6,7 @@ echo ============================================================
 echo   安装真实音色（采样音源：钢琴 / 弦乐细分 / 合唱人声 / 管乐 / 键盘）
 echo ============================================================
 echo.
-echo 全部安装约 85 MB，下载到项目内 .assets\soundfonts 目录（不进 git）。
+echo 全部安装约 70 MB，下载到项目内 .assets\soundfonts 目录（不进 git）。
 echo   . 钢琴：Salamander Grand Piano V3（CC BY 3.0）
 echo   . 合唱：Sonatina Symphonic Orchestra 的女声 / 男声 / 混声合唱（CC Sampling Plus 1.0）
 echo   . 弦乐细分 / 管乐 / 键盘：FluidR3_GM（CC BY 3.0）
