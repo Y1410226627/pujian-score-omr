@@ -117,7 +117,7 @@ const canRunEngine = process.platform === "win32" && existsSync(python) && exist
 for (const [key, acceptance] of Object.entries(ACCEPTANCE)) {
   const image = path.join(PAGES, acceptance.page);
   test(`简谱实跑 ${key}：${acceptance.label}`, { skip: !canRunEngine || !existsSync(image) ? "需要 .venv 与页面图" : false }, () => {
-    const stdout = execFileSync(python, [engine, image, "--json", "-"], {
+    const stdout = execFileSync(python, [engine, image], {
       cwd: ROOT,
       encoding: "utf8",
       maxBuffer: 32 * 1024 * 1024,

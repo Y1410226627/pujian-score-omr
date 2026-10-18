@@ -54,7 +54,7 @@ const state = {
   selectedParts: null, includePiano: true, partNames: new Map(), pianoKeys: new Set(),
   // 声部音量（0–1，默认 1）与播放时的「声部音量总线」：拖滑条实时改总线增益，
   // 正在播放的音符会立刻跟着变，不需要停播、也不需要重建音频图。
-  partVolumes: new Map(), partBuses: new Map(),
+  partVolumes: new Map(), partBuses: new Map(), partPanners: new Map(),
   // 播放音色（piano / strings / choir / organ / soft）与音频主链（混响+压限）的缓存。
   timbre: "piano", master: null, reverbBuffer: null, vibrato: null, noiseBuffer: null, waves: new Map(),
   // 「全局音色」之外的逐声部音色覆盖：key = 声部标识（voiceIdentity），value = 音色名。
@@ -2141,14 +2141,39 @@ function restorePartTimbres(aliveKeys) {
   }
 }
 
-/** 取（或建）某个声部的音量总线：每个声部一条 GainNode，所有该声部的音符都接进来。 */
+/**
+ * 声部的立体声位置（-1 左 … 0 中 … +1 右）。
+ *
+ * 为什么值得做：合唱团在舞台上本来就是左右铺开的，各声部全堆在正中间会显得像"一个合成器
+ * 叠了几层"。把女高/女低/男高/男低按顺序左右铺开（钢琴伴奏居中），听感立刻更像一群人。
+ */
+function panForPart(key) {
+  const parts = collectParts();
+  const self = parts.find((part) => part.key === key);
+  if (!self || self.piano) return 0;
+  const vocal = parts.filter((part) => !part.piano);
+  const position = vocal.findIndex((part) => part.key === key);
+  if (vocal.length < 2 || position < 0) return 0;
+  // 最左 -0.55、最右 +0.55，中间均匀分布；不要贴到 ±1，否则单侧耳朵会明显变闷。
+  return ((position / (vocal.length - 1)) * 1.1 - 0.55);
+}
+
+/** 取（或建）某个声部的音量总线：每个声部一条 GainNode → 立体声定位 → 主链。 */
 function partBus(key) {
   if (!state.audio) return null;
   let bus = state.partBuses.get(key);
   if (!bus) {
     bus = state.audio.createGain();
     bus.gain.value = partVolume(key);
-    bus.connect(masterChain());
+    try {
+      const panner = state.audio.createStereoPanner();
+      panner.pan.value = panForPart(key);
+      bus.connect(panner).connect(masterChain());
+      state.partPanners.set(key, panner);
+    } catch {
+      // 浏览器不支持立体声定位时退回单声道总线，不影响播放。
+      bus.connect(masterChain());
+    }
     state.partBuses.set(key, bus);
   }
   return bus;
@@ -2158,7 +2183,11 @@ function disposePartBuses() {
   for (const bus of state.partBuses.values()) {
     try { bus.disconnect(); } catch { /* 已释放 */ }
   }
+  for (const panner of state.partPanners.values()) {
+    try { panner.disconnect(); } catch { /* 已释放 */ }
+  }
   state.partBuses.clear();
+  state.partPanners.clear();
 }
 /** 力度数值（约等于 MIDI velocity）→ 音量峰值；h 约 0.10、mf（89）约 0.18。 */
 function gainForDynamics(value) {

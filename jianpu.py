@@ -972,7 +972,7 @@ def summarize(result):
 def main():
     parser = argparse.ArgumentParser(description="简谱（数字谱）识别")
     parser.add_argument("image", nargs="+", help="简谱页面 PNG/JPEG 路径（可给多张，配合 --batch）")
-    parser.add_argument("--json", dest="json_out", help="把结果写入 JSON 文件")
+    parser.add_argument("--json", dest="json_out", help="把结果写入 JSON 文件（传 - 表示只输出到屏幕）")
     parser.add_argument("--summary", action="store_true", help="打印紧凑摘要")
     parser.add_argument("--dump", action="store_true", help="打印版面结构（调试）")
     parser.add_argument("--batch", action="store_true",
@@ -981,6 +981,9 @@ def main():
     parser.add_argument("--beats", type=float, default=4.0, help="每小节拍数（默认 4）")
     args = parser.parse_args()
 
+    # --json - 表示"只打印、不写文件"（否则会生成一个名字叫 - 的文件——踩过这个坑）
+    if args.json_out == "-":
+        args.json_out = None
     if args.dump:
         dump_structure(args.image[0])
         return
