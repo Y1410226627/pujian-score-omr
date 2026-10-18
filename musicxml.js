@@ -100,7 +100,7 @@ export function parseMusicXmlText(source) {
     part.getAttribute("id"), textOf(part, "part-name") || part.getAttribute("id"),
   ]));
   const musicParts = childrenNamed(root, "part");
-  const tempoMarks = [], timeSignatures = new Set(), keySignatures = new Set();
+  const tempoMarks = [], dynamicsMarks = [], timeSignatures = new Set(), keySignatures = new Set();
   const warnings = new Set();
   let measureCount = 0, skippedNotes = 0;
 
@@ -169,8 +169,12 @@ export function parseMusicXmlText(source) {
             if (perMinute > 0 && beatUnit) tempo = perMinute * beatUnit * unitMultiplier;
           }
           if (Number.isFinite(tempo) && tempo > 0) tempoMarks.push({ measureIndex, beatInMeasure: cursor + offset, bpm: tempo });
-          if (descendantsNamed(item, "dynamics").some(hasContent) || sound?.hasAttribute("dynamics")) warnings.add("力度记号会保留在源文件中，但试听暂不改变音量。");
-          if (descendantsNamed(item, "words").some(hasContent) || descendantsNamed(item, "metronome").some(hasContent)) warnings.add("文字演奏指示不会改变当前合成试听。");
+          // Audiveris 等引擎用 <sound dynamics="89"> 给出强弱数值（近似 MIDI velocity），
+          // 采集后在播放时按音符起拍设置音量（P1-3）。
+          const dynamicsValue = sound?.hasAttribute("dynamics") ? Number(sound.getAttribute("dynamics")) : NaN;
+          if (Number.isFinite(dynamicsValue)) dynamicsMarks.push({ measureIndex, beatInMeasure: cursor + offset, dynamics: dynamicsValue });
+          else if (descendantsNamed(item, "dynamics").some(hasContent)) warnings.add("部分力度记号没有可用的音量数值，试听未体现其强弱。");
+          if (descendantsNamed(item, "words").some(hasContent)) warnings.add("文字演奏指示（如 rit./accel.）暂不改变合成试听。");
           continue;
         }
         if (itemName === "barline" && descendantsNamed(item, "repeat").length) warnings.add("乐谱含反复记号；当前播放按文件顺序播放一次。");
@@ -256,7 +260,12 @@ export function parseMusicXmlText(source) {
     .sort((a, b) => a.beat - b.beat)
     .filter((mark, index, all) =>
       index === 0 || Math.abs(mark.beat - all[index - 1].beat) > 0.00001 || Math.abs(mark.bpm - all[index - 1].bpm) > 0.01);
-  if (uniqueTempoMarks.some((mark) => mark.beat > 0.00001)) warnings.add("乐谱中途有速度标记；当前试听采用开头速度，不执行速度变化。");
+  // 力度记号（P1-3）：换算到全局拍位后去重，播放时按音符起拍取用。
+  const uniqueDynamicsMarks = dynamicsMarks
+    .map((mark) => ({ beat: (globalBaseBeats[mark.measureIndex] || 0) + mark.beatInMeasure, dynamics: mark.dynamics }))
+    .sort((a, b) => a.beat - b.beat)
+    .filter((mark, index, all) =>
+      index === 0 || Math.abs(mark.beat - all[index - 1].beat) > 0.00001 || Math.abs(mark.dynamics - all[index - 1].dynamics) > 0.01);
   if (descendantsNamed(root, "lyric").some(hasContent)) warnings.add("歌词保留在原 MusicXML 文件中，但当前音色不能演唱歌词。");
   if (descendantsNamed(root, "articulations").some(hasContent) || descendantsNamed(root, "ornaments").some(hasContent)) warnings.add("奏法和装饰记号保留在源文件中，当前试听不会模拟这些效果。");
   const tempo = uniqueTempoMarks.find((mark) => mark.beat <= 0.00001)?.bpm || 84;
@@ -278,6 +287,10 @@ export function parseMusicXmlText(source) {
   const keySummary = keySignatures.size === 1 ? [...keySignatures][0] : keySignatures.size ? "有多种调性" : "调号未标明";
   return {
     title, notes: mergedNotes, tempo, measureCount, partNames: musicParts.map((part) => partNames.get(part.getAttribute("id")) || part.getAttribute("id") || "声部"),
+    // totalBeats：本页总时长（拍），供跨页合并时把后一页整体平移。
+    totalBeats: runningBeat,
+    // tempoMarks（中途速度变化）/ dynamicsMarks（力度）供播放调度按拍取用。
+    tempoMarks: uniqueTempoMarks, dynamicsMarks: uniqueDynamicsMarks,
     timeSummary, keySummary, warnings: [...warnings], clef: scoreClef,
   };
 }

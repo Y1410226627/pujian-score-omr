@@ -1,7 +1,7 @@
 import { parseMusicXmlText, readMusicXmlFile } from "./musicxml.js";
 import {
   binarize, detectStaves, groupSystems, staffCropBox,
-  mergeSystemScores, transposeNotes, yForPitch, CLEF_BY_SIGN,
+  mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN,
 } from "./staff.js";
 
 const byId = (id) => document.getElementById(id);
@@ -9,14 +9,19 @@ const els = {
   fileInput: byId("fileInput"), dropzone: byId("dropzone"), currentFile: byId("currentFile"),
   fileName: byId("fileName"), fileInfo: byId("fileInfo"), removeFile: byId("removeFile"),
   recognizeButton: byId("recognizeButton"), recognizeLabel: byId("recognizeLabel"), clefSelect: byId("clefSelect"),
+  recognizeAllButton: byId("recognizeAllButton"), recognizeAllLabel: byId("recognizeAllLabel"),
   engineHint: byId("engineHint"),
   staffSelectField: byId("staffSelectField"), staffSelect: byId("staffSelect"),
+  jianpuField: byId("jianpuField"), jianpuKey: byId("jianpuKey"), jianpuBeats: byId("jianpuBeats"),
+  jianpuButton: byId("jianpuButton"), jianpuLabel: byId("jianpuLabel"), jianpuHint: byId("jianpuHint"),
+  jianpuAllButton: byId("jianpuAllButton"), jianpuAllLabel: byId("jianpuAllLabel"),
   emptyState: byId("emptyState"), canvasWrap: byId("canvasWrap"), scoreCanvas: byId("scoreCanvas"),
   overlayCanvas: byId("overlayCanvas"), pageControls: byId("pageControls"), pageLabel: byId("pageLabel"),
   prevPage: byId("prevPage"), nextPage: byId("nextPage"), processingOverlay: byId("processingOverlay"),
   scoreHint: byId("scoreHint"), scoreInfo: byId("scoreInfo"), scoreTitle: byId("scoreTitle"),
   scoreDetails: byId("scoreDetails"), scoreWarnings: byId("scoreWarnings"), noteCount: byId("noteCount"), noteList: byId("noteList"),
-  voiceFilterField: byId("voiceFilterField"), voiceFilter: byId("voiceFilter"),
+  partPanel: byId("partPanel"), partList: byId("partList"), partSelectAll: byId("partSelectAll"),
+  partSelectNone: byId("partSelectNone"), pianoToggle: byId("pianoToggle"), pianoToggleWrap: byId("pianoToggleWrap"),
   notesEmpty: byId("notesEmpty"), addNoteButton: byId("addNoteButton"), midiButton: byId("midiButton"), playButton: byId("playButton"),
   playIcon: byId("playIcon"), playLabel: byId("playLabel"), stopButton: byId("stopButton"),
   tempoInput: byId("tempoInput"), toast: byId("toast"), chooseFileButton: byId("chooseFileButton"),
@@ -37,6 +42,15 @@ const state = {
   // 识别来源：engine=本机专业引擎 / estimate=浏览器粗略估算 / musicxml=直接导入的结构化乐谱
   recognitionSource: null,
   selection: null, loop: false, onlyLowConfidence: false,
+  // 演奏范围：selectedParts=null 表示全选；includePiano=是否把钢琴伴奏算进去。
+  // partNames 存「声部标识 -> 用户改的名字」，改一次整份乐谱一起生效。
+  selectedParts: null, includePiano: true, partNames: new Map(), pianoKeys: new Set(),
+  // 声部音量（0–1，默认 1）与播放时的「声部音量总线」：拖滑条实时改总线增益，
+  // 正在播放的音符会立刻跟着变，不需要停播、也不需要重建音频图。
+  partVolumes: new Map(), partBuses: new Map(),
+  // 识别结果对应的是哪一页（简谱/单页识别=页码；整本识别或 MusicXML 导入=null）。
+  // 翻页时**不清空结果**，只按这个页码决定要不要在谱面上画音符坐标。
+  scorePage: null,
   // 逐谱表识别相关：谱表几何、进度、取消标志、整体移调量
   staffBoxes: null, recognizeProgress: { done: 0, total: 0 }, cancelRecognize: false, transposeOffset: 0,
 };
@@ -54,7 +68,11 @@ const durations = [
 const durationBeats = Object.fromEntries(durations.map((entry) => [entry[0], entry[2]]));
 const durationFromBeats = (beats) => durations.find((entry) => Math.abs(entry[2] - beats) < 0.00001)?.[0] || "custom";
 const beatsForNote = (note) => Number.isFinite(note.durationBeats) ? note.durationBeats : (durationBeats[note.duration] || 1);
-const voiceIdentity = (note) => JSON.stringify([note.partId || note.partName || "旋律", note.staff || "1", note.voice || "1"]);
+// 声部标识 = 乐谱的一个 part（声部）。
+// 不把 staff / voice 掺进来：那样会把「钢琴大谱表」这类一个 part 两个谱表、
+// 或同一 part 内不同 voice 拆成好几行，界面上就变成「一堆声部」——实测正是这样多出来的。
+// 各条识别路径都给了稳定的 partId：五线谱 P1..Pn / 逐谱表 staff-N / 简谱 jianpu-N / MusicXML part id。
+const voiceIdentity = (note) => String(note.partId || note.partName || "旋律");
 
 function makeId() {
   return window.crypto && typeof window.crypto.randomUUID === "function"
@@ -74,6 +92,7 @@ function formatSize(bytes) {
 // audiveris：整页识别（能保留多声部结构）；homr：单谱表裁片识别（逐行流程用）。
 let audiverisAvailable = null;
 let homrAvailable = null;
+let jianpuAvailable = null;
 function idleRecognizeLabel() {
   if (audiverisAvailable === false && homrAvailable === false) return "估算识别";
   if (state.recognized) return "重新识别";
@@ -95,10 +114,14 @@ async function refreshEngineStatus() {
     const payload = await response.json();
     audiverisAvailable = Boolean(payload.audiverisAvailable);
     homrAvailable = Boolean(payload.homrAvailable);
+    jianpuAvailable = Boolean(payload.jianpuAvailable);
   } catch {
     audiverisAvailable = null;
     homrAvailable = null;
+    jianpuAvailable = null;
   }
+  if (els.jianpuButton) els.jianpuButton.hidden = jianpuAvailable === false;
+  updateBatchButtons();
   updateEngineHint();
   if (state.file && !state.isRecognizing && !/\.(musicxml|xml|mxl)$/i.test(state.file.name)) {
     els.recognizeLabel.textContent = idleRecognizeLabel();
@@ -116,10 +139,14 @@ function clearScore() {
   state.onlyLowConfidence = false;
   state.staffBoxes = null;
   state.transposeOffset = 0;
+  state.scorePage = null;
+  state.selectedParts = null;
+  state.partNames = new Map();
+  state.pianoKeys = new Set();
   if (els.transposeInput) els.transposeInput.value = "0";
   if (els.recognizeProgress) els.recognizeProgress.hidden = true;
   els.scoreInfo.hidden = true;
-  updateVoiceOptions(true);
+  updatePartControls(true);
   els.staffSelect.replaceChildren();
   els.staffSelectField.hidden = true;
   renderNotes();
@@ -153,7 +180,14 @@ function dedupePartNames(notes) {
   }
   const used = new Map();
   const renamed = new Map(); // partId -> 新名字
-  for (const [partId, name] of partNames) {
+  // 按 part 的自然顺序（P1<P2<…，即谱面自上而下、钢琴在最后）编号，
+  // 否则编号顺序取决于音符在数组里出现的先后，"Voice 1" 可能落到谱面最下面一行，看着像坏了。
+  const ordered = [...partNames.entries()].sort((a, b) => {
+    const [aHead, aNum] = partSortKey(a[0]);
+    const [bHead, bNum] = partSortKey(b[0]);
+    return aHead.localeCompare(bHead) || aNum - bNum;
+  });
+  for (const [partId, name] of ordered) {
     if (!name || (nameCounts.get(name) || 0) < 2) continue;
     const index = (used.get(name) || 0) + 1;
     used.set(name, index);
@@ -184,6 +218,12 @@ function updateRecognitionBanner() {
     banner.className = "recognition-banner is-file";
     els.recognitionSource.textContent = "来自文件的结构化乐谱";
     els.recognitionDetail.textContent = `${state.notes.length} 个音符 · 音高与时值直接读取自 MusicXML，未经过图像识别`;
+  } else if (state.recognitionSource === "jianpu") {
+    banner.className = "recognition-banner is-jianpu";
+    els.recognitionSource.textContent = "本机简谱识别（实验性）";
+    els.recognitionDetail.textContent = lowCount
+      ? `${state.notes.length} 个音符，其中 ${lowCount} 个置信度偏低 · 简谱识别仍在完善，请逐音校对`
+      : `${state.notes.length} 个音符 · 由本机简谱模块（数字模板匹配 + 版面解析）得出，请逐音校对`;
   } else {
     banner.className = "recognition-banner is-estimate";
     els.recognitionSource.textContent = "粗略估算 · 未经专业识别";
@@ -192,6 +232,156 @@ function updateRecognitionBanner() {
       : `${state.notes.length} 个音符 · 估算结果仅供参考，请逐音校对后再使用`;
   }
   banner.hidden = false;
+}
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+function midiToPitchName(midi) {
+  const value = Math.round(Number(midi));
+  if (!Number.isFinite(value)) return "";
+  return NOTE_NAMES[((value % 12) + 12) % 12] + (Math.floor(value / 12) - 1);
+}
+
+/** 把简谱识别结果（内部音符模型）转成与 MusicXML 解析结果同构的 scoreInfo。 */
+function jianpuToScoreInfo(payload, beats) {
+  const notes = [], partNames = [];
+  let eventId = 0;
+  payload.parts.forEach((part, partIndex) => {
+    const partName = part.name || `声部${partIndex + 1}`;
+    partNames.push(partName);
+    for (const raw of part.notes) {
+      const startBeat = Number(raw.startBeat) || 0;
+      const measureIndex = Math.floor(startBeat / beats + 1e-6);
+      notes.push({
+        id: makeId(), eventId: eventId++, partId: `jianpu-${partIndex + 1}`, partName,
+        voice: "1", staff: String(partIndex + 1),
+        measure: String(measureIndex + 1), measureIndex,
+        startInMeasure: Number((startBeat - measureIndex * beats).toFixed(4)),
+        startBeat, durationBeats: Number(raw.durationBeats) || 1,
+        pitch: midiToPitchName(raw.midi), midi: Number(raw.midi),
+        x: Number.isFinite(Number(raw.x)) ? Number(raw.x) : Number.NaN,
+        y: Number.isFinite(Number(raw.y)) ? Number(raw.y) : Number.NaN,
+        tieStart: false, tieStop: false,
+      });
+    }
+  });
+  const totalBeats = notes.reduce((end, note) => Math.max(end, note.startBeat + note.durationBeats), 0);
+  const keyOption = els.jianpuKey && els.jianpuKey.selectedOptions[0];
+  return {
+    title: state.file ? state.file.name.replace(/\.[^.]+$/, "") : "简谱识别结果",
+    notes, tempo: Math.min(320, Math.max(20, Math.round(Number(els.tempoInput.value) || 96))),
+    measureCount: payload.measureCount || 0, partNames, totalBeats,
+    tempoMarks: [], dynamicsMarks: [],
+    timeSummary: `${beats}/4`, keySummary: keyOption ? keyOption.textContent : "",
+    warnings: payload.warnings || [], clef: "",
+  };
+}
+
+/**
+ * 把一张页面图片交给本机简谱模块，返回与 MusicXML 解析结果同构的 scoreInfo。
+ * 单页识别（recognizeJianpuScore）与整本简谱识别（recognizeAllJianpuPages）共用这一份请求逻辑。
+ */
+async function requestJianpuScore(blob, doMidi, beats) {
+  const response = await fetch(`/api/jianpu/recognize?do=${doMidi}&beats=${beats}`, {
+    method: "POST",
+    headers: { "Content-Type": "image/jpeg" },
+    body: blob,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (response.status === 503 && payload.reason === "engine-missing") {
+    throw new Error(payload.error || "本机简谱识别不可用。");
+  }
+  if (response.status === 503) throw new Error(payload.error || "本机识谱任务繁忙，请稍后重试。");
+  if (!response.ok) throw new Error(payload.error || "简谱识别没有完成。");
+  return jianpuToScoreInfo(payload, beats);
+}
+
+/**
+ * 简谱（数字谱）识别：整页交给本机 jianpu.py，返回内部音符模型后转成应用既有的乐谱结构。
+ * 与五线谱流程相互独立——简谱不走 Audiveris/homr，也不做谱表逐行切分。
+ */
+async function recognizeJianpuScore() {
+  if (!state.file || !els.scoreCanvas.width || state.isRecognizing) return;
+  if (jianpuAvailable === false) {
+    showToast("未检测到简谱识别所需的解释器：请先安装 homr（会一并装好 opencv），或用 JIANPU_PYTHON 指定解释器。");
+    return;
+  }
+  const beats = Number(els.jianpuBeats.value) || 4;
+  const doMidi = Number(els.jianpuKey.value) || 65;
+  state.isRecognizing = true;
+  state.cancelRecognize = false;
+  const token = ++state.recognizeToken;
+  const fileToken = state.loadToken;
+  const superseded = () => token !== state.recognizeToken || fileToken !== state.loadToken || state.cancelRecognize;
+  stopPlayback();
+  state.selection = null;
+  els.processingOverlay.hidden = false;
+  els.recognizeButton.disabled = true;
+  els.jianpuButton.disabled = true;
+  els.jianpuLabel.textContent = "正在识别简谱…";
+  els.cancelRecognize.hidden = false;
+  setRecognizeProgress(0, 0, "正在解析简谱版面…");
+  els.scoreHint.textContent = "正在按简谱识别这一页（数字模板匹配 + 版面解析）";
+  await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 30)));
+
+  try {
+    const blob = await canvasToBlob();
+    if (!blob) throw new Error("当前页面无法导出为图片。");
+    const scoreInfo = await requestJianpuScore(blob, doMidi, beats);
+    if (superseded()) return;
+    if (!scoreInfo.notes.length) throw new Error("这一页没有读出简谱音符（可能不是简谱页面）。");
+
+    commitScore(scoreInfo, [], "jianpu", { title: scoreInfo.title });
+    els.scoreInfo.hidden = false;
+    els.scoreDetails.textContent = `${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary} · ${scoreInfo.keySummary}`;
+    els.scoreWarnings.textContent = scoreInfo.warnings.join(" ");
+    els.scoreWarnings.hidden = scoreInfo.warnings.length === 0;
+    // 多页简谱只识别这一页的话，试听就只有这一页 —— 明确提示用户去点「按简谱识别全部 N 页」。
+    const multipageHint = state.pageCount > 1
+      ? `　这只识别了第 ${state.pageNumber} 页；要整曲演奏请点「按简谱识别全部 ${state.pageCount} 页」。`
+      : "";
+    els.scoreHint.textContent = `简谱识别完成：${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节${multipageHint}`;
+    const warning = scoreInfo.warnings[0] ? ` ${scoreInfo.warnings[0]}` : "";
+    showToast(`简谱识别到 ${scoreInfo.notes.length} 个音符（${scoreInfo.partNames.length} 个声部），请逐音校对。${warning}${multipageHint}`);
+  } catch (error) {
+    if (superseded()) return;
+    console.error(error);
+    // 与五线谱流程一致：识别失败时清掉上一次结果，避免旧音符被当作本次结果试听/导出。
+    state.notes = [];
+    state.scoreInfo = null;
+    state.recognitionSource = null;
+    state.staffBoxes = null;
+    state.scorePage = null;
+    state.recognized = false;
+    renderNotes();
+    updatePartControls(true);
+    clearOverlay();
+    updateRecognitionBanner();
+    const message = error && error.message ? error.message : "简谱识别时遇到问题，请换一张更清晰的图片再试。";
+    showToast(message);
+    els.scoreHint.textContent = "简谱识别失败，已清空上一次的结果 · " + message;
+  } finally {
+    state.isRecognizing = false;
+    els.processingOverlay.hidden = true;
+    els.cancelRecognize.hidden = true;
+    setRecognizeProgress(0, 0, "");
+    els.recognizeProgress.hidden = true;
+    if (fileToken === state.loadToken) {
+      els.recognizeButton.disabled = !state.file;
+      els.jianpuButton.disabled = false;
+      els.jianpuLabel.textContent = "按简谱识别这一页";
+    }
+  }
+}
+
+/** 多页时显示「整本识别」按钮（五线谱与简谱各一个），单页/图片/简谱不可用时隐藏。 */
+function updateBatchButtons() {
+  const multi = Boolean(state.file && state.pdf && state.pageCount > 1);
+  els.recognizeAllButton.hidden = !multi;
+  els.recognizeAllLabel.textContent = `识别全部 ${state.pageCount} 页`;
+  els.recognizeAllButton.disabled = false;
+  els.jianpuAllButton.hidden = !(multi && jianpuAvailable !== false);
+  els.jianpuAllLabel.textContent = `按简谱识别全部 ${state.pageCount} 页`;
+  els.jianpuAllButton.disabled = false;
 }
 function setCanvasSize(width, height) {
   els.scoreCanvas.width = width;
@@ -211,6 +401,7 @@ async function loadFile(file) {
   if (!isPdf && !isImage && !isMusicXml) return showToast("请选择 PDF、图片或 MusicXML 乐谱文件。");
   stopPlayback();
   await destroyPdf();
+  disposePartBuses();
   if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
   const token = ++state.loadToken;
   state.file = file;
@@ -220,11 +411,13 @@ async function loadFile(file) {
   state.pageCount = 1;
   clearScore();
   els.clefSelect.disabled = isMusicXml;
+  els.jianpuField.hidden = true;   // 简谱设置只在图片/PDF 页面上出现，MusicXML 不需要
   els.fileName.textContent = file.name;
   els.fileInfo.textContent = (isMusicXml ? "MusicXML 乐谱" : isPdf ? "PDF 文档" : "图片文件") + " · " + formatSize(file.size);
   els.currentFile.hidden = false;
   els.recognizeButton.disabled = true;
   els.recognizeLabel.textContent = "正在载入…";
+  updateBatchButtons();
   els.pageControls.hidden = true;
   els.scoreHint.textContent = "正在载入谱面";
   try {
@@ -235,7 +428,8 @@ async function loadFile(file) {
       state.scoreInfo = scoreInfo;
       state.notes = scoreInfo.notes;
       state.recognitionSource = scoreInfo.notes.length ? "musicxml" : null;
-      updateVoiceOptions(true);
+      state.scorePage = null;   // 符号乐谱没有谱面坐标，不画点
+      updatePartControls(true);
       state.recognized = false;
       state.pageCount = 1;
       els.canvasWrap.hidden = true;
@@ -265,6 +459,8 @@ async function loadFile(file) {
     if (token !== state.loadToken) return;
     els.recognizeButton.disabled = false;
     els.recognizeLabel.textContent = idleRecognizeLabel();
+    els.jianpuField.hidden = false;
+    els.jianpuButton.hidden = jianpuAvailable === false;
     els.scoreHint.textContent = "可以开始识别";
   } catch (error) {
     // 文件已被更新的选择取代时，静默退出，不要把旧错误打到新界面上。
@@ -297,12 +493,13 @@ async function loadImage(file, token) {
 async function loadPdf(file, token) {
   let pdfjs;
   try {
-    pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@6.4.299/build/pdf.mjs");
+    // pdf.js 已随项目本地分发（vendor/pdfjs），离线可用，不再依赖 CDN。
+    pdfjs = await import("./vendor/pdfjs/pdf.mjs");
   } catch {
-    throw new Error("PDF 阅读组件载入失败。请连接网络后刷新页面，或将 PDF 页面另存为图片。");
+    throw new Error("PDF 阅读组件载入失败（vendor/pdfjs 缺失或被拦截）。可将 PDF 页面另存为图片后再导入。");
   }
   if (token !== state.loadToken) return;
-  pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.4.299/build/pdf.worker.mjs";
+  pdfjs.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
   const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
   if (token !== state.loadToken) {
     try { await document.destroy(); } catch { /* 已被取代，尽力释放即可 */ }
@@ -312,6 +509,10 @@ async function loadPdf(file, token) {
   state.pageCount = document.numPages;
   els.pageControls.hidden = state.pageCount <= 1;
   await renderPdfPage(1, token);
+  if (token !== state.loadToken) return;
+  // 多页 PDF 才提供"整本识别"：五线谱走 recognizeAllPages，简谱走 recognizeAllJianpuPages，
+  // 一次操作把整本谱识别并跨页拼成一份连续乐谱（否则单页识别只会替换当前结果）。
+  updateBatchButtons();
 }
 async function renderPdfPage(number, token = state.loadToken) {
   if (!state.pdf) return;
@@ -342,9 +543,11 @@ async function renderPdfPage(number, token = state.loadToken) {
   els.pageLabel.textContent = targetPage + " / " + state.pageCount;
   els.prevPage.disabled = targetPage <= 1;
   els.nextPage.disabled = targetPage >= state.pageCount;
+  refreshScoreOverlay();
 }
 function removeCurrentFile() {
   stopPlayback();
+  disposePartBuses();
   state.loadToken++;
   destroyPdf();
   if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
@@ -355,6 +558,7 @@ function removeCurrentFile() {
   els.recognizeButton.disabled = true;
   els.recognizeLabel.textContent = "识别乐谱";
   els.clefSelect.disabled = false;
+  updateBatchButtons();
   els.canvasWrap.hidden = true;
   els.emptyState.hidden = false;
   els.pageControls.hidden = true;
@@ -506,6 +710,14 @@ function drawNoteOverlay(notes, focusedNoteId = null, staffBoxes = null) {
     });
   }
   // 音符的纵坐标可以由音高精确推算（横坐标不能，所以不画点，改画一条音高基准线）。
+  // 例外：简谱识别会回传音符在页面上的真实像素坐标，这类音符直接画点、并可点选定位。
+  notes.forEach((note) => {
+    if (!Number.isFinite(note.x) || !Number.isFinite(note.y)) return;
+    ctx.beginPath();
+    ctx.arc(note.x, note.y, focusedNote === note ? 5 : 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = focusedNote === note ? "rgba(220, 145, 103, .85)" : "rgba(71, 113, 93, .55)";
+    ctx.fill();
+  });
   if (focusedNote && focusedStaff && focusedNote.pitch) {
     const match = /^([A-Ga-g])(?:\(([-+]?\d+(?:\.\d+)?)\)|(##|bb|#|b))?(-?\d{1,2})$/.exec(focusedNote.pitch.trim());
     if (match) {
@@ -537,6 +749,20 @@ function drawNoteOverlay(notes, focusedNoteId = null, staffBoxes = null) {
     ctx.lineWidth = focused ? 2.5 : 1.7;
     ctx.strokeStyle = focused ? "rgba(180, 92, 55, .95)" : "rgba(67, 117, 79, .82)";
     ctx.stroke();
+  }
+}
+/**
+ * 按「当前显示的是哪一页」重画（或清掉）谱面上的音符点。
+ *
+ * 识别结果只与它被识别时的那一页（state.scorePage）坐标对应：
+ * 翻页到别的页时**结果仍然保留**（可继续试听、导出、校对），只是不画坐标点，
+ * 因为谱表几何 / 简谱像素坐标都只对那一页有效。整本合并结果与 MusicXML 没有单页坐标，传 null。
+ */
+function refreshScoreOverlay() {
+  if (state.notes.length && state.scorePage !== null && state.scorePage === state.pageNumber) {
+    drawNoteOverlay(state.notes, null, state.staffBoxes);
+  } else {
+    clearOverlay();
   }
 }
 function focusNearestScoreNote(event) {
@@ -708,9 +934,9 @@ function renderNotes() {
       });
       deleteButton.addEventListener("click", () => {
         state.notes = state.notes.filter((item) => item.id !== note.id);
-        updateVoiceOptions();
         renderNotes();
-        drawNoteOverlay(state.notes);
+        updatePartControls();
+        refreshScoreOverlay();
       });
       els.noteList.append(row);
     });
@@ -721,31 +947,161 @@ function renderNotes() {
   markSelectedRows();
   updateSelectionUi();
 }
-function updateVoiceOptions(reset = false) {
-  const previous = reset ? "all" : (els.voiceFilter.value || "all");
+// 常用声部名预设：零乐理用户不用自己打字，点一下就能把「声部1」改成谱面上的叫法。
+const PART_NAME_PRESETS = [
+  "女高1", "女高2", "女中", "男高", "男中", "男低", "女声", "男声",
+  "童声", "独唱", "领唱", "合唱", "钢琴", "伴奏", "旋律",
+  "SOPRANO", "ALTO", "TENOR", "BASS", "PIANO",
+];
+const PART_NAME_CUSTOM = "自定义…";
+// 判定一个声部是不是钢琴伴奏：识别结果里钢琴声部的名字通常是 Piano/钢琴。
+const looksLikePiano = (name) => /piano|钢琴|伴奏/i.test(name || "");
+
+/** 声部标识 -> 当前显示名（用户改过就用改后的名字）。 */
+function partDisplayName(key, fallback) {
+  return state.partNames.get(key) || fallback;
+}
+// 声部排序：按标识里的数字自然排序（P1<P2<…<P10、staff-1<…、jianpu-1<…），
+// 这样合唱谱的声部自上而下的顺序与谱面一致，钢琴伴奏排在最后。
+function partSortKey(key) {
+  const matched = String(key).match(/^(.*?)(\d+)$/);
+  return matched ? [matched[1], Number(matched[2])] : [String(key), 0];
+}
+
+/** 收集当前乐谱里的声部（每个 part 一行），返回 [{ key, name, count, piano }]。 */
+function collectParts() {
   const groups = new Map();
   for (const note of state.notes) {
     const key = voiceIdentity(note);
     if (!groups.has(key)) {
-      const staffText = note.staff ? ` · 谱表 ${note.staff}` : "";
-      const voiceText = note.voice ? ` · 声部 ${note.voice}` : "";
-      groups.set(key, `${note.partName || "乐谱"}${staffText}${voiceText}`);
+      const fallback = note.partName || "乐谱";
+      groups.set(key, {
+        key, fallback, count: 0, name: partDisplayName(key, fallback),
+        piano: looksLikePiano(note.partName),
+      });
     }
+    groups.get(key).count += 1;
   }
-  els.voiceFilter.replaceChildren();
-  const allOption = document.createElement("option");
-  allOption.value = "all";
-  allOption.textContent = "全部声部";
-  els.voiceFilter.append(allOption);
-  for (const [key, label] of groups) {
-    const option = document.createElement("option");
-    option.value = key;
-    option.textContent = label;
-    els.voiceFilter.append(option);
-  }
-  els.voiceFilter.value = groups.has(previous) ? previous : "all";
-  els.voiceFilterField.hidden = groups.size < 2;
+  const parts = [...groups.values()];
+  parts.sort((a, b) => {
+    const [aHead, aNum] = partSortKey(a.key);
+    const [bHead, bNum] = partSortKey(b.key);
+    return aHead.localeCompare(bHead) || aNum - bNum;
+  });
+  return parts;
 }
+
+/** 这个声部是否要参与演奏/导出。 */
+function isPartEnabled(key) {
+  return state.selectedParts === null || state.selectedParts.has(key);
+}
+
+/**
+ * 声部面板：勾选参与演奏的声部、下拉改名、钢琴伴奏总开关。
+ * `reset=true` 时恢复为「全部勾选」（换文件、重新识别时用）。
+ */
+function updatePartControls(reset = false) {
+  const parts = collectParts();
+  if (reset || !(state.selectedParts instanceof Set)) {
+    state.selectedParts = null;
+  } else {
+    // 重新识别后某些声部可能消失：把已选集合里失效的键剔掉，避免「一个声部都没选」的空播放。
+    const alive = new Set(parts.map((part) => part.key));
+    state.selectedParts = new Set([...state.selectedParts].filter((key) => alive.has(key)));
+  }
+  state.pianoKeys = new Set(parts.filter((part) => part.piano).map((part) => part.key));
+
+  els.partList.replaceChildren();
+  for (const part of parts) {
+    const row = document.createElement("div");
+    row.className = "part-row";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = isPartEnabled(part.key);
+    checkbox.id = "part-check-" + Math.abs([...part.key].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) | 0, 7));
+    checkbox.addEventListener("change", () => {
+      if (state.selectedParts === null) {
+        state.selectedParts = new Set(parts.map((item) => item.key));
+      }
+      if (checkbox.checked) state.selectedParts.add(part.key);
+      else state.selectedParts.delete(part.key);
+      stopPlayback();
+      updatePlaybackReady();
+    });
+
+    const select = document.createElement("select");
+    select.className = "part-name-select";
+    select.title = "点这里把声部改成谱面上的名字";
+    select.setAttribute("aria-label", "声部名");
+    const names = [...new Set([part.name, ...PART_NAME_PRESETS])];
+    for (const name of names) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      if (name === part.name) option.selected = true;
+      select.append(option);
+    }
+    const custom = document.createElement("option");
+    custom.value = PART_NAME_CUSTOM;
+    custom.textContent = PART_NAME_CUSTOM;
+    select.append(custom);
+    select.addEventListener("change", () => {
+      if (select.value === PART_NAME_CUSTOM) {
+        const typed = window.prompt("给这个声部起个名字（例如：女高）", part.name);
+        const name = typed && typed.trim();
+        if (!name) {
+          select.value = part.name;
+          return;
+        }
+        applyPartName(part.key, name.trim());
+        return;
+      }
+      applyPartName(part.key, select.value);
+    });
+
+    const volume = document.createElement("input");
+    volume.type = "range";
+    volume.className = "part-volume";
+    volume.min = "0";
+    volume.max = "100";
+    volume.step = "2";
+    volume.value = String(Math.round(partVolume(part.key) * 100));
+    volume.setAttribute("aria-label", `${part.name} 的音量`);
+    volume.title = `拖动调节「${part.name}」的音量：播放中也能实时调，声音立刻变、不会中断`;
+    volume.addEventListener("input", () => {
+      setPartVolume(part.key, Number(volume.value) / 100);
+      volume.title = `「${part.name}」音量 ${volume.value}%（播放中也能实时调）`;
+    });
+
+    const count = document.createElement("small");
+    count.textContent = `${part.count}音`;
+    count.title = `${part.name}：${part.count} 个音`;
+
+    row.append(checkbox, select, volume, count);
+    els.partList.append(row);
+  }
+
+  const pianoParts = parts.filter((part) => part.piano);
+  els.pianoToggleWrap.hidden = pianoParts.length === 0;
+  els.pianoToggle.checked = state.includePiano;
+  els.partPanel.hidden = parts.length === 0;
+  updatePlaybackReady();
+}
+
+/** 改名：改一次，整份乐谱里该声部的所有音符一起更新（含 MIDI 导出用的 partName）。 */
+function applyPartName(key, name) {
+  state.partNames.set(key, name);
+  for (const note of state.notes) {
+    if (voiceIdentity(note) === key) note.partName = name;
+  }
+  updatePartControls();
+  if (state.scoreInfo && Array.isArray(state.scoreInfo.partNames)) {
+    state.scoreInfo.partNames = collectParts().map((part) => part.name);
+  }
+  showToast(`这个声部的名字已改为「${name}」`);
+}
+
 // 选区：以音符在列表中的顺序区间表示（锚点 + 焦点）
 function selectionRange() {
   if (!state.selection) return null;
@@ -778,8 +1134,13 @@ function updateSelectionUi() {
   updatePlaybackReady();
 }
 function getPlaybackNotes() {
-  const selected = els.voiceFilter.value;
-  const voiceNotes = (!selected || selected === "all") ? state.notes : state.notes.filter((note) => voiceIdentity(note) === selected);
+  // 演奏范围 = 勾选的声部（默认全部勾选）→ 再看「是否包含钢琴伴奏」→ 最后套用选中的片段。
+  const voiceNotes = state.notes.filter((note) => {
+    const key = voiceIdentity(note);
+    if (!isPartEnabled(key)) return false;
+    if (!state.includePiano && state.pianoKeys.has(key)) return false;
+    return true;
+  });
   const range = selectionRange();
   if (!range) return voiceNotes;
   const selectedIds = new Set(range.ids);
@@ -801,17 +1162,19 @@ function updatePlaybackReady() {
   els.playButton.disabled = activeNotes.length === 0 || activeNotes.some((note) => !Number.isFinite(note.midi)) || state.isPlaying;
   els.midiButton.disabled = activeNotes.length === 0;
   els.midiButton.title = selectionRange() ? "下载所选片段的 MIDI 文件" : "下载 MIDI 文件";
-  // 播放控件文案与选区状态保持一致（否则选完片段按钮仍写着"试听旋律"）。
+  // 播放控件文案与选区状态保持一致：没有选区时就是「播放全曲」，选了片段就只播那一段。
   els.playIcon.textContent = state.isPlaying ? "Ⅱ" : "▶";
-  els.playLabel.textContent = state.isPlaying ? "正在播放" : (selectionRange() ? "试听选区" : "试听旋律");
+  els.playLabel.textContent = state.isPlaying ? "正在播放" : (selectionRange() ? "播放选中片段" : "播放全曲");
   els.stopButton.disabled = !state.isPlaying;
 }
 function addNote() {
-  if (els.voiceFilter.value !== "all") els.voiceFilter.value = "all";
   const eventId = state.notes.length ? Math.max(...state.notes.map((note) => note.eventId)) + 1 : 0;
   const startBeat = state.notes.reduce((end, note) => Math.max(end, note.startBeat + beatsForNote(note)), 0);
   state.notes.push({ id: makeId(), eventId, pitch: "C4", midi: 60, duration: "quarter", durationBeats: 1, startBeat, x: NaN, y: NaN });
   renderNotes();
+  // 手动加的音符不属于任何声部：把声部勾选恢复为全选，否则用户可能看不见这个新音符。
+  state.selectedParts = null;
+  updatePartControls();
   els.noteList.scrollTop = els.noteList.scrollHeight;
 }
 /** 整体移调：按增量应用到当前音符，这样已经手动校对过的音符不会被覆盖。 */
@@ -823,7 +1186,7 @@ function applyTranspose(nextSemitones) {
   if (!delta || !state.notes.length) return;
   state.notes = transposeNotes(state.notes, delta);
   renderNotes();
-  drawNoteOverlay(state.notes);
+  refreshScoreOverlay();
   showToast(`已整体移调 ${value > 0 ? "+" : ""}${value} 个半音。`);
 }
 /** 把一张图片交给本机引擎识别，返回解析后的乐谱。engine: "audiveris" 整页 / "homr" 单谱表。 */
@@ -888,8 +1251,141 @@ function setRecognizeProgress(done, total, label) {
 }
 
 /**
- * 逐谱表识别：把整页切成一行行谱表分别送去识别，再按"系统内并行、系统间顺序"拼回多声部。
- * 这样可以绕开识别引擎把整页多行谱表压平成单一旋律的问题。
+ * 识别"当前画布上的这一页"，返回 { scoreInfo, staves, diagnostics }，不改动主界面状态。
+ * 单页识别（recognizeScore）与整本批量识别（recognizeAllPages）共用这一份核心逻辑。
+ *
+ * @param {object} options
+ * @param {(staves: object[]) => (number|"all")} options.pickStaff 决定识别全部谱表还是单行
+ * @param {() => boolean} options.superseded 令牌/取消判断，返回 true 时中止并返回 null
+ * @param {(progress: {done:number,total:number,label:string}) => void} options.onProgress 进度回调
+ */
+async function collectPageScore({ pickStaff = () => "all", superseded = () => false, onProgress = () => {} }) {
+  const { binary, width, height } = readPageBinary();
+  const staves = detectStaves(binary, width, height);
+  if (!staves.length) {
+    throw new Error("没有检测到五线谱。这页可能是简谱（数字谱）——目前识谱引擎只支持五线谱；也请检查图片是否清晰完整。");
+  }
+  const selection = pickStaff(staves);
+  const singleStaff = Number.isInteger(selection) && selection >= 0 && selection < staves.length;
+  const targets = singleStaff ? [selection] : staves.map((_, index) => index);
+  const diagnostics = {
+    staves, targets, singleStaff, systemCount: 1, wholePage: false, wholePageError: "",
+    estimatedCount: 0, emptyCount: 0, failedCount: 0, source: "engine",
+  };
+
+  // Audiveris 整页识别：一次调用即得到完整的多声部结构（各声部并行而非首尾串接）。
+  // 只在"识别全部谱表"且本机装有 Audiveris 时走这条路；单行重试仍走逐行流程。
+  if (!singleStaff && audiverisAvailable !== false) {
+    onProgress({ done: 0, total: 1, label: "正在整页识别（Audiveris，约 10–20 秒）…" });
+    const engineResult = await recognizeWholePage();
+    if (superseded()) return null;
+    if (engineResult.scoreInfo && engineResult.scoreInfo.notes.length) {
+      return { scoreInfo: engineResult.scoreInfo, staves, diagnostics: { ...diagnostics, wholePage: true } };
+    }
+    if (engineResult.unavailable) {
+      audiverisAvailable = false;
+      updateEngineHint();
+    }
+    // 整页识别失败（例如分辨率不足或这一页是简谱）：记下原因，继续走逐行流程。
+    diagnostics.wholePageError = engineResult.error || "";
+  }
+
+  const systems = targets.length === 1
+    ? [[targets[0]]]
+    : groupSystems(staves.filter((_, index) => targets.includes(index)))
+        .map((system) => system.map((staff) => staves.indexOf(staff)));
+  diagnostics.systemCount = systems.length;
+
+  const results = new Map();
+  let done = 0;
+  let engineMissing = false;
+  onProgress({ done: 0, total: targets.length, label: "" });
+
+  for (const index of targets) {
+    if (superseded()) return null;
+    const staff = staves[index];
+    const box = staffCropBox(staff, width, height, staves[index - 1], staves[index + 1]);
+    onProgress({ done, total: targets.length, label: `正在识别第 ${done + 1} / ${targets.length} 行谱表` });
+
+    let result = null;
+    let clef = els.clefSelect.value;
+    if (!engineMissing && homrAvailable !== false) {
+      const blob = await cropToBlob(box);
+      if (superseded()) return null;
+      const engineResult = blob ? await recognizeImageBlob(blob) : { unavailable: true };
+      if (superseded()) return null;
+      if (engineResult.unavailable) {
+        engineMissing = true;
+      } else if (engineResult.empty) {
+        result = { notes: [], tempo: 84, measureCount: 0, warnings: [], clef: "", empty: true };
+        diagnostics.emptyCount++;
+      } else if (engineResult.scoreInfo) {
+        result = engineResult.scoreInfo;
+        clef = CLEF_BY_SIGN[result.clef] || clef;
+        if (!result.notes.length) {
+          result.empty = true;
+          diagnostics.emptyCount++;
+        }
+      } else {
+        // 这一行引擎确实失败了：如实标记，不用像素估算去"猜"（那只会产生假音符）。
+        result = { notes: [], tempo: 84, measureCount: 0, warnings: [], clef: "", error: engineResult.error };
+        diagnostics.failedCount++;
+      }
+    }
+    // 只有整台引擎都不可用时，才退回浏览器内的粗略估算。
+    if (!result) {
+      result = estimateStaffNotes(staff, binary, width, height, clef);
+      diagnostics.estimatedCount++;
+    }
+
+    // 本机引擎不返回音符在谱面上的坐标，这里不再尝试用像素检测去"反推"位置：
+    // 在真实雕版谱上（谱号涡卷、歌词、圆滑线）误检率很高，画出来的点反而会误导。
+    // 谱面导航改用"谱表框 + 行高亮 + 音高基准线"，这三者是 100% 可靠的。
+    result.staffIndex = index;
+    result.clefName = clef;
+    results.set(index, result);
+    done++;
+    onProgress({ done, total: targets.length, label: "" });
+  }
+
+  if (superseded()) return null;
+  const merged = mergeSystemScores(systems, results);
+  if (!merged.notes.length) {
+    // 所有谱表都没能读出音符：最常见的两种情况是这一页是简谱（数字谱），
+    // 或者图片分辨率不足。明确说出来，不要让用户对着"失败"干猜。
+    if (diagnostics.failedCount === targets.length && !diagnostics.estimatedCount && !diagnostics.emptyCount) {
+      throw new Error("没有识别出任何音符。这页可能是简谱（数字谱）——识谱引擎只支持五线谱；也可能是图片不清晰，可换更清晰的整页图片再试。");
+    }
+    throw new Error("逐行识别没有提取到音符，可点击“添加”手动录入。");
+  }
+  diagnostics.source = diagnostics.estimatedCount === targets.length ? "estimate" : (diagnostics.estimatedCount ? "mixed" : "engine");
+  return { scoreInfo: merged, staves, diagnostics };
+}
+
+/** 把一页识别结果写进主界面（单页识别与整本识别共用的收尾步骤）。
+ *  `page` = 这份结果对应哪一页（翻页时决定要不要在谱面上画音符点）；整本合并结果传 null。 */
+function commitScore(scoreInfo, staves, source, { title, page } = {}) {
+  for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
+  dedupePartNames(scoreInfo.notes);
+  state.scoreInfo = scoreInfo;
+  state.notes = scoreInfo.notes;
+  state.staffBoxes = staves;
+  state.scorePage = page === undefined ? state.pageNumber : page;
+  state.recognitionSource = scoreInfo.notes.length ? source : null;
+  state.transposeOffset = 0;
+  if (els.transposeInput) els.transposeInput.value = "0";
+  updatePartControls(true);
+  state.recognized = true;
+  els.clefSelect.disabled = false;
+  if (title) els.scoreTitle.textContent = title;
+  renderNotes();
+  refreshScoreOverlay();
+  updateRecognitionBanner();
+}
+
+/**
+ * 单页识别：整页交给 Audiveris（优先）；失败则把整页切成一行行谱表分别识别，
+ * 再按"系统内并行、系统间顺序"拼回多声部（避免多声部被压平成单一旋律）。
  */
 async function recognizeScore() {
   if (!state.file || !els.scoreCanvas.width) return;
@@ -904,166 +1400,54 @@ async function recognizeScore() {
   els.processingOverlay.hidden = false;
   els.recognizeButton.disabled = true;
   els.recognizeLabel.textContent = "正在识别…";
+  els.recognizeAllButton.disabled = true;
   els.clefSelect.disabled = true;
   els.staffSelect.disabled = true;
   els.cancelRecognize.hidden = false;
-  let wholePageError = "";
   setRecognizeProgress(0, 0, "正在分析谱表…");
   els.scoreHint.textContent = audiverisAvailable === false && homrAvailable === false
     ? "未检测到专业引擎，正在逐行做粗略估算"
     : audiverisAvailable !== false
       ? "正在整页识别；若 Audiveris 不可用则逐行谱表识别（避免多声部被压平）"
       : "正在逐行谱表识别（每行单独送引擎，避免多声部被压平）";
-  if (wholePageError) {
-    els.scoreHint.textContent += "；上次整页识别未成功，已改用逐行识别";
-  }
   await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 30)));
 
   try {
-    const { binary, width, height } = readPageBinary();
-    const staves = detectStaves(binary, width, height);
-    if (!staves.length) {
-      throw new Error("没有检测到五线谱。这页可能是简谱（数字谱）——目前识谱引擎只支持五线谱；也请检查图片是否清晰完整。");
-    }
-    updateStaffOptions(staves.length);
+    const outcome = await collectPageScore({
+      superseded,
+      onProgress: ({ done, total, label }) => setRecognizeProgress(done, total, label),
+      pickStaff: (staves) => {
+        updateStaffOptions(staves.length);
+        const wanted = Number(els.staffSelect.value);
+        return Number.isInteger(wanted) && wanted >= 0 && wanted < staves.length ? wanted : "all";
+      },
+    });
+    if (!outcome || superseded()) return;
+    const { scoreInfo, staves, diagnostics } = outcome;
 
-    const wanted = Number(els.staffSelect.value);
-    const singleStaff = Number.isInteger(wanted) && wanted >= 0 && wanted < staves.length;
-    const targets = singleStaff ? [wanted] : staves.map((_, index) => index);
-
-    // Audiveris 整页识别：一次调用即得到完整的多声部结构（各声部并行而非首尾串接）。
-    // 只在"识别全部谱表"且本机装有 Audiveris 时走这条路；单行重试仍走逐行流程。
-    if (!singleStaff && audiverisAvailable !== false) {
-      setRecognizeProgress(0, 1, "正在整页识别（Audiveris，约 10–20 秒）…");
-      const engineResult = await recognizeWholePage();
-      if (superseded()) return;
-      if (engineResult.scoreInfo && engineResult.scoreInfo.notes.length) {
-        const scoreInfo = engineResult.scoreInfo;
-        for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
-        dedupePartNames(scoreInfo.notes);
-        state.scoreInfo = scoreInfo;
-        state.notes = scoreInfo.notes;
-        state.staffBoxes = staves;
-        state.recognitionSource = "engine";
-        state.transposeOffset = 0;
-        if (els.transposeInput) els.transposeInput.value = "0";
-        updateVoiceOptions(true);
-        state.recognized = true;
-        els.clefSelect.disabled = false;
-        renderNotes();
-        drawNoteOverlay(scoreInfo.notes, null, staves);
-        updateRecognitionBanner();
-        els.scoreHint.textContent = `Audiveris 整页识别完成：${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节`;
-        const warning = scoreInfo.warnings[0] ? ` ${scoreInfo.warnings[0]}` : "";
-        showToast(`Audiveris 识别到 ${scoreInfo.notes.length} 个音符（${scoreInfo.partNames.length} 个声部），请逐音校对。${warning}`);
-        return;
-      }
-      if (engineResult.unavailable) {
-        audiverisAvailable = false;
-        updateEngineHint();
-      }
-      // 整页识别失败（例如分辨率不足或这一页是简谱）：记下原因，继续走逐行流程。
-      wholePageError = engineResult.error || "";
+    if (diagnostics.wholePage) {
+      commitScore(scoreInfo, staves, "engine");
+      els.scoreHint.textContent = `Audiveris 整页识别完成：${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节`;
+      const warning = scoreInfo.warnings[0] ? ` ${scoreInfo.warnings[0]}` : "";
+      showToast(`Audiveris 识别到 ${scoreInfo.notes.length} 个音符（${scoreInfo.partNames.length} 个声部），请逐音校对。${warning}`);
+      return;
     }
 
-    const systems = targets.length === 1
-      ? [[targets[0]]]
-      : groupSystems(staves.filter((_, index) => targets.includes(index)))
-          .map((system) => system.map((staff) => staves.indexOf(staff)));
-
-    const results = new Map();
-    let done = 0;
-    let engineMissing = false;
-    let estimatedCount = 0;
-    let emptyCount = 0;
-    let failedCount = 0;
-    setRecognizeProgress(0, targets.length, "");
-
-    for (const index of targets) {
-      if (superseded()) return;
-      const staff = staves[index];
-      const box = staffCropBox(staff, width, height, staves[index - 1], staves[index + 1]);
-      setRecognizeProgress(done, targets.length, `正在识别第 ${done + 1} / ${targets.length} 行谱表`);
-
-      let result = null;
-      let clef = els.clefSelect.value;
-      if (!engineMissing && homrAvailable !== false) {
-        const blob = await cropToBlob(box);
-        if (superseded()) return;
-        const engineResult = blob ? await recognizeImageBlob(blob) : { unavailable: true };
-        if (superseded()) return;
-        if (engineResult.unavailable) {
-          engineMissing = true;
-        } else if (engineResult.empty) {
-          result = { notes: [], tempo: 84, measureCount: 0, warnings: [], clef: "", empty: true };
-          emptyCount++;
-        } else if (engineResult.scoreInfo) {
-          result = engineResult.scoreInfo;
-          clef = CLEF_BY_SIGN[result.clef] || clef;
-          if (!result.notes.length) {
-            result.empty = true;
-            emptyCount++;
-          }
-        } else {
-          // 这一行引擎确实失败了：如实标记，不用像素估算去"猜"（那只会产生假音符）。
-          result = { notes: [], tempo: 84, measureCount: 0, warnings: [], clef: "", error: engineResult.error };
-          failedCount++;
-        }
-      }
-      // 只有整台引擎都不可用时，才退回浏览器内的粗略估算。
-      if (!result) {
-        result = estimateStaffNotes(staff, binary, width, height, clef);
-        estimatedCount++;
-      }
-
-      // 本机引擎不返回音符在谱面上的坐标，这里不再尝试用像素检测去"反推"位置：
-      // 在真实雕版谱上（谱号涡卷、歌词、圆滑线）误检率很高，画出来的点反而会误导。
-      // 谱面导航改用"谱表框 + 行高亮 + 音高基准线"，这三者是 100% 可靠的。
-      result.staffIndex = index;
-      result.clefName = clef;
-      results.set(index, result);
-      done++;
-      setRecognizeProgress(done, targets.length, "");
-    }
-
-    if (superseded()) return;
-    const merged = mergeSystemScores(systems, results);
-    if (!merged.notes.length) {
-      // 所有谱表都没能读出音符：最常见的两种情况是这一页是简谱（数字谱），
-      // 或者图片分辨率不足。明确说出来，不要让用户对着"失败"干猜。
-      if (failedCount === targets.length && !estimatedCount && !emptyCount) {
-        throw new Error("没有识别出任何音符。这页可能是简谱（数字谱）——识谱引擎只支持五线谱；也可能是图片不清晰，可换更清晰的整页图片再试。");
-      }
-      throw new Error("逐行识别没有提取到音符，可点击“添加”手动录入。");
-    }
-    for (const note of merged.notes) note.duration = durationFromBeats(note.durationBeats);
-
-    state.scoreInfo = merged;
-    state.notes = merged.notes;
-    state.staffBoxes = staves;
-    state.recognitionSource = estimatedCount === targets.length ? "estimate" : (estimatedCount ? "mixed" : "engine");
-    state.transposeOffset = 0;
-    els.transposeInput.value = "0";
-    updateVoiceOptions(true);
-    state.recognized = true;
-    els.clefSelect.disabled = false;
-    renderNotes();
-    drawNoteOverlay(merged.notes, null, staves);
-    updateRecognitionBanner();
-    const sourceLabel = state.recognitionSource === "engine"
-      ? "本机专业引擎"
-      : state.recognitionSource === "estimate" ? "粗略估算" : "专业引擎 + 部分估算";
+    commitScore(scoreInfo, staves, diagnostics.source);
     const extra = [
-      emptyCount ? `${emptyCount} 行整行休止` : "",
-      failedCount ? `${failedCount} 行识别失败` : "",
+      diagnostics.emptyCount ? `${diagnostics.emptyCount} 行整行休止` : "",
+      diagnostics.failedCount ? `${diagnostics.failedCount} 行识别失败` : "",
     ].filter(Boolean).join(" · ");
-    els.scoreHint.textContent = `逐行识别完成：${targets.length} 行谱表 · ${merged.notes.length} 个音符 · ${merged.systemCount} 个系统${extra ? " · " + extra : ""}`;
-    if (wholePageError) {
+    els.scoreHint.textContent = `逐行识别完成：${diagnostics.targets.length} 行谱表 · ${scoreInfo.notes.length} 个音符 · ${diagnostics.systemCount} 个系统${extra ? " · " + extra : ""}`;
+    if (diagnostics.wholePageError) {
       // 把整页识别失败的原因如实告诉用户（例如这一页是简谱、数字谱，任何引擎都不支持）。
-      els.scoreHint.textContent += ` · 整页识别未成功：${wholePageError}`;
+      els.scoreHint.textContent += ` · 整页识别未成功：${diagnostics.wholePageError}`;
     }
-    const warning = merged.warnings[0] ? ` ${merged.warnings[0]}` : "";
-    showToast(`${sourceLabel}识别到 ${merged.notes.length} 个音符（${targets.length} 行谱表），请逐音校对。${warning}`);
+    const sourceLabel = diagnostics.source === "engine"
+      ? "本机专业引擎"
+      : diagnostics.source === "estimate" ? "粗略估算" : "专业引擎 + 部分估算";
+    const warning = scoreInfo.warnings[0] ? ` ${scoreInfo.warnings[0]}` : "";
+    showToast(`${sourceLabel}识别到 ${scoreInfo.notes.length} 个音符（${diagnostics.targets.length} 行谱表），请逐音校对。${warning}`);
   } catch (error) {
     if (superseded()) return;
     console.error(error);
@@ -1072,9 +1456,10 @@ async function recognizeScore() {
     state.scoreInfo = null;
     state.recognitionSource = null;
     state.staffBoxes = null;
+    state.scorePage = null;
     state.recognized = false;
     renderNotes();
-
+    updatePartControls(true);
     clearOverlay();
     updateRecognitionBanner();
     // 把真实原因告诉用户（例如"这页是简谱"、"没找到五线谱"），而不是一句笼统的失败。
@@ -1087,12 +1472,208 @@ async function recognizeScore() {
     els.cancelRecognize.hidden = true;
     setRecognizeProgress(0, 0, "");
     els.recognizeProgress.hidden = true;
+    els.recognizeAllButton.disabled = false;
     // 文件已经换掉时不要再去改主界面状态，交给新的加载流程处理。
     if (fileToken === state.loadToken) {
       els.recognizeButton.disabled = !state.file;
       els.recognizeLabel.textContent = idleRecognizeLabel();
       els.clefSelect.disabled = false;
       els.staffSelect.disabled = false;
+    }
+  }
+}
+
+/**
+ * 整本批量识别（P0-1）：渲染第 N 页 → 识别 → 渲染第 N+1 → …… 全程进度条 + 可取消，
+ * 最后用 mergePageScores 把各页结果跨页拼成一份小节序号连续、各声部起拍单调递增的多声部乐谱。
+ * 单页失败不会中断整批：失败的页会被标记出来，成功的页照常合并。
+ */
+async function recognizeAllPages() {
+  if (!state.file || !state.pdf || !els.scoreCanvas.width) return;
+  if (state.isRecognizing) return;
+  state.isRecognizing = true;
+  state.cancelRecognize = false;
+  const token = ++state.recognizeToken;
+  const fileToken = state.loadToken;
+  const superseded = () => token !== state.recognizeToken || fileToken !== state.loadToken || state.cancelRecognize;
+  stopPlayback();
+  state.selection = null;
+  els.processingOverlay.hidden = false;
+  els.recognizeButton.disabled = true;
+  els.recognizeAllButton.disabled = true;
+  els.recognizeAllLabel.textContent = "正在识别…";
+  els.clefSelect.disabled = true;
+  els.staffSelect.disabled = true;
+  els.cancelRecognize.hidden = false;
+  const totalPages = state.pageCount;
+  const entries = [];
+  try {
+    for (let number = 1; number <= totalPages; number++) {
+      if (superseded()) return;
+      setRecognizeProgress(number - 1, totalPages, `正在识别第 ${number} / ${totalPages} 页…`);
+      await renderPdfPage(number, fileToken);
+      if (superseded()) return;
+      try {
+        const outcome = await collectPageScore({
+          pickStaff: () => "all",
+          superseded,
+          onProgress: ({ done, total, label }) => {
+            // 页内的逐行进度换算成整本进度：已完成页数 + 本页内百分比。
+            const fraction = total > 0 ? done / total : (label ? 0 : 1);
+            setRecognizeProgress(number - 1 + fraction, totalPages,
+              label ? `第 ${number} / ${totalPages} 页 · ${label}` : `正在识别第 ${number} / ${totalPages} 页…`);
+          },
+        });
+        if (superseded()) return;
+        if (!outcome) return;
+        entries.push(outcome);
+      } catch (error) {
+        if (superseded()) return;
+        // 单页失败不中断整批：记下来，继续识别后面的页，最后如实告知哪几页失败。
+        console.info(`第 ${number} 页识别失败：`, error);
+        entries.push(null);
+      }
+    }
+    if (superseded()) return;
+    const merged = mergePageScores(entries.map((entry) => (entry ? entry.scoreInfo : null)));
+    if (!merged.notes.length) {
+      throw new Error("整本都没有识别出音符。请检查 PDF 是否清晰，或改用单页识别逐页处理。");
+    }
+    merged.title = state.file.name.replace(/\.[^.]+$/, "");
+    const recognized = entries.filter(Boolean);
+    const estimatedPages = recognized.filter((entry) => entry.diagnostics.estimatedCount > 0).length;
+    const source = estimatedPages === 0 ? "engine" : (estimatedPages === recognized.length ? "estimate" : "mixed");
+    commitScore(merged, null, source, { title: merged.title, page: null });
+    // 回到第 1 页预览：直接调 renderPdfPage（它只重画谱面，不会碰识别结果）。
+    await renderPdfPage(1, fileToken);
+    if (superseded()) return;
+    const failed = merged.failedPages;
+    els.scoreHint.textContent = `整本识别完成：${totalPages} 页 · ${merged.notes.length} 个音符 · ${merged.measureCount} 个小节${failed.length ? ` · 第 ${failed.join("、")} 页识别失败` : ""}`;
+    showToast(`已合并 ${totalPages} 页共 ${merged.notes.length} 个音符，请逐音校对。${failed.length ? `（第 ${failed.join("、")} 页失败）` : ""}`);
+  } catch (error) {
+    if (superseded()) return;
+    console.error(error);
+    state.notes = [];
+    state.scoreInfo = null;
+    state.recognitionSource = null;
+    state.staffBoxes = null;
+    state.scorePage = null;
+    state.recognized = false;
+    renderNotes();
+    updatePartControls(true);
+    clearOverlay();
+    updateRecognitionBanner();
+    const message = error && error.message ? error.message : "整本识别时遇到问题，请改用单页识别逐页处理。";
+    showToast(message);
+    els.scoreHint.textContent = "整本识别失败 · " + message;
+  } finally {
+    state.isRecognizing = false;
+    els.processingOverlay.hidden = true;
+    els.cancelRecognize.hidden = true;
+    setRecognizeProgress(0, 0, "");
+    els.recognizeProgress.hidden = true;
+    if (fileToken === state.loadToken) {
+      els.recognizeButton.disabled = !state.file;
+      els.recognizeLabel.textContent = idleRecognizeLabel();
+      els.recognizeAllButton.disabled = false;
+      els.recognizeAllLabel.textContent = `识别全部 ${totalPages} 页`;
+      els.clefSelect.disabled = false;
+      els.staffSelect.disabled = false;
+    }
+  }
+}
+/**
+ * 整本简谱识别：逐页走本机简谱模块（`/api/jianpu/recognize`），再用 mergePageScores 跨页
+ * 拼成一份小节序号连续、各声部起拍单调递增的乐谱。
+ *
+ * 为什么必须单独有这条线：简谱是**逐页**识别的，单页「按简谱识别这一页」每次都会用
+ * commitScore **整份替换** state.notes —— 所以多页简谱若不整本识别，就永远只能演奏最后一页。
+ */
+async function recognizeAllJianpuPages() {
+  if (!state.file || !state.pdf || !els.scoreCanvas.width) return;
+  if (state.isRecognizing) return;
+  if (jianpuAvailable === false) {
+    showToast("未检测到简谱识别所需的解释器：请先安装 homr（会一并装好 opencv），或用 JIANPU_PYTHON 指定解释器。");
+    return;
+  }
+  const beats = Number(els.jianpuBeats.value) || 4;
+  const doMidi = Number(els.jianpuKey.value) || 65;
+  state.isRecognizing = true;
+  state.cancelRecognize = false;
+  const token = ++state.recognizeToken;
+  const fileToken = state.loadToken;
+  const superseded = () => token !== state.recognizeToken || fileToken !== state.loadToken || state.cancelRecognize;
+  stopPlayback();
+  state.selection = null;
+  els.processingOverlay.hidden = false;
+  els.recognizeButton.disabled = true;
+  els.jianpuButton.disabled = true;
+  els.jianpuAllButton.disabled = true;
+  els.recognizeAllButton.disabled = true;
+  els.cancelRecognize.hidden = false;
+  els.jianpuAllLabel.textContent = "正在整本识别…";
+  const totalPages = state.pageCount;
+  const pages = new Array(totalPages).fill(null);   // 下标 = 页码-1，页识别失败就留 null
+  try {
+    for (let number = 1; number <= totalPages; number++) {
+      if (superseded()) return;
+      setRecognizeProgress(number - 1, totalPages, `正在按简谱识别第 ${number} / ${totalPages} 页…`);
+      els.scoreHint.textContent = `正在按简谱识别第 ${number} / ${totalPages} 页（数字模板匹配 + 版面解析）`;
+      await renderPdfPage(number, fileToken);
+      if (superseded()) return;
+      try {
+        const blob = await canvasToBlob();
+        if (!blob) throw new Error("当前页面无法导出为图片。");
+        const scoreInfo = await requestJianpuScore(blob, doMidi, beats);
+        if (scoreInfo.notes.length) pages[number - 1] = scoreInfo;
+        else console.info(`第 ${number} 页没有读出简谱音符，跳过。`);
+      } catch (error) {
+        // 单页失败不中断整批：记下来，最后如实告知哪几页没读出来（mergePageScores 会汇总）。
+        console.info(`第 ${number} 页简谱识别失败：`, error);
+      }
+    }
+    if (superseded()) return;
+    const recognized = pages.filter(Boolean);
+    if (!recognized.length) throw new Error("整本都没有读出简谱音符（这些页面可能不是简谱）。");
+    const merged = recognized.length === 1 ? recognized[0] : mergePageScores(pages);
+    merged.title = state.file.name.replace(/\.[^.]+$/, "");
+    commitScore(merged, null, "jianpu", { title: merged.title, page: null });
+    // 回到第 1 页预览：直接调 renderPdfPage（它只重画谱面，不会碰识别结果）。
+    await renderPdfPage(1, fileToken);
+    if (superseded()) return;
+    const failed = merged.failedPages || [];
+    els.scoreInfo.hidden = false;
+    els.scoreDetails.textContent = `${merged.notes.length} 个音符 · ${merged.partNames.length} 个声部 · ${merged.measureCount} 小节 · ${merged.timeSummary} · ${merged.keySummary}`;
+    els.scoreWarnings.textContent = merged.warnings.join(" ");
+    els.scoreWarnings.hidden = merged.warnings.length === 0;
+    els.scoreHint.textContent = `整本简谱识别完成：${totalPages} 页 · ${merged.notes.length} 个音符 · ${merged.measureCount} 小节${failed.length ? ` · 第 ${failed.join("、")} 页没读出来` : ""}`;
+    showToast(`已把 ${totalPages} 页简谱拼成一份乐谱（${merged.notes.length} 个音符），现在可以整曲播放。${failed.length ? `（第 ${failed.join("、")} 页没读出来）` : ""}`);
+  } catch (error) {
+    if (superseded()) return;
+    console.error(error);
+    state.notes = [];
+    state.scoreInfo = null;
+    state.recognitionSource = null;
+    state.staffBoxes = null;
+    state.scorePage = null;
+    state.recognized = false;
+    renderNotes();
+    updatePartControls(true);
+    clearOverlay();
+    updateRecognitionBanner();
+    const message = error && error.message ? error.message : "整本简谱识别时遇到问题，请改用单页识别逐页处理。";
+    showToast(message);
+    els.scoreHint.textContent = "整本简谱识别失败 · " + message;
+  } finally {
+    state.isRecognizing = false;
+    els.processingOverlay.hidden = true;
+    els.cancelRecognize.hidden = true;
+    setRecognizeProgress(0, 0, "");
+    els.recognizeProgress.hidden = true;
+    if (fileToken === state.loadToken) {
+      updateBatchButtons();
+      els.recognizeButton.disabled = !state.file;
+      els.jianpuButton.disabled = false;
     }
   }
 }
@@ -1130,13 +1711,30 @@ function buildMidiFile(notes = getPlaybackNotes(), offset = 0) {
     tick: 0, priority: 0,
     bytes: [0xff, 0x51, 0x03, (microsPerBeat >> 16) & 0xff, (microsPerBeat >> 8) & 0xff, microsPerBeat & 0xff],
   }];
+  // 同音高、同通道的音不能重叠：MIDI 里 note-off 是按 (通道, 音高) 关的，
+  // 前一个音的 off 会把后一个还在响的同音高音一起关掉（听感上「后面那个音提前断了」）。
+  // 所以先把每个音高的时间段整理成互不重叠：与前一音重叠的，从前一音结束处开始。
+  const byPitch = new Map();
   for (const note of notes) {
     if (!Number.isFinite(note.midi)) continue;
+    const midi = Math.min(127, Math.max(0, Math.round(note.midi)));
     const startTick = Math.max(0, Math.round(((note.startBeat || 0) - offset) * ticksPerBeat));
     const endTick = startTick + Math.max(1, Math.round(beatsForNote(note) * ticksPerBeat));
-    const midi = Math.min(127, Math.max(0, Math.round(note.midi)));
-    events.push({ tick: startTick, priority: 2, bytes: [0x90, midi, 88] });
-    events.push({ tick: endTick, priority: 1, bytes: [0x80, midi, 0] });
+    if (!byPitch.has(midi)) byPitch.set(midi, []);
+    byPitch.get(midi).push({ start: startTick, end: endTick });
+  }
+  for (const [midi, spans] of byPitch) {
+    spans.sort((a, b) => a.start - b.start || a.end - b.end);
+    let previousEnd = -1;
+    for (const span of spans) {
+      if (span.start < previousEnd) span.start = previousEnd;      // 截断重叠部分
+      if (span.end <= span.start) span.end = span.start + 1;       // 保底至少 1 tick
+      previousEnd = Math.max(previousEnd, span.end);
+    }
+    for (const span of spans) {
+      events.push({ tick: span.start, priority: 2, bytes: [0x90, midi, 88] });
+      events.push({ tick: span.end, priority: 1, bytes: [0x80, midi, 0] });
+    }
   }
   events.sort((a, b) => a.tick - b.tick || a.priority - b.priority);
   const track = [];
@@ -1165,14 +1763,58 @@ function downloadMidi() {
   showToast(selectionRange() ? "所选片段的 MIDI 已下载。" : "MIDI 文件已下载。");
 }
 function midiFrequency(midi) { return 440 * (2 ** ((midi - 69) / 12)); }
-function playTone(midi, startAt, duration) {
+/** 某个声部当前的音量（0–1）；默认 1（不衰减）。 */
+function partVolume(key) {
+  const value = state.partVolumes.get(key);
+  return Number.isFinite(value) ? value : 1;
+}
+/** 设置声部音量：正在播放时立刻改总线增益，声音会实时变化且不停播。 */
+function setPartVolume(key, value) {
+  const volume = Math.min(1, Math.max(0, Number(value)));
+  state.partVolumes.set(key, volume);
+  const bus = state.partBuses.get(key);
+  if (bus) {
+    try {
+      bus.gain.setTargetAtTime(volume, state.audio.currentTime, 0.02);
+    } catch {
+      bus.gain.value = volume;
+    }
+  }
+}
+/** 取（或建）某个声部的音量总线：每个声部一条 GainNode，所有该声部的音符都接进来。 */
+function partBus(key) {
+  if (!state.audio) return null;
+  let bus = state.partBuses.get(key);
+  if (!bus) {
+    bus = state.audio.createGain();
+    bus.gain.value = partVolume(key);
+    bus.connect(state.audio.destination);
+    state.partBuses.set(key, bus);
+  }
+  return bus;
+}
+/** 释放声部音量总线（换文件时调用）；音量设置本身保留，下次播放按新总线重建。 */
+function disposePartBuses() {
+  for (const bus of state.partBuses.values()) {
+    try { bus.disconnect(); } catch { /* 已释放 */ }
+  }
+  state.partBuses.clear();
+}
+/** 力度数值（约等于 MIDI velocity）→ 音量峰值；h 约 0.10、mf（89）约 0.18。 */
+function gainForDynamics(value) {
+  if (!Number.isFinite(value)) return 0.16;
+  return Math.min(0.3, Math.max(0.05, 0.16 * (value / 80)));
+}
+function playTone(midi, startAt, duration, peak = 0.16, destination = null) {
   const audio = state.audio, gain = audio.createGain();
   gain.gain.setValueAtTime(0.0001, startAt);
-  gain.gain.exponentialRampToValueAtTime(0.16, startAt + 0.018);
-  gain.gain.exponentialRampToValueAtTime(0.055, startAt + Math.min(0.18, duration * 0.42));
-  gain.gain.setValueAtTime(0.05, Math.max(startAt + 0.03, startAt + duration - 0.045));
+  gain.gain.exponentialRampToValueAtTime(peak, startAt + 0.018);
+  gain.gain.exponentialRampToValueAtTime(peak * 0.344, startAt + Math.min(0.18, duration * 0.42));
+  gain.gain.setValueAtTime(peak * 0.3125, Math.max(startAt + 0.03, startAt + duration - 0.045));
   gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
-  gain.connect(audio.destination);
+  // 接到「声部音量总线」而不是直接接 destination：这样播放中拖音量滑条可以实时改音量树，
+  // 不必停播重排（见 createPartBus）。
+  gain.connect(destination || audio.destination);
   const oscillator = audio.createOscillator();
   oscillator.type = "triangle";
   oscillator.frequency.setValueAtTime(midiFrequency(midi), startAt);
@@ -1191,6 +1833,53 @@ function playTone(midi, startAt, duration) {
     }
     state.sources.delete(oscillator);
   };
+}
+/**
+ * 把 MusicXML 里的速度/力度记号接进播放调度（P1-3）：
+ * - 播放起点（offset，选区起点）处生效的速度作为起始速度，之后按 tempoMarks 分段变速；
+ * - secondsAtBeat 把"拍位"换算成"秒"；力度记号决定该处起的音量峰值。
+ */
+function buildPlaybackTimeline(offset) {
+  const baseTempo = Math.min(320, Math.max(20, Number(els.tempoInput.value) || 84));
+  const rawTempoMarks = (state.scoreInfo && state.scoreInfo.tempoMarks) || [];
+  const rawDynamicsMarks = (state.scoreInfo && state.scoreInfo.dynamicsMarks) || [];
+  let startTempo = baseTempo;
+  const segments = [];
+  for (const mark of rawTempoMarks) {
+    const beat = Number(mark.beat) || 0, bpm = Number(mark.bpm);
+    if (!Number.isFinite(bpm) || bpm <= 0) continue;
+    if (beat <= offset) { startTempo = bpm; continue; }
+    if (segments.length && Math.abs(segments[segments.length - 1].bpm - bpm) < 0.01) continue;
+    segments.push({ beat: beat - offset, bpm });
+  }
+  const dynamics = rawDynamicsMarks
+    .map((mark) => ({ beat: Number(mark.beat) || 0, value: Number(mark.dynamics) }))
+    .filter((mark) => Number.isFinite(mark.value))
+    .sort((a, b) => a.beat - b.beat);
+  let startDynamics = null;
+  for (const mark of dynamics) if (mark.beat <= offset) startDynamics = mark.value;
+
+  const secondsAtBeat = (beatInTimeline) => {
+    let seconds = 0, previous = 0, bpm = startTempo;
+    for (const segment of segments) {
+      if (segment.beat >= beatInTimeline) break;
+      seconds += (segment.beat - previous) * (60 / bpm);
+      previous = segment.beat;
+      bpm = segment.bpm;
+    }
+    seconds += Math.max(0, beatInTimeline - previous) * (60 / bpm);
+    return seconds;
+  };
+  const dynamicsAtBeat = (beatInTimeline) => {
+    let value = startDynamics;
+    for (const mark of dynamics) {
+      if (mark.beat <= offset) continue;
+      if (mark.beat - offset > beatInTimeline) break;
+      value = mark.value;
+    }
+    return value;
+  };
+  return { secondsAtBeat, dynamicsAtBeat };
 }
 async function playMelody() {
   const { notes: playbackNotes, offset, finishBeat } = playbackTimeline();
@@ -1214,23 +1903,28 @@ async function playMelody() {
     event.startBeat = Math.min(event.startBeat, onset);
   }
   const events = [...eventMap.values()].sort((a, b) => a.startBeat - b.startBeat);
-  const beatSeconds = 60 / tempo, start = state.audio.currentTime + 0.06;
+  const timeline = buildPlaybackTimeline(offset);
+  const start = state.audio.currentTime + 0.06;
   state.isPlaying = true;
   updatePlaybackControls();
   for (const event of events) {
     for (const note of event.notes) {
-      const seconds = beatsForNote(note) * beatSeconds;
-      const at = start + Math.max(0, (Number(note.startBeat) || 0) - offset) * beatSeconds;
-      playTone(note.midi, at, seconds * 0.92);
+      const onset = Math.max(0, (Number(note.startBeat) || 0) - offset);
+      const seconds = Math.max(0.05, timeline.secondsAtBeat(onset + beatsForNote(note)) - timeline.secondsAtBeat(onset));
+      const at = start + timeline.secondsAtBeat(onset);
+      // 力度记号（P1-3）：该处起生效的力度决定音量峰值。
+      // 发音长度取名义时值的 0.99：留 8%（原来）× 的长度会在连奏段落里听成「莫名的停顿」。
+      playTone(note.midi, at, seconds * 0.99, gainForDynamics(timeline.dynamicsAtBeat(onset)),
+        partBus(voiceIdentity(note)));
     }
-    state.timers.push(setTimeout(() => highlightEvent(event.notes.map((note) => note.id)), event.startBeat * beatSeconds * 1000));
+    state.timers.push(setTimeout(() => highlightEvent(event.notes.map((note) => note.id)), timeline.secondsAtBeat(event.startBeat) * 1000));
   }
   state.timers.push(setTimeout(() => {
     state.isPlaying = false;
     highlightEvent(null);
     updatePlaybackControls();
     if (state.loop && getPlaybackNotes().length) playMelody().catch((error) => console.error(error));
-  }, finishBeat * beatSeconds * 1000 + 120));
+  }, timeline.secondsAtBeat(finishBeat) * 1000 + 120));
 }
 function highlightEvent(noteIds) {
   const activeIds = noteIds === null ? null : new Set(noteIds);
@@ -1260,24 +1954,47 @@ function handleDrop(event) {
 }
 async function goToPdfPage(number) {
   if (!state.pdf) return;
-  clearScore();
+  // 翻页**不清空识别结果、也不停播放**：结果、校对过的音符、声部选择、选区、正在进行的播放
+  // 都与「当前显示哪一页」无关；翻页只改谱面显示，并把谱面坐标点按「这一页是不是识别时的那一页」
+  // 收起/展开（见 refreshScoreOverlay）。这样边放边翻页跟着看谱才不会被打断。
   const token = state.loadToken;
   await renderPdfPage(number, token);
   if (token !== state.loadToken) return;
-  els.scoreHint.textContent = "可以开始识别此页";
+  const samePage = state.scorePage !== null && state.scorePage === state.pageNumber;
+  els.scoreHint.textContent = state.notes.length
+    ? samePage
+      ? `识别结果就是这一页（${state.notes.length} 个音符）· 可继续校对、播放或导出`
+      : state.scorePage === null
+        ? `识别结果是整本乐谱（${state.notes.length} 个音符），可整曲播放/导出；谱面坐标点只对识别的那一页有意义，这里不画点`
+        : `识别结果来自第 ${state.scorePage} 页，仍可播放/导出；本页还没识别过，可点「识别乐谱」`
+    : "可以开始识别此页";
 }
 els.fileInput.addEventListener("change", (event) => loadFile(event.target.files[0]));
 els.chooseFileButton.addEventListener("click", () => els.fileInput.click());
 els.removeFile.addEventListener("click", removeCurrentFile);
 els.recognizeButton.addEventListener("click", recognizeScore);
+els.jianpuButton.addEventListener("click", recognizeJianpuScore);
+els.jianpuAllButton.addEventListener("click", recognizeAllJianpuPages);
+els.recognizeAllButton.addEventListener("click", recognizeAllPages);
 els.addNoteButton.addEventListener("click", addNote);
 els.midiButton.addEventListener("click", downloadMidi);
 els.playButton.addEventListener("click", playMelody);
 els.stopButton.addEventListener("click", stopPlayback);
 els.canvasWrap.addEventListener("click", focusNearestScoreNote);
-els.voiceFilter.addEventListener("change", () => {
+els.partSelectAll.addEventListener("click", () => {
+  state.selectedParts = null;
   stopPlayback();
-  updateSelectionUi();
+  updatePartControls();
+});
+els.partSelectNone.addEventListener("click", () => {
+  state.selectedParts = new Set();
+  stopPlayback();
+  updatePartControls();
+});
+els.pianoToggle.addEventListener("change", () => {
+  state.includePiano = els.pianoToggle.checked;
+  stopPlayback();
+  updatePlaybackReady();
 });
 els.lowConfidenceButton.addEventListener("click", () => {
   state.onlyLowConfidence = !state.onlyLowConfidence;

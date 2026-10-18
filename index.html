@@ -81,15 +81,63 @@
                 <span aria-hidden="true">⌄</span>
               </div>
             </div>
+            <div class="jianpu-field" id="jianpuField" hidden>
+              <label class="field-label" for="jianpuKey">简谱调号（1 = ?）</label>
+              <div class="select-wrap">
+                <select id="jianpuKey">
+                  <optgroup label="常用（合唱谱）">
+                    <option value="65" selected>1 = F · F 调</option>
+                    <option value="60">1 = C · C 调</option>
+                    <option value="67">1 = G · G 调</option>
+                    <option value="62">1 = D · D 调</option>
+                    <option value="58">1 = 降B · ♭B 调</option>
+                    <option value="63">1 = 降E · ♭E 调</option>
+                  </optgroup>
+                  <optgroup label="其它">
+                    <option value="69">1 = A · A 调</option>
+                    <option value="64">1 = E · E 调</option>
+                    <option value="71">1 = B · B 调</option>
+                    <option value="61">1 = 降D · ♭D 调</option>
+                    <option value="68">1 = 降A · ♭A 调</option>
+                    <option value="66">1 = 升F / 降G · ♯F / ♭G 调</option>
+                  </optgroup>
+                </select>
+                <span aria-hidden="true">⌄</span>
+              </div>
+              <label class="field-label" for="jianpuBeats">简谱拍号（每小节拍数）</label>
+              <div class="select-wrap">
+                <select id="jianpuBeats">
+                  <option value="4" selected>4 / 4 · 每小节 4 拍</option>
+                  <option value="2">2 / 4 · 每小节 2 拍</option>
+                  <option value="3">3 / 4 · 每小节 3 拍</option>
+                  <option value="6">6 / 4 · 每小节 6 拍</option>
+                  <option value="1.5">3 / 8 · 每小节 3 个八分音符（=1.5 拍）</option>
+                  <option value="3">6 / 8 · 每小节 6 个八分音符（=3 拍）</option>
+                  <option value="4.5">9 / 8 · 每小节 9 个八分音符（=4.5 拍）</option>
+                  <option value="6">12 / 8 · 每小节 12 个八分音符（=6 拍）</option>
+                </select>
+                <span aria-hidden="true">⌄</span>
+              </div>
+              <button class="ghost-button jianpu-button" id="jianpuButton" type="button" hidden>
+                <span id="jianpuLabel">按简谱识别这一页</span>
+              </button>
+              <button class="ghost-button jianpu-button" id="jianpuAllButton" type="button" hidden>
+                <span id="jianpuAllLabel">按简谱识别全部页</span>
+              </button>
+              <p class="fine-print" id="jianpuHint">简谱（数字谱）识别为实验性功能：按谱面左上角的「1 = ?」选调号，识别结果务必逐音校对。<strong>多页简谱要点「按简谱识别全部 N 页」</strong>才能一次得到整份可演奏的乐谱——单页识别只会替换当前结果。</p>
+            </div>
             <button class="primary-button recognize-button" id="recognizeButton" type="button" disabled>
               <span class="button-spark" aria-hidden="true">✳</span><span id="recognizeLabel">识别乐谱</span><span class="button-arrow" aria-hidden="true">→</span>
+            </button>
+            <button class="ghost-button recognize-all-button" id="recognizeAllButton" type="button" hidden>
+              <span id="recognizeAllLabel">识别全部页</span>
             </button>
             <div class="recognize-progress" id="recognizeProgress" hidden>
               <div class="recognize-progress-track"><span id="recognizeProgressBar"></span></div>
               <span class="recognize-progress-label" id="recognizeProgressLabel"></span>
             </div>
             <button class="ghost-button cancel-recognize" id="cancelRecognize" type="button" hidden>取消识别</button>
-            <p class="fine-print" id="engineHint">图片识别依赖本机专业引擎（Audiveris 整页识别 / homr 逐谱表识别）；未安装时只做粗略估算，结果务必逐音校对。识谱引擎只支持五线谱，简谱（数字谱）暂不支持。也可导入 OMR 工具导出的 MusicXML/MXL。</p>
+            <p class="fine-print" id="engineHint">图片识别依赖本机专业引擎（Audiveris 整页识别 / homr 逐谱表识别）；未安装时只做粗略估算，结果务必逐音校对。五线谱由专业引擎识别；简谱（数字谱）改用本机简谱识别模块（实验性），请在下方选择调号与拍号。也可导入 OMR 工具导出的 MusicXML/MXL。</p>
           </aside>
 
           <section class="score-card panel">
@@ -146,7 +194,20 @@
               <label class="tempo-box"><span class="summary-label">速度</span><span class="tempo-value"><input id="tempoInput" type="number" min="20" max="320" value="84" aria-label="每分钟拍数" /><small>BPM</small></span></label>
             </div>
             <div class="notes-toolbar"><span class="field-label">旋律音符</span><div class="note-actions"><button class="ghost-button" id="lowConfidenceButton" type="button" title="只显示置信度偏低、建议校对的音符" hidden>只看待校对</button><button class="midi-button" id="midiButton" type="button" title="下载 MIDI 文件" disabled>↓ MIDI</button><button class="add-note-button" id="addNoteButton" type="button" title="添加音符">＋ 添加</button></div></div>
-            <label class="voice-filter" id="voiceFilterField" hidden><span>试听 / 导出声部</span><select id="voiceFilter" aria-label="选择试听和导出的声部"><option value="all">全部声部</option></select></label>
+            <div class="part-panel" id="partPanel" hidden>
+              <div class="part-panel-head">
+                <span class="field-label">要演奏哪些声部</span>
+                <span class="part-panel-actions">
+                  <button class="text-button small" id="partSelectAll" type="button">全选</button>
+                  <button class="text-button small" id="partSelectNone" type="button">全不选</button>
+                </span>
+              </div>
+              <div class="part-list" id="partList"></div>
+              <label class="part-piano" id="pianoToggleWrap" hidden>
+                <input type="checkbox" id="pianoToggle" checked /><span>包含钢琴伴奏</span>
+              </label>
+              <p class="fine-print part-hint">「声部」就是乐谱上每一行的演唱者。勾上要听的声部（例如只听女高就把别的去掉），全勾就是听合唱；不想听钢琴伴奏就把「包含钢琴伴奏」去掉。<strong>每条右边的小滑条就是这个声部的音量</strong>——觉得钢伴太吵就把它拖小，播放中拖也立刻生效、不会中断。声部名可点下拉改成谱面上的叫法（女高 / 女中 / 男中），改名后整份乐谱一起更新。</p>
+            </div>
             <div class="note-columns" aria-hidden="true"><span></span><span>音高</span><span title="以四分音符为一拍">起拍</span><span>时值</span><span></span></div>
             <div class="note-list" id="noteList">
               <div class="notes-empty" id="notesEmpty"><span aria-hidden="true">♫</span><strong>等乐谱准备好</strong><small>识别结果会出现在这里</small></div>
@@ -178,7 +239,7 @@
           <div class="how-steps">
             <article><span class="how-number">01</span><div><strong>导入谱面</strong><p>支持 PDF、常见图片和 MusicXML/MXL 符号乐谱。</p></div></article>
             <article><span class="how-number">02</span><div><strong>识别并校对</strong><p>先把整页切成一行行谱表再逐行识别，避免多声部被压平成一条旋律；顶部徽标标明结果来源，置信度偏低的音符会被标出。</p></div></article>
-            <article><span class="how-number">03</span><div><strong>演奏任意一段</strong><p>点音符序号设起点、Shift+点设终点，即可只试听或导出这一段，也可开启循环；整体音高偏差可用「整体移调」一次校正。</p></div></article>
+            <article><span class="how-number">03</span><div><strong>挑声部，听到它</strong><p>勾上要听的声部就能整曲播放，也可以只留一行单独听（例如只听女高）；不想听钢琴伴奏就把它去掉。还可以点音符序号选起点、Shift+点选终点，只播放或导出这一段，配合循环反复抠细节。</p></div></article>
           </div>
         </section>
       </main>

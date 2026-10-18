@@ -71,10 +71,22 @@ h1 span { color: var(--green); }
 .playback-heading { align-items: center; }.live-pill { display: flex; align-items: center; gap: 5px; padding: 5px 8px; background: #f1f6f1; border-radius: 20px; color: #62806a; font-size: 9px; }.live-pill i { width: 5px; height: 5px; border-radius: 50%; background: #82a88a; }
 .playback-summary { height: 75px; display: flex; align-items: center; margin-top: 17px; border-radius: 8px; background: #f8faf7; padding: 0 15px; }.playback-summary > div:first-child { flex: 1; }.summary-label { display: block; color: #9aa39c; font-size: 9px; }.playback-summary strong { display: block; color: #334c3c; font-size: 22px; margin-top: 2px; font-weight: 600; }.playback-summary strong small { font-size: 10px; color: #849187; font-weight: 400; }.summary-divider { height: 34px; width: 1px; background: #e6ece6; margin: 0 14px; }.tempo-box { min-width: 76px; }.tempo-value { display: flex; align-items: baseline; gap: 4px; margin-top: 4px; }.tempo-value input { width: 42px; padding: 0; border: 0; outline: 0; background: transparent; font-size: 17px; color: #385441; font-weight: 600; }.tempo-value small { font-size: 8px; color: #89978d; }
 .notes-toolbar { display: flex; justify-content: space-between; align-items: center; margin: 17px 0 8px; }.note-actions { display: flex; align-items: center; gap: 10px; }.add-note-button { border: 0; background: none; color: var(--green); font-size: 9px; cursor: pointer; padding: 4px 2px; }.add-note-button:hover { color: var(--green-dark); text-decoration: underline; }.midi-button { border: 1px solid #e4ebe4; border-radius: 5px; background: #fbfcfa; color: #688171; font-size: 8px; padding: 4px 6px; cursor: pointer; }.midi-button:hover:not(:disabled) { border-color: #c7d8c9; background: #f1f6f1; }.midi-button:disabled { opacity: .4; cursor: default; }.note-list { height: 250px; overflow-y: auto; padding-right: 2px; scrollbar-width: thin; scrollbar-color: #dce5dc transparent; }.notes-empty { height: 100%; min-height: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #98a49a; }.notes-empty > span { color: #9fb2a2; font-size: 24px; margin-bottom: 7px; }.notes-empty strong { color: #78867c; font-size: 10px; font-weight: 600; }.notes-empty small { font-size: 9px; margin-top: 5px; }
-.voice-filter { display: flex; align-items: center; gap: 8px; margin: -1px 0 7px; color: #929d94; font-size: 9px; }
-.voice-filter[hidden] { display: none; }
-.voice-filter select { min-width: 0; max-width: 100%; height: 26px; padding: 0 6px; border: 1px solid #e7ece7; border-radius: 5px; color: #506357; background: #fbfcfa; outline: none; font-size: 9px; }
-.voice-filter select:focus { border-color: #8eaa96; }
+.part-panel { margin: -1px 0 7px; }
+.part-panel[hidden] { display: none; }
+.part-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.part-panel-actions { display: flex; align-items: center; gap: 7px; }
+.part-list { display: flex; flex-direction: column; gap: 4px; }
+.part-row { display: grid; grid-template-columns: 13px minmax(0, 1fr) 56px auto; gap: 6px; align-items: center; }
+.part-row input[type="checkbox"] { width: 12px; height: 12px; margin: 0; accent-color: #47715d; cursor: pointer; }
+.part-name-select { min-width: 0; width: 100%; height: 25px; padding: 0 4px; border: 1px solid #e4ebe4; border-radius: 5px; color: #3f5347; background: #fbfcfa; font-size: 10px; outline: none; cursor: pointer; }
+.part-name-select:hover { border-color: #c7d8c9; }
+.part-name-select:focus { border-color: #8eaa96; }
+.part-volume { width: 100%; height: 16px; margin: 0; background: transparent; accent-color: #47715d; cursor: pointer; }
+.part-row small { color: #a0aaa1; font-size: 9px; white-space: nowrap; }
+.part-piano { display: flex; align-items: center; gap: 6px; margin: 7px 0 0; color: #506357; font-size: 10px; cursor: pointer; }
+.part-piano[hidden] { display: none; }
+.part-piano input { margin: 0; accent-color: #47715d; }
+.part-hint { margin: 6px 0 0; }
 .note-columns, .note-row { display: grid; grid-template-columns: 23px minmax(45px, 1fr) 48px 82px 22px; gap: 5px; align-items: center; }
 .note-columns { padding: 0 4px 4px; color: #a0aaa1; font-size: 8px; text-align: center; }
 .note-columns span:first-child, .note-columns span:last-child { visibility: hidden; }
@@ -122,6 +134,9 @@ h1 span { color: var(--green); }
 .recognition-banner.is-file .recognition-dot { background: #5b7ba6; box-shadow: 0 0 0 3px rgba(91, 123, 166, .16); }
 .recognition-banner.is-mixed { border-color: #e6d8c0; background: #fdfaf3; }
 .recognition-banner.is-mixed .recognition-dot { background: #b98a3f; box-shadow: 0 0 0 3px rgba(185, 138, 63, .18); }
+/* 简谱识别：与"专业五线谱引擎"区分开的青色，强调这是实验性能力 */
+.recognition-banner.is-jianpu { border-color: #c6dde0; background: #f2f9f9; }
+.recognition-banner.is-jianpu .recognition-dot { background: #3d7f85; box-shadow: 0 0 0 3px rgba(61, 127, 133, .16); }
 
 /* 低置信度音符：左侧色条 + 琥珀底色；"只看待校对"筛选靠 [hidden] 隐藏行 */
 .note-row[hidden] { display: none; }
@@ -160,6 +175,18 @@ h1 span { color: var(--green); }
 .recognize-progress-label { font-size: 10px; color: #5f6d64; }
 .cancel-recognize { margin-top: 8px; width: 100%; }
 .cancel-recognize[hidden] { display: none; }
+/* 整本批量识别按钮（多页 PDF 专用） */
+.recognize-all-button { margin-top: 8px; width: 100%; padding: 6px 7px; }
+.recognize-all-button[hidden] { display: none; }
+
+/* 简谱（数字谱）识别：调号 / 拍号设置与实验性识别按钮 */
+.jianpu-field { margin-top: 15px; padding-top: 13px; border-top: 1px dashed #e7ebe6; }
+.jianpu-field[hidden] { display: none; }
+.jianpu-field .field-label { display: block; margin: 10px 0 7px; }
+.jianpu-field .field-label:first-of-type { margin-top: 0; }
+.jianpu-field .fine-print { margin-top: 9px; }
+.jianpu-button { margin-top: 10px; width: 100%; padding: 6px 7px; }
+.jianpu-button[hidden] { display: none; }
 
 /* 整体移调 */
 .edit-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0 0; }

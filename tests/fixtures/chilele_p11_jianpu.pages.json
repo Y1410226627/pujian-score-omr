@@ -1,0 +1,1258 @@
+{
+ "provenance": "两种渲染尺寸下 jianpu.py 对《敕勒歌》第 11 页（简谱）的输出快照。用于锁住「换渲染尺寸不能让结果变差」——这是相对本次交接时的结果记录，不是第三方标注；绝对精度以 chilele_p11_jianpu.ground-truth.json 为准。",
+ "groundTruth": "chilele_p11_jianpu.ground-truth.json",
+ "pages": {
+  "_3x": {
+   "label": "3× 渲染（1785×2523，文档原基准）",
+   "image": "_source__p11_3x.png",
+   "measureCount": 12,
+   "parts": [
+    {
+     "name": "声部1",
+     "notes": [
+      {
+       "midi": 69,
+       "startBeat": 4.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 8.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 12.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 14.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 15.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 16.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 17.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 18.0,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 21.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 22.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 74,
+       "startBeat": 23.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 74,
+       "startBeat": 24.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 25.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 26.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 27.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 28.0,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 29.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 31.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 31.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 32.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 70,
+       "startBeat": 36.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 38.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 40.75,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 41.75,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 42.75,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 44.75,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 70,
+       "startBeat": 44.75,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 46.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 47.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 72,
+       "startBeat": 47.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 74,
+       "startBeat": 48.25,
+       "durationBeats": 0.5
+      }
+     ]
+    },
+    {
+     "name": "声部2",
+     "notes": [
+      {
+       "midi": 69,
+       "startBeat": 4.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 8.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 12.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 14.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 15.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 16.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 21.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 22.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 23.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 24.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 25.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 26.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 27.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 28.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 64,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 31.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 31.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 32.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 32.5,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 36.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 64,
+       "startBeat": 38.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 40.75,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 42.75,
+       "durationBeats": 1.5
+      }
+     ]
+    },
+    {
+     "name": "声部3",
+     "notes": [
+      {
+       "midi": 67,
+       "startBeat": 8.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 12.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 13.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 14.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 14.5,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 15.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 57,
+       "startBeat": 16.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 17.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 18.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 19.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 19.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 20.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 23.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 23.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 24.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 27.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 27.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 28.0,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 29.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 31.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 31.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 32.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 32.5,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 35.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 35.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 36.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 36.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 37.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 37.5,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 38.5,
+       "durationBeats": 0.75
+      },
+      {
+       "midi": 69,
+       "startBeat": 39.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 39.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 40.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 40.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 57,
+       "startBeat": 41.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 43.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 44.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 44.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 45.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 45.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 46.25,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 47.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 47.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 47.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 47.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 64,
+       "startBeat": 48.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 48.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 64,
+       "startBeat": 48.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 48.75,
+       "durationBeats": 0.5
+      }
+     ]
+    },
+    {
+     "name": "声部4",
+     "notes": [
+      {
+       "midi": 58,
+       "startBeat": 20.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 70,
+       "startBeat": 20.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 57,
+       "startBeat": 24.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 24.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 57,
+       "startBeat": 27.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 27.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 28.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 32.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 46.75,
+       "durationBeats": 2.0
+      }
+     ]
+    }
+   ],
+   "warnings": [
+    "第 10 小节内容为 4.75 拍，超出拍号 4/4。",
+    "第 12 小节内容为 4.5 拍，超出拍号 4/4。"
+   ]
+  },
+  "_2600": {
+   "label": "长边 2600px（与应用实际渲染一致）",
+   "image": "_source__p11_2600.png",
+   "measureCount": 12,
+   "parts": [
+    {
+     "name": "声部1",
+     "notes": [
+      {
+       "midi": 69,
+       "startBeat": 4.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 8.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 12.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 14.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 15.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 16.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 17.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 18.0,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 21.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 22.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 74,
+       "startBeat": 23.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 74,
+       "startBeat": 24.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 25.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 26.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 27.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 28.0,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 29.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 31.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 31.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 32.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 70,
+       "startBeat": 36.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 38.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 72,
+       "startBeat": 40.75,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 41.75,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 42.75,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 44.75,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 70,
+       "startBeat": 44.75,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 46.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 47.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 72,
+       "startBeat": 47.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 74,
+       "startBeat": 48.25,
+       "durationBeats": 0.5
+      }
+     ]
+    },
+    {
+     "name": "声部2",
+     "notes": [
+      {
+       "midi": 69,
+       "startBeat": 4.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 8.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 12.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 14.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 15.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 16.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 21.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 22.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 23.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 24.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 25.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 26.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 27.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 28.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 64,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 31.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 31.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 32.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 32.5,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 36.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 64,
+       "startBeat": 38.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 40.75,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 42.75,
+       "durationBeats": 1.5
+      }
+     ]
+    },
+    {
+     "name": "声部3",
+     "notes": [
+      {
+       "midi": 67,
+       "startBeat": 8.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 12.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 13.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 65,
+       "startBeat": 14.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 14.5,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 15.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 57,
+       "startBeat": 16.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 17.0,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 18.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 19.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 19.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 20.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 23.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 23.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 24.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 27.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 27.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 28.0,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 29.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 31.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 31.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 65,
+       "startBeat": 32.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 32.5,
+       "durationBeats": 1.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 35.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 35.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 36.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 36.5,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 37.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 37.5,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 67,
+       "startBeat": 38.5,
+       "durationBeats": 0.75
+      },
+      {
+       "midi": 69,
+       "startBeat": 39.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 39.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 40.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 40.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 57,
+       "startBeat": 41.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 43.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 44.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 44.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 45.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 45.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 46.25,
+       "durationBeats": 1.0
+      },
+      {
+       "midi": 60,
+       "startBeat": 47.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 47.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 47.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 47.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 64,
+       "startBeat": 48.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 48.25,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 64,
+       "startBeat": 48.75,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 48.75,
+       "durationBeats": 0.5
+      }
+     ]
+    },
+    {
+     "name": "声部4",
+     "notes": [
+      {
+       "midi": 58,
+       "startBeat": 20.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 70,
+       "startBeat": 20.0,
+       "durationBeats": 4.0
+      },
+      {
+       "midi": 57,
+       "startBeat": 24.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 24.0,
+       "durationBeats": 3.0
+      },
+      {
+       "midi": 57,
+       "startBeat": 27.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 69,
+       "startBeat": 27.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 67,
+       "startBeat": 28.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 69,
+       "startBeat": 30.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 62,
+       "startBeat": 32.0,
+       "durationBeats": 2.0
+      },
+      {
+       "midi": 62,
+       "startBeat": 34.0,
+       "durationBeats": 0.5
+      },
+      {
+       "midi": 60,
+       "startBeat": 46.75,
+       "durationBeats": 2.0
+      }
+     ]
+    }
+   ],
+   "warnings": [
+    "第 10 小节内容为 4.75 拍，超出拍号 4/4。",
+    "第 12 小节内容为 4.5 拍，超出拍号 4/4。"
+   ]
+  }
+ }
+}

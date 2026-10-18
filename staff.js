@@ -349,7 +349,94 @@ export function mergeSystemScores(systems, results) {
     partNames,
     tempo: tempo || 84,
     measureCount,
+    // 本页总时长（拍），供跨页合并时把后一页整体平移。
+    totalBeats: offsetBeats,
     systemCount: systems.length,
     staffCount: systems.reduce((sum, system) => sum + system.length, 0),
+  };
+}
+
+/** 一页识别结果的总时长（拍）。优先用解析出的总时长，缺省时用最后一个音符的结束拍兜底。 */
+export function pageLengthBeats(page) {
+  if (!page) return 0;
+  if (Number.isFinite(page.totalBeats) && page.totalBeats > 0) return page.totalBeats;
+  let end = 0;
+  for (const note of page.notes || []) {
+    end = Math.max(end, (Number(note.startBeat) || 0) + (Number(note.durationBeats) || 1));
+  }
+  return end;
+}
+
+/**
+ * 把多页识别结果按页顺序拼成一份连续的多声部乐谱。
+ *
+ * 每页都是独立识别出来的：各页的小节序号都从 1 开始、起拍都从 0 开始。
+ * 这里把后一页整体向后平移——起拍偏移 = 前面各页总时长之和，
+ * 小节序号偏移 = 前面各页小节总数之和；同一 partId 在各页之间视为同一声部，
+ * 因此各声部会自然地一页接一页延续下去。
+ *
+ * 拍号/调号只取第一页，避免中途出现属性重置导致时值换算错乱。
+ *
+ * @param {(object|null)[]} pages 每页的 scoreInfo（含 notes/measureCount/totalBeats）；
+ *        某页识别失败时该位置传 null，合并结果会把它记入 failedPages。
+ */
+export function mergePageScores(pages) {
+  const notes = [];
+  const warnings = new Set();
+  const failedPages = [];
+  let offsetBeats = 0;
+  let offsetMeasures = 0;
+  let first = null;
+
+  pages.forEach((page, index) => {
+    if (!page) {
+      failedPages.push(index + 1);
+      return;
+    }
+    if (!first) first = page;
+    for (const note of page.notes || []) {
+      const number = Number(note.measure);
+      notes.push({
+        ...note,
+        startBeat: (Number(note.startBeat) || 0) + offsetBeats,
+        measure: Number.isFinite(number) && note.measure !== "" ? String(number + offsetMeasures) : note.measure,
+      });
+    }
+    for (const warning of page.warnings || []) warnings.add(warning);
+    offsetBeats += pageLengthBeats(page);
+    offsetMeasures += page.measureCount || 0;
+  });
+
+  if (failedPages.length) warnings.add(`第 ${failedPages.join("、")} 页识别失败，未能并入结果。`);
+
+  notes.sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
+  let eventId = -1;
+  let previousBeat = Number.NaN;
+  notes.forEach((note, index) => {
+    if (!Number.isFinite(previousBeat) || Math.abs(note.startBeat - previousBeat) > 0.00001) {
+      eventId++;
+      previousBeat = note.startBeat;
+    }
+    note.eventId = eventId;
+    note.id = `page-${eventId}-${note.partId}-${note.midi}-${index}`;
+    if (!note.duration) note.duration = "custom";
+  });
+
+  return {
+    notes,
+    warnings: [...warnings],
+    partNames: first && first.partNames ? [...first.partNames] : [],
+    tempo: (first && first.tempo) || 84,
+    measureCount: offsetMeasures,
+    totalBeats: offsetBeats,
+    pageCount: pages.length,
+    failedPages,
+    timeSummary: first ? first.timeSummary : "",
+    keySummary: first ? first.keySummary : "",
+    clef: first ? first.clef : "",
+    // 与前文一致：速度/力度只取第一页的记号，其余页视为延续。
+    tempoMarks: first && first.tempoMarks ? [...first.tempoMarks] : [],
+    dynamicsMarks: first && first.dynamicsMarks ? [...first.dynamicsMarks] : [],
+    title: first ? first.title : "未命名乐谱",
   };
 }

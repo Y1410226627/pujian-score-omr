@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import webbrowser
@@ -32,13 +33,13 @@ SECURITY_HEADERS = (
     ("Referrer-Policy", "no-referrer"),
     ("Content-Security-Policy", (
         "default-src 'self'; "
-        "script-src 'self' https://cdn.jsdelivr.net; "
+        "script-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' blob: data:; "
         "media-src 'self' blob:; "
-        "connect-src 'self' https://cdn.jsdelivr.net; "
-        "worker-src 'self' blob: https://cdn.jsdelivr.net; "
+        "connect-src 'self'; "
+        "worker-src 'self' blob:; "
         "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )),
 )
@@ -84,6 +85,48 @@ def find_audiveris():
     return shutil.which("Audiveris")
 
 
+def find_jianpu_python():
+    """简谱识别（jianpu.py）需要 opencv-python 与 Pillow，它们随 homr 装在项目 .venv 里。
+
+    找不到 .venv 时退回当前解释器：那样 jianpu.py 会自报依赖缺失，
+    接口据此返回「引擎不可用」，让前端优雅降级，而不是抛栈。
+    """
+    configured = os.environ.get("JIANPU_PYTHON", "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.is_file():
+            return str(configured_path.resolve())
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+    for candidate in (
+        PROJECT_DIR / ".venv" / "Scripts" / "python.exe",
+        PROJECT_DIR / ".venv" / "bin" / "python",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
+
+
+JIANPU_SCRIPT = PROJECT_DIR / "jianpu.py"
+
+
+def jianpu_available():
+    """简谱识别是否可用：需要 jianpu.py，以及一个带 opencv 的解释器。
+
+    带 opencv 的解释器通常就是装了 homr 的项目 .venv；也可用 JIANPU_PYTHON 指定。
+    serve.py 自身用什么解释器启动都不影响这里（避免用 .venv 启动时误报不可用）。
+    """
+    if not JIANPU_SCRIPT.is_file():
+        return False
+    if os.environ.get("JIANPU_PYTHON", "").strip():
+        return True
+    return any(candidate.is_file() for candidate in (
+        PROJECT_DIR / ".venv" / "Scripts" / "python.exe",
+        PROJECT_DIR / ".venv" / "bin" / "python",
+    ))
+
+
 class ProjectHandler(SimpleHTTPRequestHandler):
     # 给每个连接设置读超时，避免客户端声明 Content-Length 后慢速滴流、长期占用线程。
     timeout = REQUEST_TIMEOUT_SECONDS
@@ -116,21 +159,23 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         return hostname.lower() in ALLOWED_HOSTS
 
     def path_is_servable(self):
-        """只服务项目根目录下的白名单静态文件；拒绝隐藏文件、子目录与代码/依赖文件。"""
+        """只服务项目根目录下的白名单静态文件，以及 vendor/ 下的本地依赖；
+        拒绝隐藏文件、其他子目录与代码/依赖文件。"""
         decoded = unquote(urlsplit(self.path).path)
         if "\x00" in decoded:
             return False
         if decoded in ("", "/"):
             return True
         parts = [part for part in decoded.replace("\\", "/").split("/") if part not in ("", ".")]
-        if len(parts) != 1:
+        if not parts:
             return False
-        name = parts[0]
-        if name.startswith("."):
+        if any(part.startswith(".") or part.lower() in DENIED_SEGMENTS for part in parts):
             return False
-        if name.lower() in DENIED_SEGMENTS:
-            return False
-        return Path(name).suffix.lower() in ALLOWED_SUFFIXES
+        # 顶层单文件：按后缀白名单放行；其他子目录一律拒绝。
+        if len(parts) == 1:
+            return Path(parts[0]).suffix.lower() in ALLOWED_SUFFIXES
+        # vendor/ 下的本地依赖（如 pdf.js）允许深层访问，仍受后缀白名单约束。
+        return parts[0] == "vendor" and Path(parts[-1]).suffix.lower() in ALLOWED_SUFFIXES
 
     def do_GET(self):
         if not self.host_is_allowed():
@@ -140,6 +185,7 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             self.send_json(200, {
                 "homrAvailable": find_homr() is not None,
                 "audiverisAvailable": find_audiveris() is not None,
+                "jianpuAvailable": jianpu_available(),
             })
             return
         if not self.path_is_servable():
@@ -161,11 +207,45 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         self.send_error(404, "Not Found")
         return None
 
+    def read_image_body(self):
+        """校验并读取 POST 上来的图片，返回 (图片字节, 后缀)。
+
+        只收 PNG/JPEG、限制 25 MB、校验魔数。校验失败时本方法已自行发送响应并返回 None。
+        """
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        image_types = {
+            "image/png": (b"\x89PNG\r\n\x1a\n", ".png"),
+            "image/jpeg": (b"\xff\xd8\xff", ".jpg"),
+        }
+        if content_type not in image_types:
+            self.send_json(415, {"error": "本机识谱接口只接收 PNG 或 JPEG 图片。"})
+            return None
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 0
+        if content_length <= 0 or content_length > MAX_IMAGE_BYTES:
+            self.send_json(413, {"error": "当前页面图片为空或超过 25 MB。"})
+            return None
+        signature, suffix = image_types[content_type]
+        image_bytes = self.rfile.read(content_length)
+        if len(image_bytes) != content_length:
+            self.send_json(400, {"error": "图片数据未完整接收，请重试。"})
+            return None
+        if not image_bytes.startswith(signature):
+            self.send_json(400, {"error": "图片内容与文件格式不匹配。"})
+            return None
+        return image_bytes, suffix
+
     def do_POST(self):
         if not self.host_is_allowed():
             self.send_error(403, "Forbidden")
             return
-        if self.path.split("?", 1)[0] != "/api/omr/recognize":
+        route = self.path.split("?", 1)[0]
+        if route == "/api/jianpu/recognize":
+            self.handle_jianpu()
+            return
+        if route != "/api/omr/recognize":
             self.send_error(404)
             return
 
@@ -176,30 +256,10 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             self.send_json(400, {"error": "不支持的识谱引擎参数。"})
             return
 
-        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        image_types = {
-            "image/png": (b"\x89PNG\r\n\x1a\n", ".png"),
-            "image/jpeg": (b"\xff\xd8\xff", ".jpg"),
-        }
-        if content_type not in image_types:
-            self.send_json(415, {"error": "本机识谱接口只接收 PNG 或 JPEG 图片。"})
+        body = self.read_image_body()
+        if body is None:
             return
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            content_length = 0
-        if content_length <= 0 or content_length > MAX_IMAGE_BYTES:
-            self.send_json(413, {"error": "当前页面图片为空或超过 25 MB。"})
-            return
-
-        signature, suffix = image_types[content_type]
-        image_bytes = self.rfile.read(content_length)
-        if len(image_bytes) != content_length:
-            self.send_json(400, {"error": "图片数据未完整接收，请重试。"})
-            return
-        if not image_bytes.startswith(signature):
-            self.send_json(400, {"error": "图片内容与文件格式不匹配。"})
-            return
+        image_bytes, suffix = body
 
         # 并发闸门：同一时刻只跑一个 OMR 任务。这里短暂等待而不是立刻拒绝，
         # 避免客户端两次请求之间几毫秒的抖动被误判成"任务繁忙"而放弃整页专业识别。
@@ -319,6 +379,87 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             return
         musicxml = output_path.read_text(encoding="utf-8-sig")
         self.send_json(200, {"musicxml": musicxml, "engine": "homr"})
+
+    def handle_jianpu(self):
+        """简谱（数字谱）识别：把整页交给 jianpu.py，返回内部音符模型（不生成 MusicXML）。"""
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            do_midi = int(query.get("do", ["65"])[0])
+            beats = float(query.get("beats", ["4"])[0])
+        except ValueError:
+            self.send_json(400, {"error": "简谱识别的调号/拍号参数无效。"})
+            return
+        if not 0 <= do_midi <= 127 or not 1 <= beats <= 16:
+            self.send_json(400, {"error": "简谱识别的调号/拍号超出范围。"})
+            return
+        if not JIANPU_SCRIPT.is_file():
+            self.send_json(503, {"error": "未找到简谱识别模块 jianpu.py。", "reason": "engine-missing"})
+            return
+        body = self.read_image_body()
+        if body is None:
+            return
+        image_bytes, suffix = body
+
+        if not OMR_SLOT.acquire(timeout=OMR_QUEUE_WAIT_SECONDS):
+            self.send_json(503, {"error": "本机识谱任务正忙，请稍候重试。", "reason": "busy"})
+            return
+        try:
+            with tempfile.TemporaryDirectory(prefix="pujian-jianpu-") as temporary_dir:
+                input_path = Path(temporary_dir) / ("page" + suffix)
+                input_path.write_bytes(image_bytes)
+                process = subprocess.run(
+                    [find_jianpu_python(), str(JIANPU_SCRIPT), str(input_path),
+                     "--do", str(do_midi), "--beats", str(beats)],
+                    cwd=str(PROJECT_DIR),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=180,
+                    check=False,
+                )
+                stdout = process.stdout.decode("utf-8", errors="replace").strip()
+                stderr = process.stderr.decode("utf-8", errors="replace")[-800:].strip()
+                try:
+                    payload = json.loads(stdout) if stdout else {}
+                except json.JSONDecodeError:
+                    payload = {}
+                if payload.get("error"):
+                    # 引擎自报缺依赖（返回码 2）时用 engine-missing，与"任务繁忙"区分开，
+                    # 前端据此提示用户装依赖而不是盲目重试。
+                    print("[jianpu] 简谱识别不可用：\n{}".format(stderr or payload["error"]))
+                    # 不要把引擎的原始 error 直接回给浏览器：它可能含本机绝对路径
+                    # （例如「无法读取图片：C:\Users\…\page.png」）。这里只按返回码给结论。
+                    if process.returncode == 2:
+                        self.send_json(503, {
+                            "error": "简谱识别所需的组件没装好（缺 opencv-python / Pillow）。"
+                                     "请按 README 里「安装 homr」那一步装好后再试。",
+                            "reason": "engine-missing",
+                        })
+                    else:
+                        self.send_json(503, {
+                            "error": "本机简谱识别暂时不可用，详情见启动窗口。",
+                            "reason": "engine-error",
+                        })
+                    return
+                if process.returncode != 0 or not payload:
+                    if stderr:
+                        print("[jianpu] 简谱识别失败，返回码 {}：\n{}".format(process.returncode, stderr))
+                    self.send_json(500, {"error": "本机简谱识别出错，详情见启动窗口。"})
+                    return
+                if not payload.get("parts"):
+                    self.send_json(422, {
+                        "error": "这一页没有读出简谱音符（可能不是简谱页面，或图片不清晰）。",
+                        "warnings": payload.get("warnings", []),
+                    })
+                    return
+                self.send_json(200, payload)
+        except subprocess.TimeoutExpired:
+            self.send_json(504, {"error": "简谱识别超过 3 分钟，已停止处理。"})
+        except Exception as error:
+            print("[jianpu] 简谱识别接口出错：{!r}".format(error))
+            self.send_json(500, {"error": "本机简谱识别接口出错，详情见启动窗口。"})
+        finally:
+            OMR_SLOT.release()
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), ProjectHandler)

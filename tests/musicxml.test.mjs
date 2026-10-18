@@ -42,6 +42,7 @@ test("MusicXML reads timing, rests, chords, ties, tempo, and score position", ()
   assert.equal(result.tempo, 96);
   assert.equal(result.timeSummary, "4/4");
   assert.equal(result.keySummary, "G");
+  assert.equal(result.totalBeats, 3.5, "首选小节按实际内容计长，全曲总时长 3.5 拍");
   assert.equal(tied.durationBeats, 2);
   assert.equal(tied.startBeat, 0);
   assert.equal(tied.x, 120);
@@ -134,6 +135,25 @@ test("空标记元素不产生假警告，带内容的标记元素仍会警告",
   </part></score-partwise>`;
   const filledResult = parseMusicXmlText(filled);
   assert.ok(filledResult.warnings.some((message) => message.includes("奏法")), "带 <staccato/> 时仍应警告");
+});
+
+test("P1-3 解析中途速度变化与力度记号，不再声称不支持", () => {
+  const score = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1">${measureAttributes(4, 4)}
+      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>96</per-minute></metronome></direction-type></direction>
+      ${note("C", 4, 1)}
+      ${note("D", 4, 1)}
+      <direction><direction-type><dynamics><mf/></dynamics></direction-type><sound dynamics="89"/></direction>
+      ${note("E", 4, 1)}
+      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>120</per-minute></metronome></direction-type></direction>
+      ${note("F", 4, 1)}
+    </measure>
+  </part></score-partwise>`;
+  const result = parseMusicXmlText(score);
+  assert.equal(result.tempo, 96, "起始速度取开头记号");
+  assert.deepEqual(result.tempoMarks, [{ beat: 0, bpm: 96 }, { beat: 3, bpm: 120 }], "中途速度变化应被记录");
+  assert.deepEqual(result.dynamicsMarks, [{ beat: 2, dynamics: 89 }], "力度记号应被记录");
+  assert.deepEqual(result.warnings, [], "速度/力度都已支持，这一份谱不该再有相关警告");
 });
 
 test("OMR 素材的 ground truth 自洽（拍数、起拍连续、音名合法）", () => {

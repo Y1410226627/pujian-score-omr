@@ -9,6 +9,8 @@ import {
   midiToPitchLabel,
   transposeNotes,
   mergeSystemScores,
+  mergePageScores,
+  pageLengthBeats,
   medianOf,
   diatonicIndex,
 } from "../staff.js";
@@ -198,4 +200,77 @@ test("groupStaffLines 拒绝线距上百像素的伪谱表（简谱页的系统�
   // 正常谱表（线距约 12px）不受影响
   const normal = groupStaffLines(linesFromStaffs(CELEGE_STAFFS));
   assert.equal(normal.length, 12);
+});
+
+// —— P0-1：多页 PDF 批量识别的跨页合并（两页 × 两个声部 × 两个 4/4 小节）——
+
+const PAGE_NOTES = (pitch, midi, partId, measure, startBeat) =>
+  ({ partId, measure: String(measure), startBeat, durationBeats: 4, midi, pitch });
+// 每页 2 声部（女高/男低）× 2 小节；每页总时长 8 拍
+const pageOne = {
+  notes: [
+    PAGE_NOTES("A4", 69, "P1", 1, 0), PAGE_NOTES("B4", 71, "P1", 2, 4),
+    PAGE_NOTES("C3", 48, "P2", 1, 0), PAGE_NOTES("D3", 50, "P2", 2, 4),
+  ],
+  measureCount: 2, totalBeats: 8, tempo: 96,
+  partNames: ["女高", "男低"], timeSummary: "4/4", keySummary: "F", title: "敕勒歌",
+};
+const pageTwo = {
+  notes: [
+    PAGE_NOTES("C5", 72, "P1", 1, 0), PAGE_NOTES("D5", 74, "P1", 2, 4),
+    PAGE_NOTES("E3", 52, "P2", 1, 0), PAGE_NOTES("F3", 53, "P2", 2, 4),
+  ],
+  measureCount: 2, totalBeats: 8, tempo: 96,
+  partNames: ["女高", "男低"], timeSummary: "4/4", keySummary: "F", title: "敕勒歌",
+};
+
+test("mergePageScores 跨页拼接：小节序号连续、起拍按页累加", () => {
+  const merged = mergePageScores([pageOne, pageTwo]);
+  assert.equal(merged.notes.length, 8);
+  assert.equal(merged.pageCount, 2);
+  assert.deepEqual(merged.failedPages, []);
+  assert.equal(merged.measureCount, 4, "小节总数 = 各页小节数之和");
+  assert.equal(merged.totalBeats, 16, "总拍数 = 各页总时长之和");
+  assert.equal(merged.tempo, 96);
+  assert.deepEqual(merged.partNames, ["女高", "男低"]);
+  // 拍号/调号只取第一页，避免中途属性重置
+  assert.equal(merged.timeSummary, "4/4");
+  assert.equal(merged.keySummary, "F");
+
+  // 同一 partId 跨页视为同一声部：第 2 页整体后移 8 拍，小节号接上第 1 页
+  const soprano = merged.notes.filter((note) => note.partId === "P1");
+  assert.deepEqual(soprano.map((note) => note.startBeat), [0, 4, 8, 12]);
+  assert.deepEqual(soprano.map((note) => note.measure), ["1", "2", "3", "4"]);
+  const bass = merged.notes.filter((note) => note.partId === "P2");
+  assert.deepEqual(bass.map((note) => note.startBeat), [0, 4, 8, 12]);
+  assert.deepEqual(bass.map((note) => note.measure), ["1", "2", "3", "4"]);
+
+  // 各声部起拍单调递增，同一拍上的音共用事件
+  assert.deepEqual(merged.notes.map((note) => note.startBeat), [0, 0, 4, 4, 8, 8, 12, 12]);
+  assert.equal(merged.notes[0].eventId, merged.notes[1].eventId);
+});
+
+test("mergePageScores 单页失败不中断整批，如实记入 failedPages", () => {
+  const merged = mergePageScores([pageOne, null, pageTwo]);
+  assert.deepEqual(merged.failedPages, [2]);
+  assert.ok(merged.warnings.some((message) => message.includes("第 2 页识别失败")));
+  // 失败页不占时长：第 3 页仍从第 1 页之后（8 拍）继续，小节号仍接在第 1 页之后
+  const soprano = merged.notes.filter((note) => note.partId === "P1");
+  assert.deepEqual(soprano.map((note) => note.startBeat), [0, 4, 8, 12]);
+  assert.deepEqual(soprano.map((note) => note.measure), ["1", "2", "3", "4"]);
+});
+
+test("mergePageScores 对空输入与非数字小节号都能安全处理", () => {
+  const empty = mergePageScores([]);
+  assert.equal(empty.notes.length, 0);
+  assert.equal(empty.measureCount, 0);
+  const page = { notes: [{ partId: "P1", measure: "x", startBeat: 2, durationBeats: 1, midi: 60 }], measureCount: 0 };
+  const merged = mergePageScores([page]);
+  assert.equal(merged.notes[0].measure, "x", "非数字小节号应原样保留");
+});
+
+test("pageLengthBeats 优先用 totalBeats，缺省时用最后一个音符的结束拍兜底", () => {
+  assert.equal(pageLengthBeats({ totalBeats: 12, notes: [] }), 12);
+  assert.equal(pageLengthBeats({ notes: [{ startBeat: 0, durationBeats: 4 }, { startBeat: 4, durationBeats: 2 }] }), 6);
+  assert.equal(pageLengthBeats(null), 0);
 });

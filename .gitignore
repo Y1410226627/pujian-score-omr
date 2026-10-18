@@ -18,3 +18,13 @@ Thumbs.db
 
 # 浏览器自动化测试产物
 .playwright-cli/
+
+# 渲染/生成的临时缓存（tests/generate_jianpu_pages.py 的可写回退目录）
+.cache/
+
+# 原始乐谱 PDF：受版权保护，且体积大，**不入库**。
+# 复现测试所需的页面图已作为 PNG 放在 tests/fixtures/jianpu_pages/（体积小、可追溯）；
+# 要换别人的谱，按 README「测试」一节的说明用 tests/generate_jianpu_pages.py 自己生成。
+tests/fixtures/_source_*.pdf
+*.pdf
+

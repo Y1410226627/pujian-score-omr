@@ -1,0 +1,631 @@
+{
+  "provenance": "由 jianpu.py 识别《敕勒歌》第 11 页（简谱）得到，并经人工逐小节核对：12 小节、4 个声部与谱面吻合（女高1 m8 = 5. 3̲2̲0̲1̲2̲ = 4.0 拍、女中 m4 = 2 1 1̲ 6 5̲ = 4.0 拍、男中 m7 = 3 - - 3̲ 0̲ = 4.0 拍、第 12 小节含一组三连音 = 4.0 拍 等）。**这是本项目的回归基准，不是第三方独立标注**；第 10 小节（4.75 拍）存在已知歧义，见 下一步优化方向.md 的 P1-4 阶段 3 待办。基准只含音符、不含休止，因此不做「每小节拍数 = 拍号」的逐小节检查。",
+  "source": "混声三部合唱 敕勒歌.pdf 第 11 页（简谱，3× 渲染 1785×2523）",
+  "notation": "jianpu",
+  "keySignature": "1=F",
+  "timeSignature": "4/4",
+  "beatsPerMeasure": 4.0,
+  "measureCount": 12,
+  "totalBeats": 49.25,
+  "warnings": [
+    "第 10 小节内容为 4.75 拍，超出拍号 4/4。",
+    "第 12 小节内容为 4.5 拍，超出拍号 4/4。"
+  ],
+  "parts": [
+    {
+      "name": "声部1",
+      "notes": [
+        {
+          "midi": 69,
+          "onsetBeats": 4.0,
+          "durationBeats": 4.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 8.0,
+          "durationBeats": 4.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 12.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 14.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 72,
+          "onsetBeats": 15.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 72,
+          "onsetBeats": 16.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 17.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 18.0,
+          "durationBeats": 1.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 21.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 22.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 74,
+          "onsetBeats": 23.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 74,
+          "onsetBeats": 24.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 25.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 26.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 72,
+          "onsetBeats": 27.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 72,
+          "onsetBeats": 28.0,
+          "durationBeats": 1.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 29.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 30.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 31.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 31.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 32.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 34.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 70,
+          "onsetBeats": 36.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 72,
+          "onsetBeats": 38.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 72,
+          "onsetBeats": 40.75,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 41.75,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 42.75,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 44.75,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 70,
+          "onsetBeats": 44.75,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 46.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 47.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 72,
+          "onsetBeats": 47.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 74,
+          "onsetBeats": 48.25,
+          "durationBeats": 0.5
+        }
+      ]
+    },
+    {
+      "name": "声部2",
+      "notes": [
+        {
+          "midi": 69,
+          "onsetBeats": 4.0,
+          "durationBeats": 4.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 8.0,
+          "durationBeats": 4.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 12.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 14.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 15.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 16.0,
+          "durationBeats": 3.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 21.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 22.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 23.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 24.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 25.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 26.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 27.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 28.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 64,
+          "onsetBeats": 30.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 31.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 31.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 32.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 32.5,
+          "durationBeats": 1.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 34.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 36.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 64,
+          "onsetBeats": 38.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 40.75,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 42.75,
+          "durationBeats": 1.5
+        }
+      ]
+    },
+    {
+      "name": "声部3",
+      "notes": [
+        {
+          "midi": 67,
+          "onsetBeats": 8.0,
+          "durationBeats": 4.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 12.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 13.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 14.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 14.5,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 15.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 57,
+          "onsetBeats": 16.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 17.0,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 18.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 19.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 19.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 20.0,
+          "durationBeats": 3.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 23.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 23.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 24.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 27.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 27.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 28.0,
+          "durationBeats": 1.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 29.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 30.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 31.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 31.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 65,
+          "onsetBeats": 32.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 32.5,
+          "durationBeats": 1.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 34.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 35.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 35.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 36.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 36.5,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 37.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 37.5,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 38.5,
+          "durationBeats": 0.75
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 39.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 39.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 40.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 40.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 57,
+          "onsetBeats": 41.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 43.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 44.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 44.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 45.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 45.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 46.25,
+          "durationBeats": 1.0
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 47.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 47.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 47.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 47.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 64,
+          "onsetBeats": 48.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 48.25,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 64,
+          "onsetBeats": 48.75,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 48.75,
+          "durationBeats": 0.5
+        }
+      ]
+    },
+    {
+      "name": "声部4",
+      "notes": [
+        {
+          "midi": 58,
+          "onsetBeats": 20.0,
+          "durationBeats": 4.0
+        },
+        {
+          "midi": 70,
+          "onsetBeats": 20.0,
+          "durationBeats": 4.0
+        },
+        {
+          "midi": 57,
+          "onsetBeats": 24.0,
+          "durationBeats": 3.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 24.0,
+          "durationBeats": 3.0
+        },
+        {
+          "midi": 57,
+          "onsetBeats": 27.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 27.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 67,
+          "onsetBeats": 28.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 69,
+          "onsetBeats": 30.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 32.0,
+          "durationBeats": 2.0
+        },
+        {
+          "midi": 62,
+          "onsetBeats": 34.0,
+          "durationBeats": 0.5
+        },
+        {
+          "midi": 60,
+          "onsetBeats": 46.75,
+          "durationBeats": 2.0
+        }
+      ]
+    }
+  ]
+}
