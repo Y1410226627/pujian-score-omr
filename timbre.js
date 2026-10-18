@@ -14,9 +14,13 @@
 /** 音色名（界面下拉选项用的显示文字）。 */
 export const TIMBRE_LABELS = {
   piano: "钢琴", strings: "弦乐", choir: "合唱人声", organ: "管风琴", soft: "电子琴",
+  // 采样音源（真实录音）：需要先运行「安装真实音源.bat」，没装时自动退回对应的合成音色。
+  piano_real: "真实钢琴（采样）", strings_real: "真实弦乐（采样）", choir_real: "真实合唱人声（采样）",
 };
-/** 界面下拉的显示顺序。 */
-export const TIMBRE_ORDER = ["piano", "strings", "choir", "organ", "soft"];
+/** 界面下拉的显示顺序：合成音色在前，采样音色紧跟在同类合成音色之后。 */
+export const TIMBRE_ORDER = [
+  "piano", "piano_real", "strings", "strings_real", "choir", "choir_real", "organ", "soft",
+];
 
 /**
  * 钢琴泛音强度：第 n 次泛音约 1/n^1.35 递减，第 7 次以上再压到 0.7。
@@ -111,7 +115,11 @@ export const VIBRATO = { rate: 5.1, cents: 12 };
  * 用户一切换音色就会被"轰"一下。这些系数用端到端脚本实测的 RMS 定出来，
  * 目标是切换音色时听感响度基本不变。
  */
-export const TIMBRE_GAIN = { piano: 1, strings: 0.55, choir: 0.5, organ: 0.44, soft: 1.15 };
+// 采样音色的响度在 sampler.js 里按力度单独标定（样本本身的动态已经录进去了），所以配平系数是 1。
+export const TIMBRE_GAIN = {
+  piano: 1, strings: 0.55, choir: 0.5, organ: 0.44, soft: 1.15,
+  piano_real: 1, strings_real: 1, choir_real: 1,
+};
 /** 混响：1.9 秒余音、指数衰减 2.8、20 ms 预延迟——接近小音乐厅。 */
 export const REVERB = { seconds: 1.9, decay: 2.8, preDelay: 0.02, wet: 0.17, tone: 5200 };
 /** 主链压限（多声部叠加不削波）。 */

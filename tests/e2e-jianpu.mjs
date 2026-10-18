@@ -81,6 +81,30 @@ try {
     timbres.push({ timbre, sources: during.sources, buses: during.buses });
   }
 
+  // ——— 真实音源（采样）：装了音源时，用真实钢琴把整本再播一遍 ———
+  const sampleManifest = await page.evaluate(() => window.__pujian.fetchSampleManifest());
+  if (!sampleManifest || !sampleManifest.banks.piano_real) {
+    console.log("跳过真实钢琴播放：本机未安装 .assets/soundfonts。");
+  } else {
+    await page.selectOption("#timbreSelect", "piano_real");
+    await page.waitForFunction(() => window.__pujian.state.sampleBanks.has("piano_real"), null, { timeout: 120000 });
+    await page.click("#playButton");
+    await page.waitForTimeout(1500);
+    const sampled = await page.evaluate(() => ({
+      timbre: window.__pujian.state.timbre,
+      playing: window.__pujian.state.isPlaying,
+      sources: window.__pujian.state.sources.size,
+      notes: window.__pujian.state.notes.length,
+      status: document.querySelector("#sampleStatus")?.textContent || "",
+    }));
+    await page.click("#stopButton");
+    await page.waitForTimeout(300);
+    console.log("真实钢琴整本播放：", JSON.stringify(sampled));
+    if (!sampled.playing || sampled.sources === 0) throw new Error("真实钢琴整本播放没有发声");
+    if (sampled.sources > 400) throw new Error("真实钢琴播放时音频节点过多：" + sampled.sources);
+    if (!/音源/.test(sampled.status)) throw new Error("界面没有显示音源状态：" + sampled.status);
+  }
+
   // 滚动调度护栏：整本 500+ 音符时，音频图里同时只能有"窗口内"的节点。
   // 回归背景：一次性调度会在点击播放时卡 800ms，并把上千个节点塞进音频图 → 爆音。
   await page.selectOption("#timbreSelect", "piano");

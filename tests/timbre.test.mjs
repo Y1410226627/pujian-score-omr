@@ -12,8 +12,11 @@ import {
 // 泛音必须递减、共振峰必须 F1<F2<F3、低音制音必须比高音慢……
 // 真正的发声（Oscillator/BiquadFilter）由端到端脚本验证，见 tests/e2e-audio.mjs。
 
-test("音色名单：五种音色都有中文名，顺序稳定，且都有响度配平", () => {
-  assert.deepEqual(TIMBRE_ORDER, ["piano", "strings", "choir", "organ", "soft"]);
+test("音色名单：合成五种 + 采样三种，都有中文名，顺序稳定，且都有响度配平", () => {
+  // 顺序约定：合成音色在前，同类的采样音色紧跟其后（界面下拉按这个顺序显示）。
+  assert.deepEqual(TIMBRE_ORDER, [
+    "piano", "piano_real", "strings", "strings_real", "choir", "choir_real", "organ", "soft",
+  ]);
   for (const name of TIMBRE_ORDER) {
     assert.equal(typeof TIMBRE_LABELS[name], "string");
     assert.ok(TIMBRE_GAIN[name] > 0, name + " 缺少响度配平系数");
@@ -21,6 +24,11 @@ test("音色名单：五种音色都有中文名，顺序稳定，且都有响�
   assert.equal(TIMBRE_LABELS.piano, "钢琴");
   assert.equal(TIMBRE_LABELS.strings, "弦乐");
   assert.equal(TIMBRE_LABELS.choir, "合唱人声");
+  // 采样音色的名字要明确标出「真实」「采样」，否则用户分不清两种钢琴
+  for (const name of ["piano_real", "strings_real", "choir_real"]) {
+    assert.match(TIMBRE_LABELS[name], /真实/);
+    assert.match(TIMBRE_LABELS[name], /采样/);
+  }
 });
 
 test("钢琴/弦乐的微失谐：主弦不失谐、副弦在 1–15 音分内（产生拍音才像真的）", () => {

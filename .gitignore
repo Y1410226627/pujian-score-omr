@@ -19,6 +19,9 @@ Thumbs.db
 # 浏览器自动化测试产物
 .playwright-cli/
 
+# 真实音色（采样音源）由 tools/install_soundfonts.py 下载到本机，体积大且是第三方作品，不进仓库
+.assets/
+
 # 渲染/生成的临时缓存（tests/generate_jianpu_pages.py 的可写回退目录）
 .cache/
 

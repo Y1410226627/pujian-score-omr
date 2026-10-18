@@ -9,6 +9,9 @@ import {
   ORGAN_ENVELOPE, STRINGS_ENVELOPE, SCHEDULER,
   vowelForPart, pianoDamperSeconds, pianoBrightness, pianoDecayShape,
 } from "./timbre.js";
+import {
+  SAMPLED_TIMBRES, SAMPLED_TARGET_RMS, isSampledTimbre, fetchSampleManifest, loadSampleBank, lookupSample,
+} from "./sampler.js";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -39,6 +42,7 @@ const els = {
   recognizeProgressLabel: byId("recognizeProgressLabel"), cancelRecognize: byId("cancelRecognize"),
   transposeInput: byId("transposeInput"), resetTranspose: byId("resetTranspose"),
   instrumentNote: byId("instrumentNote"), timbreSelect: byId("timbreSelect"), timbreHint: byId("timbreHint"),
+  sampleStatus: byId("sampleStatus"),
 };
 const state = {
   file: null, objectUrl: null, pdf: null, pageNumber: 1, pageCount: 1, notes: [], scoreInfo: null,
@@ -62,6 +66,8 @@ const state = {
   partTimbres: new Map(),
   // 播放的滚动调度定时器（见 playMelody 里的说明）与软限幅曲线缓存。
   scheduleTimer: null, softClipCurve: null,
+  // 采样音源（真实钢琴/人声/弦乐）：清单、已加载的样本表、正在加载的 Promise。
+  sampleManifest: null, sampleBanks: new Map(), sampleLoading: new Map(),
   // 识别结果对应的是哪一页（简谱/单页识别=页码；整本识别或 MusicXML 导入=null）。
   // 翻页时**不清空结果**，只按这个页码决定要不要在谱面上画音符坐标。
   scorePage: null,
@@ -1128,7 +1134,10 @@ function updatePartControls(reset = false) {
     }
     timbreSelect.value = partTimbre(part.key);
     timbreSelect.addEventListener("change", () => {
-      setPartTimbre(part.key, timbreSelect.value);
+      if (!setPartTimbre(part.key, timbreSelect.value)) {
+        timbreSelect.value = partTimbre(part.key);
+        return;
+      }
       timbreSelect.title = timbreSelect.value
         ? `「${part.name}」用「${TIMBRE_LABELS[timbreSelect.value]}」`
         : `「${part.name}」跟随全局音色`;
@@ -2114,15 +2123,24 @@ function partTimbre(key) {
   const chosen = state.partTimbres.get(String(key));
   return chosen && TIMBRE_LABELS[chosen] ? chosen : "";
 }
-/** 给某个声部单独指定音色（下次播放生效）；value 为空表示跟随全局。 */
+/**
+ * 给某个声部单独指定音色（下次播放生效）；value 为空表示跟随全局。
+ * 返回 false 表示这次选择没被接受（例如选了「真实钢琴」但采样音源还没安装）。
+ */
 function setPartTimbre(key, value) {
+  if (value && isSampledTimbre(value) && state.sampleManifest && !state.sampleManifest.banks[value]) {
+    showToast("还没安装真实音源：双击项目里的「安装真实音源.bat」，装好后刷新页面再选。");
+    return false;
+  }
   if (value && TIMBRE_LABELS[value]) {
     state.partTimbres.set(String(key), value);
+    if (isSampledTimbre(value)) ensureSampleBank(value);
   } else {
     state.partTimbres.delete(String(key));
   }
   savePartTimbres();
   if (state.isPlaying) showToast("音色会在下次播放时生效（不打断当前演奏）。");
+  return true;
 }
 /** 把逐声部音色记到本地，下次打开同一份乐谱还是这套设置。 */
 function savePartTimbres() {
@@ -2207,6 +2225,17 @@ function gainForDynamics(value) {
 /** 设置播放音色（只在下次播放生效；正在放的音符不重建，避免播到一半音色突变）。 */
 function setTimbre(value) {
   if (!TIMBRE_LABELS[value]) return;
+  if (isSampledTimbre(value)) {
+    // 清单是异步读的：刚打开页面就点也可能还没读到，所以不在这里下"没安装"的结论，
+    // 交给 ensureSampleBank 去读；真读不到再回滚并提示。
+    ensureSampleBank(value).then((bank) => {
+      if (bank) return;
+      showToast("还没安装真实音源：双击项目里的「安装真实音源.bat」，装好后刷新页面再选。");
+      if (state.timbre !== value) return;
+      state.timbre = SAMPLED_TIMBRES[value].fallback;
+      if (els.timbreSelect) els.timbreSelect.value = state.timbre;
+    });
+  }
   state.timbre = value;
   saveSettings({ timbre: value });
   if (els.timbreSelect) els.timbreSelect.value = value;
@@ -2284,7 +2313,10 @@ function prepareAudio() {
   } catch (error) {
     console.info("音频初始化失败，播放时会再试一次。", error);
     state.audio = null;
+    return;
   }
+  // 当前选的是采样音色就顺手开始加载（后台进行，不影响界面）。
+  if (isSampledTimbre(state.timbre)) ensureSampleBank(state.timbre);
 }
 /** 程序生成混响脉冲响应：指数衰减的低通噪声 + 20 ms 预延迟，听起来像小音乐厅。 */
 function reverbImpulse(audio, seconds = REVERB.seconds, decay = REVERB.decay) {
@@ -2658,6 +2690,112 @@ function playSoftTone(midi, startAt, duration, peak, destination) {
   registerVoice([oscillator], [oscillator, gain]);
 }
 
+/** 更新界面上的「真实音源」状态提示（装没装、加载到百分之几、哪些已就绪）。 */
+function updateSampleStatus(message) {
+  const element = els.sampleStatus;
+  if (!element) return;
+  if (message) {
+    element.hidden = false;
+    element.textContent = message;
+    return;
+  }
+  if (!state.sampleManifest) {
+    element.hidden = true;
+    return;
+  }
+  const ready = [...state.sampleBanks.entries()].map(([name]) => TIMBRE_LABELS[name] || name);
+  element.hidden = false;
+  element.textContent = ready.length ? `真实音源已就绪：${ready.join("、")}` : "真实音源已安装（选中后自动加载）";
+}
+
+/**
+ * 确保某个采样音源已加载（同一个音源只会加载一次）。
+ * 没安装、加载失败都只返回 null，不抛错：调用方会自动退回合成音色，保证"总有声音"。
+ */
+function ensureSampleBank(name) {
+  if (!isSampledTimbre(name)) return Promise.resolve(null);
+  if (state.sampleBanks.has(name)) return Promise.resolve(state.sampleBanks.get(name));
+  if (state.sampleLoading.has(name)) return state.sampleLoading.get(name);
+  const promise = (async () => {
+    if (!state.sampleManifest) state.sampleManifest = await fetchSampleManifest();
+    if (!state.sampleManifest || !state.sampleManifest.banks[name]) {
+      updateSampleStatus();
+      return null;
+    }
+    updateSampleStatus(`正在加载${TIMBRE_LABELS[name] || name}…`);
+    let shownPercent = 0;
+    const bank = await loadSampleBank(state.sampleManifest, name, {
+      onProgress: ({ done, total }) => {
+        const percent = Math.round((done / Math.max(1, total)) * 100);
+        if (percent - shownPercent >= 20) {
+          shownPercent = percent;
+          updateSampleStatus(`正在加载${TIMBRE_LABELS[name] || name} ${percent}%…`);
+        }
+      },
+    });
+    if (bank) {
+      bank.ready = true;
+      state.sampleBanks.set(name, bank);
+      showToast(`${TIMBRE_LABELS[name] || name}已加载完成。`);
+    }
+    updateSampleStatus();
+    return bank;
+  })().catch((error) => {
+    console.info("采样音源加载失败，已退回合成音色：", error);
+    updateSampleStatus("真实音源加载失败（已自动退回合成音色）");
+    return null;
+  }).finally(() => state.sampleLoading.delete(name));
+  state.sampleLoading.set(name, promise);
+  return promise;
+}
+
+/**
+ * 播放一个「采样音源」音符。
+ *
+ * 和合成音色的区别：音高靠 playbackRate 变速（样本每 3 个半音一个）、力度靠分层 + 增益；
+ * 钢琴样本自带衰减，所以只需要在松键处做制音淡出；人声/弦乐是持续音，
+ * 长音用样本里的零交叉循环点撑住（实测循环接缝无爆音）。
+ */
+function playSampledTone(timbre, bank, midi, startAt, duration, peak, destination) {
+  const audio = state.audio;
+  const human = humanize(peak);
+  const at = Math.max(audio.currentTime + 0.001, startAt + human.offset * 0.5);
+  const held = Math.max(0.06, duration);
+  const target = destination || masterChain();
+  // gainForDynamics 给的是 0.05–0.3：归一化成 0–1 当作"力度"。
+  const velocity = Math.min(1, Math.max(0, (peak - 0.05) / 0.25));
+  const found = lookupSample(bank, midi, velocity);
+  if (!found) return false;
+  const { sample, layer, playbackRate } = found;
+  // 响度标定：FluidR3/Salamander 的 mp3 录得很轻（原始 RMS 只有 0.01 左右），
+  // 直接乘 peak 会小 10 倍以上；这里按每层样本的实测 RMS 反推增益，做成和合成音色一样响。
+  // 再叠一个表情系数（pp 0.55 → ff 1.25），让强弱记号仍然听得出来。
+  const expression = bank.continuous ? 0.62 + 0.62 * velocity : 0.8 + 0.45 * velocity;
+  const layerRms = Math.max(0.0008, layer.medianRms || 0.01);
+  const sampleTrim = sample.trim || 1;
+  const gainValue = Math.max(0.0001, peak * expression * sampleTrim * (SAMPLED_TARGET_RMS / layerRms));
+  const source = audio.createBufferSource();
+  source.buffer = sample.buffer;
+  source.playbackRate.value = playbackRate * (1 + (human.detune / 1200) * 0.5);
+  if (bank.continuous && sample.loopStart && sample.loopEnd) {
+    source.loop = true;
+    source.loopStart = sample.loopStart;
+    source.loopEnd = sample.loopEnd;
+  }
+  const release = bank.continuous ? 0.24 : pianoDamperSeconds(midi);
+  const tEnd = at + held;
+  const envelope = audio.createGain();
+  envelope.gain.setValueAtTime(0.0001, at);
+  envelope.gain.linearRampToValueAtTime(gainValue, at + 0.004);
+  envelope.gain.setValueAtTime(gainValue, tEnd);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, tEnd + release);
+  source.connect(envelope).connect(target);
+  source.start(at);
+  source.stop(tEnd + release + 0.03);
+  registerVoice([source], [source, envelope]);
+  return true;
+}
+
 /** 某个声部该用哪种音色：声部单独选过就用它自己的，否则跟随全局音色。 */
 function timbreForPart(partKey) {
   if (partKey) {
@@ -2667,10 +2805,8 @@ function timbreForPart(partKey) {
   return TIMBRE_LABELS[state.timbre] ? state.timbre : "piano";
 }
 
-/** 按声部音色把一个音符交给对应合成器；合成失败时退回电子琴，保证总有声音。 */
-function playTone(midi, startAt, duration, peak = 0.16, destination = null, partKey = "") {
-  if (!state.audio || !Number.isFinite(midi)) return;
-  const chosen = timbreForPart(partKey);
+/** 把一个音符交给对应「合成器」；合成失败时退回电子琴，保证总有声音。 */
+function playSynthTone(chosen, midi, startAt, duration, peak, destination, partKey) {
   // 响度配平：锯齿波人声比钢琴响约 2 倍，不配平的话切换音色会突然变响。
   const balanced = peak * (TIMBRE_GAIN[chosen] || 1);
   try {
@@ -2687,6 +2823,28 @@ function playTone(midi, startAt, duration, peak = 0.16, destination = null, part
     console.info("这个音合成失败，已退回电子琴音色。", error);
     playSoftTone(midi, startAt, duration, balanced, destination);
   }
+}
+
+/** 按声部音色把一个音符交给对应音源（采样优先、没装/没加载好就用合成音色兜底）。 */
+function playTone(midi, startAt, duration, peak = 0.16, destination = null, partKey = "") {
+  if (!state.audio || !Number.isFinite(midi)) return;
+  const chosen = timbreForPart(partKey);
+  if (isSampledTimbre(chosen)) {
+    const bank = state.sampleBanks.get(chosen);
+    if (bank && bank.ready) {
+      try {
+        if (playSampledTone(chosen, bank, midi, startAt, duration, peak, destination)) return;
+      } catch (error) {
+        console.info("采样音源播放失败，退回合成音色：", error);
+      }
+    } else {
+      // 第一次用到这个音色：后台开始加载，这一轮先用同类合成音色顶上。
+      ensureSampleBank(chosen);
+    }
+    playSynthTone(SAMPLED_TIMBRES[chosen].fallback, midi, startAt, duration, peak, destination, partKey);
+    return;
+  }
+  playSynthTone(chosen, midi, startAt, duration, peak, destination, partKey);
 }
 /**
  * 把 MusicXML 里的速度/力度记号接进播放调度（P1-3）：
@@ -2934,6 +3092,18 @@ if (els.timbreSelect) {
   const savedTimbre = loadSettings().timbre;
   if (TIMBRE_LABELS[savedTimbre]) state.timbre = savedTimbre;
   els.timbreSelect.value = state.timbre;
+  // 采样音源清单（异步）：装了就自动出现「真实…」音色；用户没手动选过音色时默认用真实钢琴。
+  fetchSampleManifest().then((manifest) => {
+    state.sampleManifest = manifest;
+    updateSampleStatus();
+    if (manifest && !TIMBRE_LABELS[savedTimbre]) {
+      const preferred = manifest.banks.piano_real ? "piano_real" : state.timbre;
+      if (isSampledTimbre(preferred)) {
+        state.timbre = preferred;
+        els.timbreSelect.value = preferred;
+      }
+    }
+  }).catch(() => {});
   if (els.timbreHint) els.timbreHint.textContent = "各声部可单独选";
   els.timbreSelect.addEventListener("change", () => setTimbre(els.timbreSelect.value));
 }
@@ -2946,7 +3116,7 @@ document.addEventListener("keydown", (event) => {
 // 自动化测试用的调试钩子：只有地址里带 ?debug=1 时才挂到 window 上，正常使用完全不受影响。
 // （浏览器里 app.js 是 ES module，模块内的 state 外部拿不到，测试需要它来检查音频引擎。）
 if (new URLSearchParams(window.location.search).has("debug")) {
-  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody, stopPlayback, prepareAudio };
+  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody, stopPlayback, prepareAudio, ensureSampleBank, fetchSampleManifest };
 }
 renderNotes();
 refreshEngineStatus();

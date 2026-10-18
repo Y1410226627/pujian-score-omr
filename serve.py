@@ -48,7 +48,7 @@ def read_musicxml_from_mxl(mxl_path):
 
 
 # 只允许直接暴露给浏览器的静态资源后缀。.py/.bat/.exe/.pth 等一律不可下载。
-ALLOWED_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs", ".json", ".md", ".svg", ".ico", ".png", ".webmanifest"}
+ALLOWED_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs", ".json", ".md", ".svg", ".ico", ".png", ".webmanifest", ".mp3"}
 # 这些目录里含有源码、虚拟环境、模型与依赖，任何情况下都不应通过 HTTP 暴露。
 DENIED_SEGMENTS = {".venv", ".git", "node_modules", "__pycache__", "tests", ".workbuddy-ai", "deliverables"}
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -242,13 +242,15 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         parts = [part for part in decoded.replace("\\", "/").split("/") if part not in ("", ".")]
         if not parts:
             return False
-        if any(part.startswith(".") or part.lower() in DENIED_SEGMENTS for part in parts):
+        # 隐藏文件一律拒绝，但 .assets 例外：它是「真实音色」采样音源的存放目录（只放 mp3/json，由安装器下载，不进 git）。
+        if any((part.startswith(".") and part != ".assets") or part.lower() in DENIED_SEGMENTS
+               for part in parts):
             return False
         # 顶层单文件：按后缀白名单放行；其他子目录一律拒绝。
         if len(parts) == 1:
             return Path(parts[0]).suffix.lower() in ALLOWED_SUFFIXES
-        # vendor/ 下的本地依赖（如 pdf.js）允许深层访问，仍受后缀白名单约束。
-        return parts[0] == "vendor" and Path(parts[-1]).suffix.lower() in ALLOWED_SUFFIXES
+        # vendor/ 下的本地依赖（如 pdf.js）与 .assets/ 下的采样音源允许深层访问，仍受后缀白名单约束。
+        return parts[0] in ("vendor", ".assets") and Path(parts[-1]).suffix.lower() in ALLOWED_SUFFIXES
 
     def do_GET(self):
         if not self.host_is_allowed():

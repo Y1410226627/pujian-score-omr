@@ -344,6 +344,199 @@ try {
   // 注：这个样例只有 8 个音，窗口会一次覆盖全部；「节点数受窗口限制」的真正护栏在
   // tests/e2e-jianpu.mjs 里用 526 个音的整本来验。
 
+  // ——— 真实音源（采样）：装了音源才测（没装自动跳过，不影响没下载样本的机器）———
+  const sampleManifest = await page.evaluate(() => window.__pujian.fetchSampleManifest());
+  if (!sampleManifest) {
+    console.log("跳过采样音源测试：本机未安装 .assets/soundfonts（运行「安装真实音源.bat」后可测）。");
+  } else {
+    assert.ok(sampleManifest.banks.piano_real, "音源清单里应有真实钢琴");
+    assert.ok(sampleManifest.banks.choir_real, "音源清单里应有真实合唱人声");
+    assert.ok(sampleManifest.banks.strings_real, "音源清单里应有真实弦乐");
+    console.log("音源清单：", Object.keys(sampleManifest.banks).join("、"));
+
+    const sampled = await page.evaluate(async () => {
+      const debug = window.__pujian;
+      debug.prepareAudio();
+      const savedAudio = debug.state.audio;   // 离线渲染只是临时借用 state.audio，渲完必须还回去
+      const pianoBank = await debug.ensureSampleBank("piano_real");
+      const reset = (offline) => {
+        debug.state.audio = offline;
+        debug.state.master = null;
+        debug.state.reverbBuffer = null;
+        debug.state.vibrato = null;
+        debug.state.noiseBuffer = null;
+        debug.state.waves.clear();
+        debug.state.partBuses.clear();
+        debug.state.sources.clear();
+        debug.state.partTimbres.clear();
+        debug.state.timbre = "piano_real";
+      };
+      const sampleRate = 44100;
+      const render = async (midi, peak) => {
+        const offline = new OfflineAudioContext(1, Math.ceil(sampleRate * 3.5), sampleRate);
+        reset(offline);
+        debug.playTone(midi, 0.05, 3.0, peak, null, "S1");
+        const buffer = await offline.startRendering();
+        const data = buffer.getChannelData(0);
+        const from = Math.floor(0.5 * sampleRate);
+        const size = 4096;
+        const slice = data.slice(from, from + size);
+        let bestLag = 0;
+        let bestScore = -Infinity;
+        for (let lag = Math.floor(sampleRate / 1200); lag <= Math.floor(sampleRate / 80); lag += 1) {
+          let sum = 0;
+          let norm = 0;
+          for (let index = 0; index + lag < size; index += 1) {
+            sum += slice[index] * slice[index + lag];
+            norm += slice[index + lag] * slice[index + lag];
+          }
+          const score = sum / Math.sqrt(Math.max(1e-9, norm));
+          if (score > bestScore) { bestScore = score; bestLag = lag; }
+        }
+        const windowRms = (to, toEnd) => {
+          const start = Math.floor(to * sampleRate);
+          const end = Math.min(data.length, Math.floor(toEnd * sampleRate));
+          let sum = 0;
+          for (let index = start; index < end; index += 1) sum += data[index] * data[index];
+          return Math.sqrt(sum / Math.max(1, end - start));
+        };
+        let peakValue = 0;
+        let maxJump = 0;
+        for (let index = 0; index < data.length; index += 1) {
+          peakValue = Math.max(peakValue, Math.abs(data[index]));
+          if (index > 0) maxJump = Math.max(maxJump, Math.abs(data[index] - data[index - 1]));
+        }
+        return {
+          pitch: Number((sampleRate / bestLag).toFixed(1)),
+          bodyRms: Number(windowRms(0.5, 2.0).toFixed(4)),
+          peak: Number(peakValue.toFixed(3)),
+          maxJump: Number(maxJump.toFixed(3)),
+        };
+      };
+      const loud = await render(60, 0.16);
+      const soft = await render(60, 0.07);
+      const a4 = await render(69, 0.16);
+      // 把真实 AudioContext 还回去（离线上下文的 currentTime 不再前进，不能拿来做真实播放）
+      debug.state.audio = savedAudio;
+      debug.state.master = null;
+      debug.state.reverbBuffer = null;
+      debug.state.vibrato = null;
+      debug.state.noiseBuffer = null;
+      debug.state.waves.clear();
+      debug.state.partBuses.clear();
+      debug.state.sources.clear();
+      debug.state.partTimbres.clear();
+      debug.state.timbre = "piano_real";
+      return {
+        loaded: Boolean(pianoBank),
+        layers: pianoBank ? pianoBank.layers.length : 0,
+        samples: pianoBank ? pianoBank.layers.map((layer) => layer.samples.length) : [],
+        loud, soft, a4,
+      };
+    });
+    console.log("真实钢琴：", JSON.stringify({ layers: sampled.layers, samples: sampled.samples }),
+      "| C4", JSON.stringify(sampled.loud), "| C4 轻力度 RMS", sampled.soft.bodyRms, "| A4 音高", sampled.a4.pitch);
+    assert.equal(sampled.loaded, true, "真实钢琴应当能加载");
+    assert.equal(sampled.layers, 2, "钢琴应有软/重两个力度层");
+    assert.ok(sampled.samples.every((count) => count >= 28), "每层应有 30 个基础采样");
+    assert.ok(Math.abs(sampled.loud.pitch - 261.6) < 15, "真实钢琴 C4 的音高应≈261.6 Hz（实测 " + sampled.loud.pitch + "）");
+    assert.ok(Math.abs(sampled.a4.pitch - 440) < 20, "真实钢琴 A4 的音高应≈440 Hz（实测 " + sampled.a4.pitch + "）");
+    assert.ok(sampled.loud.bodyRms > 0.01, "真实钢琴应当有足够响度（RMS " + sampled.loud.bodyRms + "）");
+    assert.ok(sampled.loud.bodyRms < 0.12, "真实钢琴不能爆响（RMS " + sampled.loud.bodyRms + "）");
+    assert.ok(sampled.soft.bodyRms < sampled.loud.bodyRms, "轻力度应当比重力度轻");
+    assert.ok(sampled.loud.peak < 0.95, "真实钢琴不能削波（峰值 " + sampled.loud.peak + "）");
+    assert.ok(sampled.loud.maxJump < 0.2, "真实钢琴不应有爆音跳变（最大跳变 " + sampled.loud.maxJump + "）");
+
+    // 真实人声/弦乐：长音必须能"撑住"（样本 3.13 秒 + 循环）
+    const sustained = await page.evaluate(async () => {
+      const debug = window.__pujian;
+      const sampleRate = 44100;
+      const result = {};
+      const savedAudio = debug.state.audio;
+      for (const name of ["choir_real", "strings_real"]) {
+        const bank = await debug.ensureSampleBank(name);
+        const offline = new OfflineAudioContext(1, Math.ceil(sampleRate * 6), sampleRate);
+        debug.state.audio = offline;
+        debug.state.master = null;
+        debug.state.reverbBuffer = null;
+        debug.state.vibrato = null;
+        debug.state.noiseBuffer = null;
+        debug.state.waves.clear();
+        debug.state.partBuses.clear();
+        debug.state.sources.clear();
+        debug.state.partTimbres.clear();
+        debug.state.timbre = name;
+        debug.playTone(60, 0.05, 4.8, 0.16, null, "S1");
+        const buffer = await offline.startRendering();
+        const data = buffer.getChannelData(0);
+        const rms = (from, to) => {
+          const start = Math.floor(from * sampleRate);
+          const end = Math.min(data.length, Math.floor(to * sampleRate));
+          let sum = 0;
+          for (let index = start; index < end; index += 1) sum += data[index] * data[index];
+          return Math.sqrt(sum / Math.max(1, end - start));
+        };
+        let peak = 0;
+        let maxJump = 0;
+        for (let index = 0; index < data.length; index += 1) {
+          peak = Math.max(peak, Math.abs(data[index]));
+          if (index > 0) maxJump = Math.max(maxJump, Math.abs(data[index] - data[index - 1]));
+        }
+        result[name] = {
+          loaded: Boolean(bank),
+          samples: bank ? bank.layers[0].samples.length : 0,
+          early: Number(rms(0.5, 1.5).toFixed(4)),
+          late: Number(rms(2.5, 4.0).toFixed(4)),   // 超过原始样本 3.13 秒：靠循环撑住
+          peak: Number(peak.toFixed(3)),
+          maxJump: Number(maxJump.toFixed(3)),
+        };
+      }
+      debug.state.audio = savedAudio;
+      debug.state.master = null;
+      debug.state.reverbBuffer = null;
+      debug.state.vibrato = null;
+      debug.state.noiseBuffer = null;
+      debug.state.waves.clear();
+      debug.state.partBuses.clear();
+      debug.state.sources.clear();
+      debug.state.partTimbres.clear();
+      debug.state.timbre = "piano_real";
+      return result;
+    });
+    console.log("真实持续音色：", JSON.stringify(sustained));
+    for (const [name, data] of Object.entries(sustained)) {
+      assert.equal(data.loaded, true, name + " 应当能加载");
+      assert.ok(data.samples >= 70, name + " 应有 70+ 个可用采样（静音样本已剔除）");
+      assert.ok(data.early > 0.008, name + " 起音后应有声音");
+      assert.ok(data.late > 0.004, name + " 超过样本长度后应靠循环继续发声（实测 " + data.late + "）");
+      assert.ok(data.late > data.early * 0.4, name + " 长音不应明显衰减（循环没生效？）");
+      assert.ok(data.peak < 0.95, name + " 不能削波");
+      assert.ok(data.maxJump < 0.2, name + " 循环处不应有爆音（最大跳变 " + data.maxJump + "）");
+    }
+
+    // 走真实 UI 路径：选真实钢琴 → 等加载完成 → 播放 → 停止
+    await page.selectOption("#timbreSelect", "piano_real");
+    await page.waitForFunction(() => window.__pujian.state.sampleBanks.has("piano_real"), null, { timeout: 60000 });
+    await page.click("#playButton");
+    await page.waitForTimeout(1200);
+    const realtime = await page.evaluate(() => ({
+      timbre: window.__pujian.state.timbre,
+      playing: window.__pujian.state.isPlaying,
+      sources: window.__pujian.state.sources.size,
+      status: document.querySelector("#sampleStatus")?.textContent || "",
+    }));
+    console.log("真实钢琴 UI 播放：", JSON.stringify(realtime));
+    // 播放可能已经结束（8 个音的样例很短），这时停止按钮是灰的：只在还在播时点它。
+    if (!(await page.$eval("#stopButton", (button) => button.disabled))) {
+      await page.click("#stopButton");
+      await page.waitForTimeout(300);
+    }
+    assert.equal(realtime.timbre, "piano_real", "下拉应能选到真实钢琴");
+    assert.equal(realtime.playing, true, "真实钢琴应当能播放");
+    assert.ok(realtime.sources > 0, "真实钢琴播放应有音频节点");
+    assert.match(realtime.status, /音源/, "界面应显示真实音源状态");
+  }
+
   assert.deepEqual(errors, [], "页面不应有 JS 报错：" + errors.slice(0, 5).join(" | "));
   console.log("\n播放音色端到端验证通过 ✔");
 } finally {
