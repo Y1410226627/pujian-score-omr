@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  NOTE_VALUES, REST_VALUES, midiToName, nameToMidi, isBlackKey, nearestNoteValue,
+  NOTE_VALUES, REST_VALUES, isRest, soundingNoteCount, midiToName, nameToMidi, isBlackKey, nearestNoteValue,
   usedBeats, remainingBeats, buildMeasureSlots, canAppend, createScore, createPart,
   emptyMeasure, appendNote, removeNote, setNoteBeats, transposeNote,
   trimTrailingEmptyMeasures, scoreToPlayableNotes, scoreTotalBeats, cloneScore,
@@ -117,4 +117,28 @@ test("cloneScore 是深拷贝，撤销不会把改动串回当前编辑", () => 
   appendNote(score.parts[0], { midi: 62, beats: 1 }, 4);
   assert.equal(score.parts[0].measures[0].beats.length, 2);
   assert.equal(snapshot.parts[0].measures[0].beats.length, 1);
+});
+
+test("休止符占拍但不发声：可以加到小节里，播放/导出时被跳过", () => {
+  const score = createScore({ beatsPerMeasure: 4 });
+  const part = score.parts[0];
+  appendNote(part, { midi: 60, beats: 1 }, 4);
+  appendNote(part, { rest: true, beats: 1 }, 4);
+  appendNote(part, { midi: 62, beats: 2 }, 4);
+  assert.equal(usedBeats(part.measures[0]), 4, "休止符也要占拍数");
+  assert.equal(part.measures[0].beats.length, 3);
+  assert.equal(isRest(part.measures[0].beats[1]), true);
+  assert.equal(soundingNoteCount(part), 2, "只数有音高的音");
+  const playable = scoreToPlayableNotes(score);
+  assert.equal(playable.length, 2, "休止符不应进入播放列表");
+  assert.deepEqual(playable.map((note) => note.startBeat), [0, 2], "休止符占掉的那一拍让后一个音从第 2 拍开始");
+});
+
+test("整小节都是休止：能建出来、不发声、拍数仍然齐", () => {
+  const score = createScore({ beatsPerMeasure: 4 });
+  const part = score.parts[0];
+  appendNote(part, { rest: true, beats: 4 }, 4);
+  assert.equal(usedBeats(part.measures[0]), 4);
+  assert.equal(scoreToPlayableNotes(score).length, 0);
+  assert.equal(soundingNoteCount(part), 0);
 });

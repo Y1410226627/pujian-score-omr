@@ -110,3 +110,33 @@ test("工程文件（JSON）能原样读回", () => {
   assert.equal(parsed.version, 1);
   assert.deepEqual(parsed.score, score);
 });
+
+test("休止符导出成 <rest/>，且 MusicXML 解析后该位置没有音、拍数仍对齐", () => {
+  const score = composer.createScore({ title: "休止测试", tempo: 90, beatsPerMeasure: 4 });
+  score.parts = [composer.createPart({ name: "旋律" })];
+  composer.appendNote(score.parts[0], { midi: 72, beats: 1 });
+  composer.appendNote(score.parts[0], { rest: true, beats: 1 });
+  composer.appendNote(score.parts[0], { midi: 74, beats: 2 });
+  const xml = exporter.scoreToMusicXml(score);
+  assert.ok(xml.includes("<rest/>"), "MusicXML 里要有休止记号");
+  const result = parseMusicXmlText(xml);
+  assert.equal(result.notes.length, 2, "休止符不产生音符事件");
+  const starts = result.notes.map((note) => note.startBeat).sort((a, b) => a - b);
+  assert.deepEqual(starts, [0, 2], "第 2 拍是休止，所以第二个音在第 3 拍（=startBeat 2）");
+  assert.equal(result.totalBeats, 4);
+});
+
+test("整小节休止也能导出，MIDI 里没有该小节的发声事件但仍占时间", () => {
+  const score = composer.createScore({ beatsPerMeasure: 4 });
+  const part = score.parts[0];
+  composer.appendNote(part, { rest: true, beats: 4 });
+  composer.appendNote(part, { midi: 60, beats: 4 });
+  const xml = exporter.scoreToMusicXml(score);
+  const result = parseMusicXmlText(xml);
+  assert.equal(result.notes.length, 1);
+  assert.equal(result.notes[0].startBeat, 4, "休止的整小节让后一个音从第 5 拍（第二小节）开始");
+  const midi = exporter.scoreToMidi(score);
+  assert.equal(String.fromCharCode(...midi.slice(0, 4)), "MThd", "仍应是合法 MIDI 文件");
+  const trackCount = (String.fromCharCode(...midi.slice(14)).match(/MTrk/g) || []).length;
+  assert.equal(trackCount, 2, "速度轨 + 1 个声部轨");
+});

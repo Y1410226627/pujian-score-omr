@@ -6,9 +6,9 @@
 //   · 写错了永远能撤销，删音就是点旁边的小 ×；
 //   · 试听可以「从头」「从选中的音开始」「只听选中的一段」，避免听一大段找那一句。
 import {
-  NOTE_VALUES, midiToName, isBlackKey, createScore, createPart, appendNote, removeNote,
-  setNoteBeats, transposeNote, buildMeasureSlots, remainingBeats, usedBeats,
-  scoreToPlayableNotes, scoreTotalBeats, cloneScore,
+  NOTE_VALUES, REST_VALUES, midiToName, isBlackKey, isRest, createScore, createPart,
+  appendNote, removeNote, setNoteBeats, transposeNote, buildMeasureSlots, remainingBeats,
+  usedBeats, scoreToPlayableNotes, scoreTotalBeats, cloneScore,
 } from "./composer.js";
 import { scoreToMusicXml, scoreToMidi, scoreToProjectJson } from "./composer-export.js";
 import { TIMBRE_LABELS } from "./timbre.js";
@@ -44,6 +44,7 @@ const state = {
   activePartId: null,
   pitch: 60,               // 当前输入音高（C4）
   beats: 1,                // 当前选中的时值
+  restMode: false,          // 当前是在放「音符」还是「休止符」
   selection: null,          // { partId, measureIndex, noteId } 或 { partId, fromMeasure, toMeasure }
   history: [], future: [],
   audio: null, master: null, sources: new Set(), timers: [],
@@ -344,6 +345,20 @@ function renderScore() {
         const notes = [];
         for (const item of slots) {
           const length = beatsToVfDuration(item.beats);
+          if (item.rest) {
+            // 休止符：用 VexFlow 的 "r" 后缀画成休止记号（用户看得懂、也符合乐谱规范）
+            const restNote = new VF.StaveNote({
+              clef,
+              keys: [clef === "bass" ? "d/3" : "b/4"],
+              duration: `${length}r`,
+            });
+            restNote.__pujianId = item.id;
+            restNote.__pujianPart = part.id;
+            restNote.__pujianBeats = item.beats;
+            restNote.__pujianRest = true;
+            notes.push(restNote);
+            continue;
+          }
           const key = vfKeyFor(item.midi);
           const note = new VF.StaveNote({ clef, keys: [key], duration: length, auto_stem: true });
           note.__pujianId = item.id;
@@ -415,7 +430,7 @@ function drawNoteHitAreas() {
         const totalBeats = Math.max(1, state.score.beatsPerMeasure);
         for (const item of slots) {
           const middle = item.startBeats + item.beats / 2;
-          const key = vfKeyFor(item.midi);
+          const key = item.rest ? (clef === "bass" ? "d/3" : "b/4") : vfKeyFor(item.midi);
           const [letter, octaveText] = key.split("/");
           const octave = Number(octaveText) || 4;
           const stepIndex = ["c", "d", "e", "f", "g", "a", "b"].indexOf(letter[0].toLowerCase());
@@ -657,14 +672,33 @@ function updatePitchReadout() {
 
 function buildValueChips() {
   els.valueChips.replaceChildren();
+  // 第一行：音符（会发声）
   for (const item of NOTE_VALUES) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "chip";
     button.dataset.beats = String(item.beats);
+    button.dataset.rest = "false";
     button.innerHTML = `${item.label}<small>${item.hint}</small>`;
     button.addEventListener("click", () => {
       state.beats = item.beats;
+      state.restMode = false;
+      markActiveChip();
+    });
+    els.valueChips.append(button);
+  }
+  // 第二行：休止符（只占拍数、不发声）——用虚线边框和「休」字样区分
+  for (const item of REST_VALUES) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip is-rest";
+    button.dataset.beats = String(item.beats);
+    button.dataset.rest = "true";
+    button.innerHTML = `休 ${item.hint.replace("拍", "")}<small>${item.label}</small>`;
+    button.title = `${item.label}休止：占 ${item.hint}，不发声`;
+    button.addEventListener("click", () => {
+      state.beats = item.beats;
+      state.restMode = true;
       markActiveChip();
     });
     els.valueChips.append(button);
@@ -674,7 +708,9 @@ function buildValueChips() {
 
 function markActiveChip() {
   for (const button of els.valueChips.querySelectorAll(".chip")) {
-    button.classList.toggle("is-active", Math.abs(Number(button.dataset.beats) - state.beats) < 1e-9);
+    const sameBeats = Math.abs(Number(button.dataset.beats) - state.beats) < 1e-9;
+    const sameKind = (button.dataset.rest === "true") === state.restMode;
+    button.classList.toggle("is-active", sameBeats && sameKind);
   }
 }
 
@@ -718,11 +754,17 @@ function addCurrentNote() {
   const used = usedBeats(part.measures[part.measures.length - 1] || { beats: [] });
   const measureFull = used >= state.score.beatsPerMeasure - 1e-9;
   pushHistory();
-  const placed = appendNote(part, { midi: state.pitch, beats: state.beats }, state.score.beatsPerMeasure);
+  const event = state.restMode
+    ? { rest: true, beats: state.beats }
+    : { midi: state.pitch, beats: state.beats };
+  const placed = appendNote(part, event, state.score.beatsPerMeasure);
   state.selection = { partId: part.id, noteId: placed.note.id, measureIndex: placed.measureIndex };
   afterScoreChange();
-  playPitch(part, state.pitch, ensureAudio().currentTime + 0.01, Math.max(0.25, state.beats * (60 / state.score.tempo)));
-  showToast(measureFull ? `已加到第 ${placed.measureIndex + 1} 小节开头。` : `第 ${placed.measureIndex + 1} 小节加了一个 ${midiToName(state.pitch)}。`);
+  if (!state.restMode) {
+    playPitch(part, state.pitch, ensureAudio().currentTime + 0.01, Math.max(0.25, state.beats * (60 / state.score.tempo)));
+  }
+  const what = state.restMode ? "一个休止符" : midiToName(state.pitch);
+  showToast(measureFull ? `已加到第 ${placed.measureIndex + 1} 小节开头。` : `第 ${placed.measureIndex + 1} 小节加了${what}。`);
 }
 
 /* ---------------- 导出 ---------------- */

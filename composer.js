@@ -171,8 +171,9 @@ export function appendNote(part, note, beatsPerMeasure = 4) {
   }
   const created = {
     id: note.id || `note-${Math.random().toString(36).slice(2, 10)}`,
-    midi: Math.round(Number(note.midi)),
+    midi: note.rest ? 0 : Math.round(Number(note.midi)),
     beats: round(Number(note.beats) || 1),
+    ...(note.rest ? { rest: true } : {}),
     ...(note.lyric ? { lyric: note.lyric } : {}),
   };
   measure.beats.push(created);
@@ -235,6 +236,7 @@ export function scoreToPlayableNotes(score) {
     part.measures.forEach((measure, measureIndex) => {
       const { slots } = buildMeasureSlots(measure, beatsPerMeasure);
       for (const slot of slots) {
+        if (slot.rest) continue;   // 休止符占拍但不发声
         notes.push({
           midi: slot.midi,
           startBeat: round(measureIndex * beatsPerMeasure + slot.startBeats),
@@ -263,6 +265,23 @@ export function scoreTotalBeats(score) {
     longest = Math.max(longest, measures * beatsPerMeasure);
   }
   return round(longest);
+}
+
+/**
+ * 一个事件是不是休止符。
+ * 为什么单独一个函数：界面、导出、播放三处都要判断，集中一处避免写法不一致。
+ */
+export function isRest(event) {
+  return Boolean(event && event.rest);
+}
+
+/** 某小节里有几个「真的有音高」的音（用于空谱判断、导出提示）。 */
+export function soundingNoteCount(part) {
+  let count = 0;
+  for (const measure of (part && part.measures) || []) {
+    for (const event of measure.beats || []) if (!event.rest) count += 1;
+  }
+  return count;
 }
 
 /** 深拷贝（撤销/重做用；结构简单，JSON 足够）。 */

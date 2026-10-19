@@ -66,7 +66,12 @@ function noteXml({ midi, beats, rest = false }, { clef, staff = 1, indent }) {
 /** 把一小节补满（空出来的地方写休止），MusicXML 才不会被判成残小节。 */
 function measureContent(measure, beatsPerMeasure) {
   const { slots, remaining } = buildMeasureSlots(measure, beatsPerMeasure);
-  const items = slots.map((slot) => ({ midi: slot.midi, beats: slot.beats, rest: false }));
+  // 休止符要保留：它占拍数、在乐谱上画成休止，导出时不能变成「什么都没有」
+  const items = slots.map((slot) => ({
+    midi: slot.rest ? 0 : slot.midi,
+    beats: slot.beats,
+    rest: Boolean(slot.rest),
+  }));
   if (remaining > 1e-9) items.push({ beats: remaining, rest: true });
   return items;
 }
@@ -200,6 +205,7 @@ export function scoreToMidi(score) {
     part.measures.forEach((measure, measureIndex) => {
       const { slots } = buildMeasureSlots(measure, beatsPerMeasure);
       for (const slot of slots) {
+        if (slot.rest) continue;   // 休止符不产生 MIDI 事件
         const start = Math.round((measureIndex * beatsPerMeasure + slot.startBeats) * DIVISIONS);
         const end = start + Math.max(1, Math.round(slot.beats * DIVISIONS));
         const velocity = Math.max(1, Math.min(127, Math.round(96 * (Number(part.volume) || 1))));
