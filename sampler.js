@@ -326,6 +326,17 @@ export async function loadSampleBank(manifest, name, { onProgress = () => {} } =
     }
     bank.layers.push({ velocity: layer.velocity, samples, medianRms });
   }
+  // 整个 bank 的观测响度（全层样本 RMS 的中位数）。
+  // 为什么需要：不同乐器的录音电平差可达 3–4 倍（实测钢琴峰值 0.25、二胡 0.069），
+  // 固定增益表抹不平；播放时用它把每个 bank 归一到同一响度，
+  // 这样用户切换乐器不会「钢琴很响、二胡几乎听不见」。
+  const allRms = [];
+  for (const layer of bank.layers) {
+    for (const sample of layer.samples) if (sample.rms) allRms.push(sample.rms);
+  }
+  allRms.sort((left, right) => left - right);
+  const observedRms = allRms.length ? allRms[Math.floor(allRms.length / 2)] : 0.01;
+  bank.observedRms = Math.max(0.0008, observedRms);
   return bank;
 }
 

@@ -1,0 +1,341 @@
+{
+ "targetPeak": 0.16,
+ "note": "level = 播放增益倍数，按目标峰值 0.16 反推（峰值 ÷ level ≈ 目标），抹平不同乐器的录音电平差。钢琴/合唱/弦乐为 2026-10-19 实测，其余按乐器分类标定。",
+ "banks": {
+  "accordion_real": {
+   "level": 0.94,
+   "source": "group-peak",
+   "peak": 0.17
+  },
+  "acoustic_bass_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "alto_sax_real": {
+   "level": 1.28,
+   "source": "group-peak",
+   "peak": 0.125
+  },
+  "banjo_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "baritone_sax_real": {
+   "level": 1.28,
+   "source": "group-peak",
+   "peak": 0.125
+  },
+  "bassoon_real": {
+   "level": 1.23,
+   "source": "group-peak",
+   "peak": 0.13
+  },
+  "brass_section_real": {
+   "level": 1.1,
+   "source": "group-peak",
+   "peak": 0.145
+  },
+  "celesta_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "cello_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "choir_female": {
+   "level": 1.23,
+   "source": "group-peak",
+   "peak": 0.13
+  },
+  "choir_male": {
+   "level": 1.23,
+   "source": "group-peak",
+   "peak": 0.13
+  },
+  "choir_real": {
+   "level": 1.23,
+   "source": "measured-peak",
+   "peak": 0.13
+  },
+  "church_organ_real": {
+   "level": 0.94,
+   "source": "group-peak",
+   "peak": 0.17
+  },
+  "clarinet_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "contrabass_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "dizi_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "electric_bass_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "electric_guitar_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "electric_piano_real": {
+   "level": 0.94,
+   "source": "group-peak",
+   "peak": 0.17
+  },
+  "english_horn_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "erhu_real": {
+   "level": 2.0,
+   "source": "measured-peak",
+   "peak": 0.069
+  },
+  "flute_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "french_horn_real": {
+   "level": 1.1,
+   "source": "group-peak",
+   "peak": 0.145
+  },
+  "fretless_bass_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "glockenspiel_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "guzheng_real": {
+   "level": 1.88,
+   "source": "group-peak",
+   "peak": 0.085
+  },
+  "harp_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "harpsichord_real": {
+   "level": 0.94,
+   "source": "group-peak",
+   "peak": 0.17
+  },
+  "kalimba_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "koto_real": {
+   "level": 1.88,
+   "source": "group-peak",
+   "peak": 0.085
+  },
+  "marimba_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "nylon_guitar_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "oboe_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "ocarina_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "pad_real": {
+   "level": 1.39,
+   "source": "group-peak",
+   "peak": 0.115
+  },
+  "pan_flute_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "piano_real": {
+   "level": 0.64,
+   "source": "measured-peak",
+   "peak": 0.25
+  },
+  "piccolo_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "pipa_real": {
+   "level": 1.88,
+   "source": "group-peak",
+   "peak": 0.085
+  },
+  "pizzicato_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "recorder_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "shakuhachi_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "shamisen_real": {
+   "level": 1.88,
+   "source": "group-peak",
+   "peak": 0.085
+  },
+  "sheng_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "sitar_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "soprano_sax_real": {
+   "level": 1.28,
+   "source": "group-peak",
+   "peak": 0.125
+  },
+  "steel_drums_real": {
+   "level": 1.07,
+   "source": "group-peak",
+   "peak": 0.15
+  },
+  "steel_guitar_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "strings_real": {
+   "level": 1.45,
+   "source": "measured-peak",
+   "peak": 0.11
+  },
+  "suona_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "synth_choir_real": {
+   "level": 1.23,
+   "source": "group-peak",
+   "peak": 0.13
+  },
+  "synth_lead_real": {
+   "level": 1.33,
+   "source": "group-peak",
+   "peak": 0.12
+  },
+  "tenor_sax_real": {
+   "level": 1.28,
+   "source": "group-peak",
+   "peak": 0.125
+  },
+  "timpani_real": {
+   "level": 1.07,
+   "source": "group-peak",
+   "peak": 0.15
+  },
+  "tremolo_real": {
+   "level": 1.39,
+   "source": "group-peak",
+   "peak": 0.115
+  },
+  "trombone_real": {
+   "level": 1.1,
+   "source": "group-peak",
+   "peak": 0.145
+  },
+  "trumpet_real": {
+   "level": 1.1,
+   "source": "group-peak",
+   "peak": 0.145
+  },
+  "tuba_real": {
+   "level": 1.1,
+   "source": "group-peak",
+   "peak": 0.145
+  },
+  "tubular_bells_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "vibraphone_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "viola_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "violin_real": {
+   "level": 1.39,
+   "source": "group-peak",
+   "peak": 0.115
+  },
+  "voice_oohs_real": {
+   "level": 1.23,
+   "source": "group-peak",
+   "peak": 0.13
+  },
+  "whistle_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "xiao_real": {
+   "level": 1.6,
+   "source": "group-peak",
+   "peak": 0.1
+  },
+  "xylophone_real": {
+   "level": 1.45,
+   "source": "group-peak",
+   "peak": 0.11
+  },
+  "yangqin_real": {
+   "level": 1.88,
+   "source": "group-peak",
+   "peak": 0.085
+  }
+ }
+}

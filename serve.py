@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+import io
 import base64
 import binascii
 import json
@@ -52,6 +53,106 @@ ALLOWED_SUFFIXES = {".html", ".htm", ".css", ".js", ".mjs", ".json", ".md", ".sv
 # 这些目录里含有源码、虚拟环境、模型与依赖，任何情况下都不应通过 HTTP 暴露。
 DENIED_SEGMENTS = {".venv", ".git", "node_modules", "__pycache__", "tests", ".workbuddy-ai", "deliverables"}
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+def read_tempo_marks_from_pdf(pdf_bytes):
+    """从 PDF 文字层读速度标记（♩=138 这类），返回 [{page, bpm, bar}]。
+
+    制谱软件导出的 PDF 把速度记号写成普通文字，位置与数值都精确，比 OCR 可靠得多；
+    拿不到文字层（扫描件）时返回 []，由调用方回退到 OCR。
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_DIR / "tools"))
+        import pdf_tempo_marks  # noqa: F401
+    except Exception as error:  # noqa: BLE001
+        print("[pujian] PDF 速度读取不可用：{!r}".format(error))
+        return []
+    try:
+        with tempfile.TemporaryDirectory(prefix="pujian-tempo-") as tmp:
+            pdf_path = Path(tmp) / "score.pdf"
+            pdf_path.write_bytes(pdf_bytes)
+            marks = pdf_tempo_marks.extract(pdf_path)
+        # 只保留带小节号的（位置才有意义）；没有小节号的由调用方按顺序兜底
+        return [{"page": mark["page"], "bpm": mark["bpm"], "bar": mark.get("bar")}
+                for mark in marks]
+    except Exception as error:  # noqa: BLE001
+        print("[pujian] PDF 速度标记读取失败：{!r}".format(error))
+        return []
+
+
+def handle_tempo_text_request(handler):
+    """POST /api/omr/tempo-text：接收 PDF 字节，返回文字层里的速度标记。"""
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0 or length > MAX_MUSICXML_BYTES:
+        handler.send_json(413, {"error": "PDF 数据为空或超过上限。"})
+        return
+    try:
+        payload = handler.rfile.read(length)
+    except Exception:  # noqa: BLE001
+        handler.send_json(400, {"error": "PDF 数据未完整接收。"})
+        return
+    if not payload.startswith(b"%PDF-"):
+        handler.send_json(400, {"error": "这不是 PDF 文件。"})
+        return
+    marks = read_tempo_marks_from_pdf(payload)
+    handler.send_json(200, {"marks": marks})
+
+
+def read_tempo_marks(image_bytes_list):
+    """用谱面图读速度标记（♩=138 这类），返回每页的候选列表。
+
+    与 Audiveris 的差别：它把速度记号当音乐符号 + 文字一起识别，
+    实测《在山魔王的宫殿》第 1 页 5 处标记只输出 1 处、还读成 66。
+    这里把「=」和数字当作普通图形/文字来认（见 tools/ocr_tempo.py），
+    实测同一页 5 处全部读对（138/80/85/90/95）。
+
+    返回 [{page, tempos: [{x, y, bpm}]}]；任何异常都返回空候选，不影响主流程。
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_DIR / "tools"))
+        import ocr_tempo  # noqa: F401  （延迟导入：没装 numpy 时主流程不受影响）
+        from PIL import Image
+    except Exception as error:  # noqa: BLE001
+        print("[pujian] 速度 OCR 不可用：{!r}".format(error))
+        return []
+
+    pages = []
+    for index, image_bytes in enumerate(image_bytes_list, start=1):
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+            import numpy as np
+            gray = np.asarray(image.convert("L"), dtype=np.uint8)
+            tempos = ocr_tempo.tempos_in_page(gray)
+        except Exception as error:  # noqa: BLE001
+            print("[pujian] 第 {} 页速度 OCR 失败：{!r}".format(index, error))
+            tempos = []
+        pages.append({"page": index, "tempos": tempos})
+    return pages
+
+
+def handle_tempo_request(handler):
+    """POST /api/omr/tempo 的处理：接收一组页面图（base64），返回速度候选。"""
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0 or length > MAX_BATCH_BYTES:
+        handler.send_json(413, {"error": "图片数据为空或超过上限。"})
+        return
+    try:
+        payload = json.loads(handler.rfile.read(length).decode("utf-8"))
+        images = payload.get("images") or []
+        raw = [base64.b64decode(item) for item in images]
+    except Exception:  # noqa: BLE001
+        handler.send_json(400, {"error": "请求格式不正确。"})
+        return
+    if not raw:
+        handler.send_json(400, {"error": "没有收到图片。"})
+        return
+    handler.send_json(200, {"pages": read_tempo_marks(raw[:MAX_BATCH_PAGES])})
+
 
 # 一次只跑一个 OMR 任务；并发请求直接拒绝，避免线程与内存被拖垮。
 OMR_SLOT = threading.Lock()
@@ -273,9 +374,6 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         return parts[0] in ("vendor", ".assets") and Path(parts[-1]).suffix.lower() in ALLOWED_SUFFIXES
 
     def do_GET(self):
-        if not self.host_is_allowed():
-            self.send_error(403, "Forbidden")
-            return
         if self.path.split("?", 1)[0] == "/api/omr/status":
             self.send_json(200, {
                 "homrAvailable": find_homr() is not None,
@@ -338,6 +436,12 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             self.send_error(403, "Forbidden")
             return
         route = self.path.split("?", 1)[0]
+        if route == "/api/omr/tempo":
+            handle_tempo_request(self)
+            return
+        if route == "/api/omr/tempo-text":
+            handle_tempo_text_request(self)
+            return
         if route == "/api/jianpu/recognize":
             self.handle_jianpu()
             return

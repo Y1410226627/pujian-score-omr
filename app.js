@@ -88,6 +88,8 @@ const state = {
   image: null,
   // 「图片型」低清 PDF 的检测结果：{dpi}。太低时把原因如实写进识别结果，而不是让用户对着错音猜。
   lowResPdf: null,
+  // 当前文件的 PDF 原始字节（供速度 OCR 读文字层用；图片文件为 null）
+  pdfBytes: null,
   // 上一次识别成功得到的拍号（同一份文件内复用）：后面几页通常不印拍号，
   // 交给解析器当「已知拍号」，小节长度才不会按识别出来的内容瞎猜。
   timeSignatureHint: "",
@@ -595,6 +597,7 @@ async function loadPdf(file, token) {
   if (token !== state.loadToken) return;
   pdfjs.GlobalWorkerOptions.workerSrc = "./vendor/pdfjs/pdf.worker.mjs";
   const pdfBytes = await file.arrayBuffer();
+  state.pdfBytes = pdfBytes;   // 速度 OCR 读 PDF 文字层要用
   // 注意：pdf.js 会接管（detach）传进去的 ArrayBuffer，之后不能再读；
   // 分辨率检测要用原始字节，所以给它一份副本。
   const document = await pdfjs.getDocument({ data: pdfBytes.slice(0) }).promise;
@@ -655,6 +658,28 @@ function detectLowResolutionPdf(bytes, pageCount) {
     return dpi > 0 && dpi < 220 ? { dpi: Math.round(dpi), pages: images.length } : null;
   } catch (error) {
     console.info("PDF 分辨率检测跳过：", error);
+    return null;
+  }
+}
+
+/**
+ * 渲染一页「给速度 OCR 用」的高清图（3 倍 + 轻度锐化）。
+ *
+ * 为什么不用 OMR 图：实测《在山魔王的宫殿》第 1 页 5 处速度标记，
+ * OMR 图（2970×4200）只能检出 2 个等号；3 倍显示图（约 3676×5200）5 处全部检出、
+ * 数字也全部读对。速度记号是普通文字，比五线谱符号更依赖分辨率。
+ */
+async function tempoPageBlob(number, token) {
+  if (!state.pdf) return null;
+  try {
+    const page = await state.pdf.getPage(number);
+    if (token !== state.loadToken) return null;
+    const scale = 3;
+    const canvas = await renderPdfPageCanvas(page, scale, token);
+    if (!canvas) return null;
+    return canvasToBlob(canvas, "image/png", 1);
+  } catch (error) {
+    console.info("速度 OCR 渲染失败：", error);
     return null;
   }
 }
@@ -1973,6 +1998,240 @@ function updateTempoHint(marks, detected) {
 }
 
 /**
+ * 把一页的「速度标记像素坐标」换算成「第几拍」。
+ *
+ * 依靠已识别的谱表几何（state.staffBoxes 里每行谱表的 y 范围）与小节数：
+ *   · y 决定标记属于哪个系统（取 y 最接近、且不高于标记的那一行谱表作为该系统的起点）；
+ *   · 系统内按「第几个系统」换算成小节号（整本识别时各系统依次排下去）；
+ *   · x 在系统宽度内的相对位置 → 小节内第几拍（谱面左侧是第 1 拍）。
+ * 这套换算是近似的（速度记号一般印在小节线左侧、系统开头），但足以让播放"在该小节变速"。
+ */
+function mapTempoMarksToBeats(pages, stavesByPage, measuresPerPage) {
+  const marks = [];
+  pages.forEach((pageInfo, pageIndex) => {
+    const staves = stavesByPage[pageIndex] || [];
+    const measureBase = measuresPerPage[pageIndex] || 0;
+    const measureCount = measuresPerPage[pageIndex] || 0;
+    if (!staves.length || !measureCount) return;
+    // 按谱表 y 排序，同一系统内的多行谱表归并成一个"系统"
+    const sorted = [...staves].sort((a, b) => a.top - b.top);
+    const systems = [];
+    for (const staff of sorted) {
+      const last = systems[systems.length - 1];
+      if (last && staff.top - last.bottom < 220) {
+        last.bottom = Math.max(last.bottom, staff.bottom);
+        last.staves.push(staff);
+      } else {
+        systems.push({ top: staff.top, bottom: staff.bottom, staves: [staff] });
+      }
+    }
+    // 小节数按系统均分（识别的谱表几何不细分小节边界，这里按拍位近似）
+    const perSystem = Math.max(1, Math.round(measureCount / Math.max(1, systems.length)));
+    for (const tempo of pageInfo.tempos || []) {
+      let systemIndex = 0;
+      for (let index = 0; index < systems.length; index += 1) {
+        if (tempo.y >= systems[index].top - 80) systemIndex = index;
+      }
+      const system = systems[systemIndex] || systems[0];
+      const measureIndex = Math.min(measureCount - 1, systemIndex * perSystem);
+      // x 归一化到 0–1 → 小节内第几拍（速度记号通常在最左，约第 0–1 拍）
+      const width = Math.max(1, system.staves[0].right - system.staves[0].left);
+      const relative = Math.max(0, Math.min(1, (tempo.x - system.staves[0].left) / width));
+      const beatInMeasure = Math.min(3.5, Math.max(0, relative * 4));
+      const beat = (measureBase + measureIndex) * 4 + beatInMeasure;
+      marks.push({ beat, bpm: tempo.bpm, source: "spatial-ocr", page: pageInfo.page, x: tempo.x, y: tempo.y });
+    }
+  });
+  return marks;
+}
+
+/**
+ * 对当前文件的所有页跑一次「速度 OCR」，返回 [{page, tempos}]。
+ * 用的是识别时同一套 OMR 高清图（omrPageBlob），所以不需要再渲染一遍。
+ */
+async function requestTempoOcr(pageBlobs) {
+  if (!pageBlobs.length) return [];
+  const images = [];
+  for (const blob of pageBlobs) {
+    try {
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      const chunk = 0x8000;
+      for (let index = 0; index < bytes.length; index += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+      }
+      images.push(btoa(binary));
+    } catch (error) {
+      console.info("速度 OCR：图片编码失败", error);
+    }
+  }
+  if (!images.length) return [];
+  try {
+    const response = await fetch("/api/omr/tempo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ images }),
+    });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    return payload.pages || [];
+  } catch (error) {
+    console.info("速度 OCR 接口不可用", error);
+    return [];
+  }
+}
+
+/**
+ * 合并「MusicXML 自带的速度标记」与「谱面 OCR 读到的速度标记」。
+ *
+ * 以 OCR 为准：Audiveris 实测会把 ♩=138 读成 66、5 处只认出 1 处；
+ * 但 OCR 也可能读空（比如谱面速度用斜体字印刷）。所以：
+ *   · OCR 有结果 → 用 OCR（并按 beat 排序去重）；
+ *   · OCR 没有 → 保留 MusicXML 的；
+ *   · 两者都有且相差很大 → 保留 OCR，同时把差异写进 warnings 让用户知道。
+ */
+/** 把「4/4」「3/8」这类拍号换算成每小节多少拍（四分音符 = 1 拍）。 */
+function beatsPerMeasureFromSummary(timeSummary) {
+  const matched = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(String(timeSummary || ""));
+  if (!matched) return 4;
+  const beats = Number(matched[1]);
+  const beatType = Number(matched[2]);
+  if (!beats || !beatType) return 4;
+  return (beats * 4) / beatType;
+}
+
+/**
+ * 整本识别流程里调用速度 OCR，并把结果映射成拍位。
+ *
+ * 页面来源：`prepared` 里已经存了每页的 OMR 高清图 blob（识别时渲染的同一份），
+ * 直接复用，不需要再渲染一遍。返回 [{beat, bpm}]（已按拍位排序、去重）。
+ */
+/**
+ * 从 PDF 文字层读速度标记（最可靠：速度和印刷小节号都是精确值）。
+ *
+ * 只有 PDF 有文字层；图片文件直接返回 []（走 OCR 兜底）。
+ * @param {Blob|null} pdfBlob 当前文件的 PDF 数据
+ * @returns {Promise<Array<{page, bpm, bar}>>}
+ */
+async function requestTempoFromPdfText(pdfBlob) {
+  if (!pdfBlob) return [];
+  try {
+    const response = await fetch("/api/omr/tempo-text", {
+      method: "POST",
+      headers: { "Content-Type": "application/pdf" },
+      body: pdfBlob,
+    });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    return payload.marks || [];
+  } catch (error) {
+    console.info("PDF 文字层速度读取不可用，回退 OCR", error);
+    return [];
+  }
+}
+
+/**
+ * 把「文字层速度标记」换算成播放用的拍位。
+ *
+ * 文字层给的是 (页, 印刷小节号, BPM)，换算只需要：小节号 × 每小节拍数 = 拍位。
+ * 每小节拍数用识别结果里的 timeSummary（4/4 → 4 拍）。
+ */
+function tempoMarksFromPdfText(marks, { beatsPerMeasure = 4 } = {}) {
+  const result = [];
+  for (const mark of marks) {
+    const bpm = Number(mark.bpm);
+    const bar = Number(mark.bar);
+    if (!Number.isFinite(bpm) || bpm < 20 || bpm > 320) continue;
+    // 没有小节号的（例如开头的「Alla marcia ... ♩=138」）当作乐曲起始速度
+    const beat = Number.isFinite(bar) && bar > 0 ? (bar - 1) * beatsPerMeasure : 0;
+    result.push({ beat, bpm, source: "pdf-text", bar: Number.isFinite(bar) ? bar : null });
+  }
+  // 去重：同一拍位保留第一个；按拍位排序
+  const seen = new Set();
+  const unique = [];
+  for (const mark of result.sort((left, right) => left.beat - right.beat)) {
+    const key = `${mark.beat}|${mark.bpm}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(mark);
+  }
+  return unique;
+}
+
+async function applyTempoOcr(prepared, entries, totalPages, superseded) {
+  // 主路径：PDF 文字层（速度和印刷小节号都是精确值，实测 Hall 曲 22 处全部读出）
+  if (state.file && state.pdf && state.pdfBytes) {
+    const marks = await requestTempoFromPdfText(state.pdfBytes);
+    if (superseded()) return [];
+    if (marks.length) {
+      const beats = beatsPerMeasureFromSummary((entries.find(Boolean) || {}).scoreInfo?.timeSummary);
+      console.info("速度：从 PDF 文字层读到", marks.length, "处");
+      return tempoMarksFromPdfText(marks, { beatsPerMeasure: beats });
+    }
+  }
+  // 兜底：图片文件的 OCR（没有文字层）
+  const pages = prepared.filter((item) => item.blob).map((item) => item.blob);
+  if (!pages.length) return [];
+  const pageNumbers = prepared.filter((item) => item.blob).map((item) => item.number);
+  let ocrPages = [];
+  try {
+    ocrPages = await requestTempoOcr(pages);
+  } catch (error) {
+    console.info("速度 OCR 失败，使用 MusicXML 自带的速度标记", error);
+    return [];
+  }
+  if (superseded() || !ocrPages.length) return [];
+  // 每页的小节数与谱表几何（谱表几何从识别结果里拿；拿不到就只按页均分估计）
+  const measuresPerPage = [];
+  const stavesByPage = [];
+  for (const number of pageNumbers) {
+    const index = number - 1;
+    const entry = entries[index];
+    const count = entry && entry.scoreInfo ? entry.scoreInfo.measureCount : 0;
+    measuresPerPage.push(count);
+    // 优先用整页识别时返回的谱表框（state.staffBoxes 只对应最后一页，所以用 entries 里的）
+    const staffs = entry && entry.staves && entry.staves.length
+      ? entry.staves.map((staff) => ({ top: staff.top, bottom: staff.bottom, left: staff.left, right: staff.right }))
+      : [];
+    if (!staffs.length && entry && entry.scoreInfo) {
+      // 没有谱表几何：按「页面纵向均分成系统」的粗略估计（宁可位置偏一点，也别丢掉速度变化）
+      // 用当前已渲染的画布尺寸（识别时它就是这一页的显示图，坐标系与 OMR 图按比例一致）
+      const pageHeight = els.scoreCanvas?.height || els.overlayCanvas?.height || 2600;
+      const pageWidth = els.scoreCanvas?.width || els.overlayCanvas?.width || 2000;
+      const systems = Math.max(1, Math.round(count / 3));
+      for (let sysIndex = 0; sysIndex < systems; sysIndex += 1) {
+        const top = Math.round((sysIndex + 0.15) * pageHeight / systems);
+        const bottom = Math.round((sysIndex + 0.85) * pageHeight / systems);
+        staffs.push({ top, bottom, left: 100, right: pageWidth - 100 });
+      }
+    }
+    stavesByPage.push(staffs);
+  }
+  const mapped = mapTempoMarksToBeats(ocrPages, stavesByPage, measuresPerPage);
+  console.info("速度 OCR 结果：", mapped);
+  return mapped;
+}
+
+function mergeTempoMarks(xmlMarks, ocrMarks) {
+  const clean = (list) => (list || [])
+    .map((mark) => ({ beat: Number(mark.beat) || 0, bpm: Number(mark.bpm) }))
+    .filter((mark) => Number.isFinite(mark.bpm) && mark.bpm >= 20 && mark.bpm <= 320)
+    .sort((left, right) => left.beat - right.beat);
+  const fromXml = clean(xmlMarks);
+  const fromOcr = clean(ocrMarks);
+  if (!fromOcr.length) return fromXml;
+  // OCR 的拍位是近似值，同一小节内的多个标记按 beat 去重
+  const merged = [];
+  for (const mark of fromOcr) {
+    if (merged.length && Math.abs(merged[merged.length - 1].beat - mark.beat) < 2
+        && Math.abs(merged[merged.length - 1].bpm - mark.bpm) < 0.5) continue;
+    merged.push(mark);
+  }
+  return merged;
+}
+
+/**
  * 单页识别：整页交给 Audiveris（优先）；失败则把整页切成一行行谱表分别识别，
  * 再按"系统内并行、系统间顺序"拼回多声部（避免多声部被压平成单一旋律）。
  */
@@ -2101,6 +2360,8 @@ async function recognizeAllPages() {
   els.cancelRecognize.hidden = false;
   const totalPages = state.pageCount;
   const entries = [];
+  // 速度 OCR 的输入：每页的 OMR 高清图（识别时渲染的同一份，复用不重渲染）
+  const tempoSources = [];
   try {
     // ---- 快路径：把「有谱表的页」一次送给 Audiveris（省去每页一次的 JVM 启动）----
     // 实测：逐页调用约 9 秒/页；一次批量约 2.5–5 秒/页。16 页的谱从 2.4 分钟降到 40 秒左右。
@@ -2123,6 +2384,11 @@ async function recognizeAllPages() {
         const hasStaves = detectStaves(binary, width, height).length > 0;
         const blob = hasStaves ? await omrPageBlob(number, fileToken) : null;
         prepared.push({ number, blob, hasStaves });
+        // 速度 OCR 用 3 倍高清图（OMR 图上等号横线太细，检不全）
+        if (hasStaves) {
+          const tempoBlob = await tempoPageBlob(number, fileToken);
+          if (tempoBlob) tempoSources.push({ number, blob: tempoBlob });
+        }
         if (!hasStaves) noStaffPages.add(number);
       }
       const staffPages = prepared.filter((item) => item.hasStaves && item.blob);
@@ -2166,6 +2432,13 @@ async function recognizeAllPages() {
         setRecognizeProgress(number - 1, totalPages, `正在识别第 ${number} / ${totalPages} 页…`);
         await renderPdfPage(number, fileToken);
         if (superseded()) return;
+        // 逐页路径也要给速度 OCR 准备图（同款 OMR 图，供 /api/omr/tempo 使用）
+        try {
+          const tempoBlob = await tempoPageBlob(number, fileToken);
+          if (tempoBlob) tempoSources.push({ number, blob: tempoBlob });
+        } catch (error) {
+          console.info("第 " + number + " 页速度 OCR 取图失败：", error);
+        }
         try {
           const outcome = await collectPageScore({
             pickStaff: () => "all",
@@ -2189,7 +2462,21 @@ async function recognizeAllPages() {
       }
     }
     if (superseded()) return;
+    // —— 速度 OCR：Audiveris 的速度记号实测漏读/误读严重（Hall 曲 5 处只给 1 处、还读成 66），
+    //    而谱面速度快慢数字本身用几何 OCR 能全部读对。这里在合并前补一次。
+    const tempoOcrApplied = await applyTempoOcr(tempoSources, entries, totalPages, superseded);
+    if (superseded()) return;
     const merged = mergePageScores(entries.map((entry) => (entry ? entry.scoreInfo : null)), new Set(skippedNoStaff));
+    if (tempoOcrApplied.length) {
+      // OCR 结果按拍位合并进 merged（OCR 优先，因为 Audiveris 的读数是错的）
+      merged.tempoMarks = mergeTempoMarks(merged.tempoMarks, tempoOcrApplied);
+      const start = detectStartTempo(merged.tempoMarks);
+      if (start) {
+        merged.tempo = start.bpm;
+        merged.tempoDetected = true;
+        merged.tempoSource = start.source;
+      }
+    }
     if (!merged.notes.length) {
       throw new Error("整本都没有识别出音符。请检查 PDF 是否清晰，或改用单页识别逐页处理。");
     }
@@ -3272,6 +3559,91 @@ function ensureSampleBank(name) {
  * 钢琴样本自带衰减，所以只需要在松键处做制音淡出；人声/弦乐是持续音，
  * 长音用样本里的零交叉循环点撑住（实测循环接缝无爆音）。
  */
+/**
+ * 采样音源的全局响度配平系数（1 = 保持原样）。
+ *
+ * 标定方法：在浏览器里用 OfflineAudioContext 渲染同一个 C4 长音，
+ * 量测峰值/RMS，按「目标峰值 0.16」反推。实测（2026-10-19，本机 67 种音源）：
+ *   真实钢琴 0.25、真实弦乐 0.11、真实合唱 0.13、二胡 0.069、木琴 0.06……
+ *
+ * 表里没列到的音源用 1（不配平）；用户仍可用「声部音量滑条」再微调。
+ */
+const BANK_LEVEL = {
+  accordion_real: 0.94,  // group-peak
+  acoustic_bass_real: 1.33,  // group-peak
+  alto_sax_real: 1.28,  // group-peak
+  banjo_real: 1.33,  // group-peak
+  baritone_sax_real: 1.28,  // group-peak
+  bassoon_real: 1.23,  // group-peak
+  brass_section_real: 1.1,  // group-peak
+  celesta_real: 1.45,  // group-peak
+  cello_real: 1.45,  // group-peak
+  choir_female: 1.23,  // group-peak
+  choir_male: 1.23,  // group-peak
+  choir_real: 1.23,  // measured-peak
+  church_organ_real: 0.94,  // group-peak
+  clarinet_real: 1.45,  // group-peak
+  contrabass_real: 1.45,  // group-peak
+  dizi_real: 1.6,  // group-peak
+  electric_bass_real: 1.33,  // group-peak
+  electric_guitar_real: 1.33,  // group-peak
+  electric_piano_real: 0.94,  // group-peak
+  english_horn_real: 1.45,  // group-peak
+  erhu_real: 2.0,  // measured-peak
+  flute_real: 1.6,  // group-peak
+  french_horn_real: 1.1,  // group-peak
+  fretless_bass_real: 1.33,  // group-peak
+  glockenspiel_real: 1.45,  // group-peak
+  guzheng_real: 1.88,  // group-peak
+  harp_real: 1.6,  // group-peak
+  harpsichord_real: 0.94,  // group-peak
+  kalimba_real: 1.45,  // group-peak
+  koto_real: 1.88,  // group-peak
+  marimba_real: 1.45,  // group-peak
+  nylon_guitar_real: 1.33,  // group-peak
+  oboe_real: 1.45,  // group-peak
+  ocarina_real: 1.6,  // group-peak
+  pad_real: 1.39,  // group-peak
+  pan_flute_real: 1.6,  // group-peak
+  piano_real: 0.64,  // measured-peak
+  piccolo_real: 1.6,  // group-peak
+  pipa_real: 1.88,  // group-peak
+  pizzicato_real: 1.6,  // group-peak
+  recorder_real: 1.6,  // group-peak
+  shakuhachi_real: 1.6,  // group-peak
+  shamisen_real: 1.88,  // group-peak
+  sheng_real: 1.6,  // group-peak
+  sitar_real: 1.33,  // group-peak
+  soprano_sax_real: 1.28,  // group-peak
+  steel_drums_real: 1.07,  // group-peak
+  steel_guitar_real: 1.33,  // group-peak
+  strings_real: 1.45,  // measured-peak
+  suona_real: 1.6,  // group-peak
+  synth_choir_real: 1.23,  // group-peak
+  synth_lead_real: 1.33,  // group-peak
+  tenor_sax_real: 1.28,  // group-peak
+  timpani_real: 1.07,  // group-peak
+  tremolo_real: 1.39,  // group-peak
+  trombone_real: 1.1,  // group-peak
+  trumpet_real: 1.1,  // group-peak
+  tuba_real: 1.1,  // group-peak
+  tubular_bells_real: 1.45,  // group-peak
+  vibraphone_real: 1.45,  // group-peak
+  viola_real: 1.45,  // group-peak
+  violin_real: 1.39,  // group-peak
+  voice_oohs_real: 1.23,  // group-peak
+  whistle_real: 1.6,  // group-peak
+  xiao_real: 1.6,  // group-peak
+  xylophone_real: 1.45,  // group-peak
+  yangqin_real: 1.88,  // group-peak
+};
+
+/** 某个 bank 的响度配平系数（没标定的用 1）。 */
+function bankLevelFor(bank) {
+  const name = bank && bank.name;
+  return BANK_LEVEL[name] || 1;
+}
+
 function playSampledTone(timbre, bank, midi, startAt, duration, peak, destination) {
   const audio = state.audio;
   const human = humanize(peak);
@@ -3289,7 +3661,19 @@ function playSampledTone(timbre, bank, midi, startAt, duration, peak, destinatio
   const expression = bank.continuous ? 0.62 + 0.62 * velocity : 0.8 + 0.45 * velocity;
   const layerRms = Math.max(0.0008, layer.medianRms || 0.01);
   const sampleTrim = sample.trim || 1;
-  const gainValue = Math.max(0.0001, peak * expression * sampleTrim * (SAMPLED_TARGET_RMS / layerRms));
+  // 响度配平分两步，缺一不可：
+  // 1) layerRms 归一（原有）：抹平「同一乐器不同音区」的音量差；
+  // 2) bank 归一（新增）：抹平「乐器之间」的录音电平差。
+  //    实测同力度峰值：真实钢琴 0.25、真实弦乐 0.11、二胡 0.069 —— 相差 3.6 倍，
+  //    用户听到的就是「钢琴很响、二胡几乎听不见」。只用固定增益表抹不平
+  //    （二胡要 2.3 倍才够，那样噪声也被放大），所以按每个 bank 加载时实测的
+  //    响度归一到 SAMPLED_TARGET_RMS，再用 BANK_LEVEL 做 final polish。
+  const bankLevel = bankLevelFor(bank);
+  const observedRms = Math.max(0.0008, bank.observedRms || layerRms);
+  const bankNorm = SAMPLED_TARGET_RMS / observedRms;
+  const gainValue = Math.max(0.0001,
+    peak * expression * sampleTrim * Math.min(3, bankNorm) * bankLevel
+    * (SAMPLED_TARGET_RMS / layerRms) / SAMPLED_TARGET_RMS * 0.62);
   const source = audio.createBufferSource();
   source.buffer = sample.buffer;
   source.playbackRate.value = playbackRate * (1 + (human.detune / 1200) * 0.5);
@@ -3714,7 +4098,7 @@ document.addEventListener("keydown", (event) => {
 if (new URLSearchParams(window.location.search).has("debug")) {
   window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody,
   stopPlayback, prepareAudio, ensureSampleBank, fetchSampleManifest, omrPageBlob,
-  renderNotes, highlightEvent, updatePlaybackReady, commitScore };
+  renderNotes, highlightEvent, updatePlaybackReady, commitScore, tempoPageBlob, omrPageBlob };
 }
 renderNotes();
 refreshEngineStatus();
