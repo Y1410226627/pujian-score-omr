@@ -171,10 +171,7 @@ function playPitch(part, midi, startAt, durationSeconds, velocity = 0.85) {
       if (lookup && lookup.sample) {
         const context = ensureAudio();
         const sample = lookup.sample;
-        const source = bank.continuous
-          ? startLoopingSample(context, sample)
-          : context.createBufferSource();
-        source.buffer = sample.buffer;
+        const source = createSampleSource(context, sample, { loop: Boolean(bank.continuous) });
         source.playbackRate.value = lookup.playbackRate;
         const gain = context.createGain();
         gain.gain.value = 0.9;
@@ -219,19 +216,24 @@ async function ensureSampleBank(bank) {
   }
 }
 
-/** 持续音乐器：按样本里的循环点旋转播放，长音才不会「放完就停」。 */
-function startLoopingSample(context, sample) {
+/**
+ * 创建一个 bufferSource：一次性把 buffer 与循环参数都设好。
+ * 注意：AudioBufferSourceNode.buffer 只能成功赋值一次，之后再赋会抛
+ * 「Cannot set buffer to non-null after it has been already set」——所以调用方不要再设。
+ */
+function createSampleSource(context, sample, { loop = false } = {}) {
   const source = context.createBufferSource();
   source.buffer = sample.buffer;
-  source.loop = true;
-  if (Number.isFinite(sample.loopStart) && Number.isFinite(sample.loopEnd) && sample.loopEnd > sample.loopStart) {
-    source.loopStart = sample.loopStart;
-    source.loopEnd = sample.loopEnd;
-  } else {
-    source.loopStart = Math.max(0.05, sample.buffer.duration * 0.3);
-    source.loopEnd = Math.max(source.loopStart + 0.1, sample.buffer.duration * 0.9);
+  if (loop) {
+    if (Number.isFinite(sample.loopStart) && Number.isFinite(sample.loopEnd) && sample.loopEnd > sample.loopStart) {
+      source.loopStart = sample.loopStart;
+      source.loopEnd = sample.loopEnd;
+    } else {
+      source.loopStart = Math.max(0.05, sample.buffer.duration * 0.3);
+      source.loopEnd = Math.max(source.loopStart + 0.1, sample.buffer.duration * 0.9);
+    }
+    source.loop = true;
   }
-  source.loop = true;
   return source;
 }
 
