@@ -1,0 +1,38 @@
+{
+  "version": 3,
+  "banks": {
+    "piano_real": {
+      "label": "真实钢琴（采样）",
+      "continuous": false,
+      "decodeRate": 32000,
+      "trimSeconds": 5.5,
+      "category": "piano",
+      "layers": [
+        {"velocity": 0.25, "notes": {"21": {"path": "salamander/v04/A0v4.mp3"}}},
+        {"velocity": 0.85, "notes": {"21": {"path": "salamander/v12/A0v12.mp3"}}}
+      ]
+    },
+    "erhu_real": {
+      "label": "二胡（采样）",
+      "continuous": true,
+      "decodeRate": 48000,
+      "category": "china",
+      "loopSeconds": [0.6, 1.8],
+      "layers": [
+        {"velocity": 0.8, "notes": {"50": {"path": "erhu/sus/erhu_d5_sus_rr1.wav"}}}
+      ]
+    },
+    "pipa_real": {
+      "label": "琵琶（采样）",
+      "continuous": false,
+      "decodeRate": 48000,
+      "category": "china",
+      "layers": [
+        {"velocity": 0.8, "notes": {"60": {"path": "pipa/C4.wav"}}}
+      ]
+    }
+  },
+  "licenses": [
+    {"bank": "erhu_real", "name": "aliexpress-erhu", "license": "CC0 1.0"}
+  ]
+}

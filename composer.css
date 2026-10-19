@@ -1,0 +1,177 @@
+/* 创作室（零基础写谱）的样式：只服务于 composer.html，不改动识别页。 */
+
+.composer-page .app-shell { max-width: 1420px; }
+.composer-main { padding-bottom: 40px; }
+
+.composer-hero {
+  display: flex;
+  gap: 40px;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 34px 2px 26px;
+  border-bottom: 1px solid #e9ece7;
+}
+.composer-hero h1 { font-size: clamp(28px, 3vw, 38px); }
+.composer-hero p { max-width: 620px; }
+.composer-hero .hero-steps { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 12px; min-width: 430px; }
+.composer-hero .hero-steps > div { background: #fff; border: 1px solid #e8ebe6; border-radius: 11px; padding: 12px 13px; }
+.composer-hero .hero-steps span { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--pale-green); color: var(--green); font-size: 11px; font-weight: 700; }
+.composer-hero .hero-steps strong { display: block; margin: 7px 0 4px; font-size: 12px; }
+.composer-hero .hero-steps small { color: #7f8b83; font-size: 10px; line-height: 1.5; }
+
+.composer-layout {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding-top: 18px;
+}
+.composer-panel { background: #fff; border: 1px solid #e8ebe6; border-radius: 12px; box-shadow: 0 5px 22px rgba(35, 53, 42, .025); padding: 20px 20px 18px; }
+.input-panel { position: sticky; top: 12px; }
+
+.composer-row { margin-top: 16px; }
+.composer-row .field-label { display: block; margin-bottom: 8px; }
+.composer-row .fine-print { margin: 7px 0 0; }
+.row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.row-head .field-label { margin: 0; }
+.auto-tag { font-size: 10px; color: #85928a; }
+
+.inline-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.inline-group select { flex: 1 1 140px; min-width: 0; }
+.composer-panel select,
+.composer-panel input[type="text"],
+.composer-panel input[type="number"] {
+  border: 1px solid #dfe5df;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 12px;
+}
+.composer-panel select:focus-visible,
+.composer-panel input:focus-visible { outline: 2px solid #bcd3c2; outline-offset: 1px; }
+
+.pitch-readout { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.pitch-readout strong { font-size: 27px; letter-spacing: -.03em; color: var(--green-dark); min-width: 62px; }
+.pitch-readout > span { color: #7d8a82; font-size: 11px; }
+.pitch-actions { display: flex; gap: 6px; margin-left: auto; }
+
+.mini-keyboard { display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); gap: 3px; }
+.key {
+  border: 1px solid #d7ded7;
+  border-radius: 6px;
+  background: #fff;
+  color: #45544b;
+  font-size: 9px;
+  padding: 9px 0 7px;
+  cursor: pointer;
+  transition: .12s ease;
+  line-height: 1.2;
+  text-align: center;
+}
+.key small { display: block; color: #98a29b; font-size: 8px; }
+.key:hover { background: #f1f6f1; border-color: #b9cbbd; }
+.key.is-black { background: #eef1ec; color: #4b5850; }
+.key.is-active { background: var(--green); border-color: var(--green-dark); color: #fff; transform: translateY(-1px); }
+.key.is-active small { color: #d7e6dc; }
+.key.is-octave-mark { border-color: #a9c3b2; }
+
+.value-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  border: 1px solid #dfe5df;
+  border-radius: 999px;
+  background: #fff;
+  padding: 7px 11px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: .12s ease;
+  color: #4d5b53;
+}
+.chip small { display: block; font-size: 9px; color: #94a099; }
+.chip:hover { border-color: #b9cbbd; background: #f5f9f5; }
+.chip.is-active { background: var(--green); border-color: var(--green-dark); color: #fff; }
+.chip.is-active small { color: #d7e6dc; }
+.chip.is-rest { border-style: dashed; }
+
+.composer-actions { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center; margin-top: 12px; }
+.composer-actions.wrap { flex-wrap: wrap; }
+.composer-actions .primary-button { flex: 1 1 auto; justify-content: center; }
+.composer-actions .ghost-button { white-space: nowrap; }
+
+.setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.setting-grid .inline-field { display: flex; flex-direction: column; gap: 5px; align-items: stretch; }
+.setting-grid .inline-field > span { font-size: 10px; color: #6b7970; font-weight: 600; }
+.setting-grid .inline-field small { font-size: 9px; color: #98a29b; }
+
+.composer-panel .primary-button {
+  border: 0;
+  border-radius: 9px;
+  background: var(--green);
+  color: #fff;
+  padding: 11px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: .15s ease;
+}
+.composer-panel .primary-button:hover { background: var(--green-dark); }
+.composer-panel .ghost-button {
+  border: 1px solid #dfe5df;
+  border-radius: 9px;
+  background: #fff;
+  color: #4d5b53;
+  padding: 9px 12px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: .15s ease;
+}
+.composer-panel .ghost-button:hover { background: #f4f8f4; border-color: #bccdc0; }
+.composer-panel .ghost-button.small { padding: 6px 9px; font-size: 10px; }
+.composer-panel .text-button { border: 0; background: none; color: var(--green-dark); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; padding: 0; font-size: 10px; }
+
+.score-panel { min-height: 560px; }
+.score-canvas-wrap { position: relative; margin-top: 12px; border: 1px solid #eef1ec; border-radius: 10px; background: #fcfdfb; padding: 10px; min-height: 380px; overflow: auto; }
+.score-editor svg { display: block; width: 100%; height: auto; }
+.score-editor .vf-stavenote { cursor: pointer; }
+.score-editor .vf-stavenote.is-selected { fill: var(--green); stroke: var(--green); }
+.score-editor .vf-stavenote.is-selected path,
+.score-editor .vf-stavenote.is-selected ellipse { fill: var(--green); stroke: var(--green); }
+.score-editor .note-hit { cursor: pointer; }
+.score-editor .note-hit.is-selected { fill: rgba(71, 113, 93, .18); }
+.score-empty { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 6px; color: #8b968e; background: linear-gradient(#fcfdfb, #f7faf7); border-radius: 10px; }
+.score-empty strong { font-size: 13px; color: #5c6a61; }
+.score-empty p { margin: 0; font-size: 11px; }
+.score-empty[hidden] { display: none; }
+
+.edit-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; padding: 9px 12px; border: 1px solid #eef1ec; border-radius: 9px; background: #f8faf7; }
+.edit-toolbar[hidden] { display: none; }
+.edit-toolbar .selection-label { font-size: 11px; color: #5c6a61; }
+.edit-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.keyboard-hint { color: #8b968e; font-size: 10px; }
+.keyboard-hint kbd { display: inline-block; border: 1px solid #dfe5df; border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: #fff; font-size: 9px; color: #55635a; }
+
+.composer-guide { margin-top: 26px; border-top: 1px solid #e9ece7; padding-top: 22px; }
+.composer-guide h2 { font-family: "Noto Sans SC", sans-serif; font-size: 17px; font-weight: 600; margin: 0 0 14px; }
+.guide-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.guide-grid article { background: #fff; border: 1px solid #e8ebe6; border-radius: 11px; padding: 14px 15px; }
+.guide-grid span { color: #b7c3ba; font-size: 11px; letter-spacing: .1em; }
+.guide-grid strong { display: block; margin: 6px 0 6px; font-size: 12.5px; }
+.guide-grid p { margin: 0; color: #7c8880; font-size: 11px; line-height: 1.65; }
+
+@media (max-width: 1180px) {
+  .composer-layout { grid-template-columns: 1fr; }
+  .input-panel { position: static; }
+  .composer-hero { flex-direction: column; align-items: flex-start; gap: 18px; }
+  .composer-hero .hero-steps { min-width: 0; width: 100%; }
+  .guide-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .composer-page .app-shell { padding: 0 16px; }
+  .mini-keyboard { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+  .guide-grid { grid-template-columns: 1fr; }
+  .setting-grid { grid-template-columns: 1fr; }
+}

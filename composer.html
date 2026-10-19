@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f7f4" />
+    <title>谱见 · 创作室（零基础也能写谱）</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='11' cy='24' r='5' fill='%2347715d'/%3E%3Crect x='14' y='6' width='3' height='19' fill='%2347715d'/%3E%3Cpath d='M17 6 L27 9 L27 14 L17 11 Z' fill='%23dc9167'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="composer.css" />
+  </head>
+  <body class="composer-page">
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="index.html" aria-label="回到识别页">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>谱见</span>
+          <span class="brand-divider"></span>
+          <span class="brand-caption">创作室 · 零基础写谱</span>
+        </a>
+        <div class="topbar-right">
+          <span class="local-badge"><span class="status-dot"></span>全部在本机，不上传</span>
+          <a class="github-link" href="index.html">识别乐谱 <span aria-hidden="true">↗</span></a>
+        </div>
+      </header>
+
+      <main class="composer-main">
+        <section class="composer-hero">
+          <div>
+            <div class="eyebrow"><span class="eyebrow-line"></span>不用懂乐理，也能写谱</div>
+            <h1>想到一段旋律，<span>点出来就好。</span></h1>
+            <p>
+              你不需要认识五线谱。左侧挑一个音高（像按琴键一样），选「这个音唱几拍」，
+              点一下 <strong>＋ 加进乐谱</strong>——五线谱会自己画好。随时可以按
+              <strong>试听这一小节</strong>，满意了再导出成乐谱文件或 MIDI。
+            </p>
+          </div>
+          <div class="hero-steps">
+            <div><span>1</span><strong>选音高</strong><small>钢琴键盘上点一个键，或用上下键挑选</small></div>
+            <div><span>2</span><strong>选几拍</strong><small>「1 拍」「半拍」「2 拍」···按拍子说就行</small></div>
+            <div><span>3</span><strong>加进去 + 试听</strong><small>放错了就撤销，或直接点掉那个音</small></div>
+          </div>
+        </section>
+
+        <div class="composer-layout">
+          <!-- ===== 左：输入区 ===== -->
+          <aside class="composer-panel input-panel">
+            <div class="panel-heading">
+              <div><span class="step-label">01 / 输入</span><h2>选音高、选拍数</h2></div>
+            </div>
+
+            <div class="composer-row">
+              <label class="field-label" for="composerPart">正在写的声部</label>
+              <div class="inline-group">
+                <select id="composerPart" aria-label="选择声部"></select>
+                <button class="ghost-button small" id="addPart" type="button" title="再加一个声部，可以同时写两条旋律">＋ 声部</button>
+                <button class="ghost-button small" id="renamePart" type="button" title="给这个声部改个名字">✎ 改名</button>
+                <button class="ghost-button small" id="removePart" type="button" title="删掉当前声部">删</button>
+              </div>
+            </div>
+
+            <div class="composer-row">
+              <span class="field-label">音高（点键盘上的键）</span>
+              <div class="pitch-readout">
+                <strong id="pitchLabel">C4</strong>
+                <span id="pitchHint">中央 C · 唱名 do</span>
+                <span class="pitch-actions">
+                  <button class="ghost-button small" id="pitchDown" type="button" title="往下移一个音">− 半音</button>
+                  <button class="ghost-button small" id="pitchUp" type="button" title="往上移一个音">＋ 半音</button>
+                  <button class="ghost-button small" id="pitchPlay" type="button" title="只听这个音">▷ 听一下</button>
+                </span>
+              </div>
+              <div class="mini-keyboard" id="miniKeyboard" role="group" aria-label="钢琴键盘"></div>
+            </div>
+
+            <div class="composer-row">
+              <span class="field-label">这个音唱几拍</span>
+              <div class="value-chips" id="valueChips"></div>
+              <p class="fine-print">不知道选哪个？先用「1 拍」——这是最常见的一拍一个音。</p>
+            </div>
+
+            <div class="composer-actions">
+              <button class="primary-button" id="addNote" type="button">
+                <span class="button-spark" aria-hidden="true">✳</span><span>＋ 加进乐谱</span><span class="button-arrow" aria-hidden="true">→</span>
+              </button>
+              <button class="ghost-button" id="undo" type="button" title="撤销（Ctrl+Z）">↶ 撤销</button>
+              <button class="ghost-button" id="redo" type="button" title="重做（Ctrl+Shift+Z）">↷ 重做</button>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="composer-row">
+              <div class="row-head">
+                <span class="field-label">乐谱设置</span>
+                <span class="auto-tag" id="measureStatus">第 1 小节还差 4 拍</span>
+              </div>
+              <div class="setting-grid">
+                <label class="inline-field"><span>标题</span><input id="scoreTitle" type="text" value="未命名乐谱" aria-label="乐谱标题" /></label>
+                <label class="inline-field"><span>速度</span><input id="scoreTempo" type="number" min="20" max="320" value="84" aria-label="每分钟拍数" /><small>BPM</small></label>
+                <label class="inline-field"><span>每小节</span>
+                  <select id="scoreBeats" aria-label="每小节拍数">
+                    <option value="4" selected>4 拍（最常见）</option>
+                    <option value="3">3 拍（圆舞曲）</option>
+                    <option value="2">2 拍</option>
+                    <option value="6">6 拍</option>
+                  </select>
+                </label>
+                <label class="inline-field"><span>调号</span>
+                  <select id="scoreKey" aria-label="调号">
+                    <option value="0" selected>C 大调（没有升降号，最好上手）</option>
+                    <option value="1">G 大调（1 个升号）</option>
+                    <option value="-1">F 大调（1 个降号）</option>
+                    <option value="2">D 大调（2 个升号）</option>
+                    <option value="-2">降 B 大调（2 个降号）</option>
+                    <option value="3">A 大调（3 个升号）</option>
+                    <option value="-3">降 E 大调（3 个降号）</option>
+                  </select>
+                </label>
+                <label class="inline-field"><span>谱号</span>
+                  <select id="scoreClef" aria-label="谱号">
+                    <option value="treble" selected>高音谱号（一般旋律）</option>
+                    <option value="bass">低音谱号（低音/贝斯）</option>
+                    <option value="alto">中音谱号</option>
+                    <option value="tenor">次中音谱号</option>
+                    <option value="treble8">高音谱号（低八度，男高音）</option>
+                  </select>
+                </label>
+                <label class="inline-field"><span>音色</span>
+                  <select id="scoreTimbre" aria-label="声部音色"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="composer-row">
+              <div class="row-head">
+                <span class="field-label">试听</span>
+                <span class="auto-tag" id="playbackState">未在播放</span>
+              </div>
+              <div class="composer-actions wrap">
+                <button class="ghost-button" id="playAll" type="button">▶ 从头听整首</button>
+                <button class="ghost-button" id="playFromHere" type="button">▶ 从选中的音开始听</button>
+                <button class="ghost-button" id="playSelection" type="button">▶ 只听选中的一段</button>
+                <button class="ghost-button" id="stopPlay" type="button">■ 停止</button>
+                <label class="loop-toggle"><input type="checkbox" id="loopPlay" /><span>循环</span></label>
+              </div>
+              <p class="fine-print">
+                在下方乐谱里点一个音就能选中它；按住 <strong>Shift</strong> 再点另一个音，就选中这两个音之间的整段。
+              </p>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="composer-row">
+              <span class="field-label">导出 / 保存</span>
+              <div class="composer-actions wrap">
+                <button class="ghost-button" id="exportMusicXml" type="button" title="MusicXML：可以用 MuseScore、Finale 等制谱软件继续编辑或打印">↓ MusicXML（乐谱文件）</button>
+                <button class="ghost-button" id="exportMidi" type="button" title="MIDI：在任何音乐软件里都能播放">↓ MIDI</button>
+                <button class="ghost-button" id="exportProject" type="button" title="工程文件：下次导入可以继续改">↓ 工程文件</button>
+                <button class="ghost-button" id="importProject" type="button" title="导入之前保存的工程文件">↑ 导入工程</button>
+                <input id="projectInput" type="file" accept=".json,application/json" hidden />
+              </div>
+              <p class="fine-print" id="exportHint">导出的 MusicXML 每个小节都补齐了拍数，用别的软件打开不会报错。</p>
+            </div>
+          </aside>
+
+          <!-- ===== 右：五线谱 + 说明 ===== -->
+          <section class="composer-panel score-panel">
+            <div class="panel-heading">
+              <div><span class="step-label">02 / 乐谱</span><h2>你的五线谱</h2></div>
+              <div class="score-toolbar" id="scoreToolbar">
+                <span class="zoom-label" id="editHint">点音符可以选中 / 删除</span>
+              </div>
+            </div>
+            <div class="score-canvas-wrap">
+              <div id="scoreEditor" class="score-editor" aria-label="五线谱编辑区"></div>
+              <div class="score-empty" id="scoreEmpty">
+                <strong>还没有音符</strong>
+                <p>左边选一个音高和拍数，点「＋ 加进乐谱」就会出现在这里。</p>
+              </div>
+            </div>
+            <div class="edit-toolbar" id="editToolbar" hidden>
+              <span class="selection-label" id="selectionInfo">未选中音符</span>
+              <span class="edit-actions" id="editActions"></span>
+            </div>
+            <p class="fine-print keyboard-hint">
+              快捷键：<kbd>↑</kbd><kbd>↓</kbd> 换音高、<kbd>Enter</kbd> 加音、
+              <kbd>Delete</kbd> 删掉选中的音、<kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销、<kbd>空格</kbd> 试听、<kbd>Esc</kbd> 停止。
+            </p>
+          </section>
+        </div>
+
+        <section class="composer-guide">
+          <h2>第一次用？照着这四步就行</h2>
+          <div class="guide-grid">
+            <article><span>01</span><strong>先写第一拍</strong><p>音高保持 C4，拍数选「1 拍」，点「＋ 加进乐谱」。你会看到五线谱上出现一个音。</p></article>
+            <article><span>02</span><strong>一路往下写</strong><p>每点一次就往后加一个音，写满 4 拍会自动换到下一小节，不用自己算小节线。</p></article>
+            <article><span>03</span><strong>边写边听</strong><p>点「整首」「从选中开始」或「只听选中的一段」，随时确认旋律是不是你想要的那句。</p></article>
+            <article><span>04</span><strong>换个乐器听</strong><p>左侧「音色」可以换成二胡、古筝、长笛、合唱……同一个旋律会变一种味道。</p></article>
+          </div>
+        </section>
+      </main>
+      <footer class="footer">
+        <span>谱见 <span class="footer-dot">·</span> 让写谱这件事，不再需要先学乐理</span>
+        <span><a href="docs-instruments.md">乐器音源清单</a></span>
+      </footer>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+
+    <script src="vendor/vexflow/vexflow.js"></script>
+    <script type="module" src="composer-app.js"></script>
+  </body>
+</html>
