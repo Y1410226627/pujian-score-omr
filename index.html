@@ -194,6 +194,7 @@
               <div class="summary-divider"></div>
               <label class="tempo-box" title="试听速度（每分钟四分音符数）。识别到谱面的 ♩=66 这类标记会自动填入；手动改只影响播放速度，不会改谱。"><span class="summary-label">速度</span><span class="tempo-value"><input id="tempoInput" type="number" min="20" max="320" value="84" aria-label="每分钟拍数（BPM）" /><small>BPM</small></span></label>
             </div>
+            <p class="tempo-hint" id="tempoHint" hidden></p>
             <div class="notes-toolbar"><span class="field-label">旋律音符</span><div class="note-actions"><button class="ghost-button" id="lowConfidenceButton" type="button" title="只显示置信度偏低、建议校对的音符" hidden>只看待校对</button><button class="midi-button" id="midiButton" type="button" title="下载 MIDI 文件" disabled>↓ MIDI</button><button class="add-note-button" id="addNoteButton" type="button" title="添加音符">＋ 添加</button></div></div>
             <div class="part-panel" id="partPanel" hidden>
               <div class="part-panel-head">
@@ -207,7 +208,15 @@
               <label class="part-piano" id="pianoToggleWrap" hidden>
                 <input type="checkbox" id="pianoToggle" checked /><span>包含钢琴伴奏</span>
               </label>
-              <p class="fine-print part-hint">「声部」就是乐谱上每一行的演唱者。勾上要听的声部（例如只听女高就把别的去掉），全勾就是听合唱；不想听钢琴伴奏就把「包含钢琴伴奏」去掉。<strong>每条右边的小滑条就是这个声部的音量</strong>——觉得钢伴太吵就把它拖小，播放中拖也立刻生效、不会中断。声部名可点下拉改成谱面上的叫法（女高 / 女中 / 男中），改名后整份乐谱一起更新。</p>
+                            <div class="layer-toolbar" id="layerToolbar">
+                <span class="layer-label">加厚音色（复制一份当前声部，换乐器一起演奏）</span>
+                <span class="layer-actions">
+                  <button class="ghost-button small" id="addLayerPart" type="button" title="复制当前声部为新声部，可换音色/八度">＋ 复制成新声部</button>
+                  <button class="ghost-button small" id="addLayerEcho" type="button" title="给当前声部加一条高八度的同旋律">＋ 高八度叠加</button>
+                  <button class="ghost-button small" id="addLayerLower" type="button" title="给当前声部加一条低八度的同旋律">＋ 低八度叠加</button>
+                </span>
+              </div>
+            <p class="fine-print part-hint">「声部」就是乐谱上每一行的演唱者。勾上要听的声部（例如只听女高就把别的去掉），全勾就是听合唱；不想听钢琴伴奏就把「包含钢琴伴奏」去掉。<strong>每条右边的小滑条就是这个声部的音量</strong>——觉得钢伴太吵就把它拖小，播放中拖也立刻生效、不会中断。声部名可点下拉改成谱面上的叫法（女高 / 女中 / 男中），改名后整份乐谱一起更新。</p>
             </div>
             <div class="note-columns" aria-hidden="true"><span></span><span>音高</span><span title="以四分音符为一拍">起拍</span><span>时值</span><span></span></div>
             <div class="note-list" id="noteList">

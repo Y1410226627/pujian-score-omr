@@ -12,6 +12,7 @@ import {
 import {
   SAMPLED_TIMBRES, SAMPLED_TARGET_RMS, isSampledTimbre, fetchSampleManifest, loadSampleBank, lookupSample,
 } from "./sampler.js";
+import { detectStartTempo, playbackTempoSegments, midiTempoEvents, clampTempo } from "./tempo.js";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -42,7 +43,9 @@ const els = {
   recognizeProgressLabel: byId("recognizeProgressLabel"), cancelRecognize: byId("cancelRecognize"),
   transposeInput: byId("transposeInput"), resetTranspose: byId("resetTranspose"),
   instrumentNote: byId("instrumentNote"), timbreSelect: byId("timbreSelect"), timbreHint: byId("timbreHint"),
-  sampleStatus: byId("sampleStatus"),
+  sampleStatus: byId("sampleStatus"), tempoHint: byId("tempoHint"),
+  layerToolbar: byId("layerToolbar"), addLayerPart: byId("addLayerPart"),
+  addLayerEcho: byId("addLayerEcho"), addLayerLower: byId("addLayerLower"),
 };
 const state = {
   file: null, objectUrl: null, pdf: null, pageNumber: 1, pageCount: 1, notes: [], scoreInfo: null,
@@ -53,6 +56,8 @@ const state = {
   // 识别来源：engine=本机专业引擎 / estimate=浏览器粗略估算 / musicxml=直接导入的结构化乐谱
   recognitionSource: null,
   selection: null, loop: false, onlyLowConfidence: false,
+  // 音符行索引（id → DOM 行）与当前正在高亮的集合：播放时只改动变化的那几行。
+  noteRowById: null, highlightedIds: new Set(),
   // 演奏范围：selectedParts=null 表示全选；includePiano=是否把钢琴伴奏算进去。
   // partNames 存「声部标识 -> 用户改的名字」，改一次整份乐谱一起生效。
   selectedParts: null, includePiano: true, partNames: new Map(), pianoKeys: new Set(),
@@ -72,6 +77,8 @@ const state = {
   scheduleTimer: null, softClipCurve: null,
   // 采样音源：清单、已加载的样本表、正在加载的 Promise、加载顺序（用于内存上限 LRU）。
   sampleManifest: null, sampleBanks: new Map(), sampleLoading: new Map(), sampleOrder: [],
+  // 混响预热状态（见 prewarmReverb：避免第一次点播放时同步生成 1.9 秒脉冲而卡顿）
+  reverbWarming: false,
   // 识别结果对应的是哪一页（简谱/单页识别=页码；整本识别或 MusicXML 导入=null）。
   // 翻页时**不清空结果**，只按这个页码决定要不要在谱面上画音符坐标。
   scorePage: null,
@@ -526,7 +533,7 @@ async function loadFile(file) {
       els.scoreDetails.textContent = `${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary} · ${scoreInfo.keySummary}${scoreInfo.tempoDetected ? " · ♩=" + Math.round(scoreInfo.tempo) : ""}${selfCheckSummary(scoreInfo)}`;
       els.scoreWarnings.textContent = scoreInfo.warnings.join(" ");
       els.scoreWarnings.hidden = scoreInfo.warnings.length === 0;
-      els.tempoInput.value = Math.min(320, Math.max(20, Math.round(scoreInfo.tempo)));
+      applyDetectedTempo(scoreInfo);
       renderNotes();
       updateRecognitionBanner();
       els.recognizeButton.disabled = true;
@@ -1051,6 +1058,9 @@ function formatBeatCount(beats) {
 }
 function renderNotes() {
   els.noteList.replaceChildren();
+  // 音符行索引：高亮时只碰"正在播的这一批"，不再每次都遍历全部行。
+  // 实测 8419 音的谱，每次 querySelectorAll 遍历约 11 ms，一秒内几十次就足以听出卡顿。
+  state.noteRowById = new Map();
   if (!state.notes.length) {
     els.notesEmpty.hidden = false;
     els.noteList.append(els.notesEmpty);
@@ -1176,6 +1186,7 @@ function renderNotes() {
         refreshScoreOverlay();
       });
       els.noteList.append(row);
+      if (state.noteRowById) state.noteRowById.set(note.id, row);
     });
   }
   els.lowConfidenceButton.hidden = !hasLowConfidenceNotes();
@@ -1226,6 +1237,97 @@ function collectParts() {
     return aHead.localeCompare(bHead) || aNum - bNum;
   });
   return parts;
+}
+
+/** 当前声部面板里勾选/最近操作的声部（加厚声部的来源）。 */
+function focusedPartKey() {
+  const parts = collectParts();
+  if (!parts.length) return null;
+  if (state.selectedParts instanceof Set) {
+    const enabled = parts.filter((part) => state.selectedParts.has(part.key));
+    if (enabled.length === 1) return enabled[0].key;
+  }
+  return parts[0].key;
+}
+
+/**
+ * 把一个声部复制成新声部（加厚层次用）。
+ *
+ * 为什么要复制音符而不是只改音色：一份乐谱里「同一段旋律用两种乐器齐奏」在数据上就是两条音轨，
+ * 复制成独立 part 之后，勾选、音量、音色、播放、MIDI 导出、MusicXML 导出全部照常生效，
+ * 不需要为「加厚」单独写一套特殊的播放逻辑。
+ *
+ * @param {string} sourceKey 源声部
+ * @param {{semitones?: number, name?: string, timbre?: string}} options
+ *        semitones：整体移调半音（高/低八度叠加用 ±12）；name：新声部名；timbre：新声部音色
+ * @returns {{key: string, name: string, count: number} | null}
+ */
+function duplicatePart(sourceKey, options = {}) {
+  const source = state.notes.filter((note) => voiceIdentity(note) === sourceKey);
+  if (!source.length) {
+    showToast("这个声部还没有音符，先识别或添加音符再叠加。");
+    return null;
+  }
+  const semitones = Math.round(Number(options.semitones) || 0);
+  const baseName = options.name || (partDisplayName(sourceKey, sourceKey) + " · 叠加");
+  // 新声部的 partId 要避开已有的，保证 voiceIdentity 唯一
+  let index = 1;
+  let newId = `${sourceKey}-layer${index}`;
+  const used = new Set(state.notes.map((note) => voiceIdentity(note)));
+  while (used.has(newId)) {
+    index += 1;
+    newId = `${sourceKey}-layer${index}`;
+  }
+  const name = uniquePartName(baseName);
+  const copies = source.map((note) => {
+    const midi = Math.max(0, Math.min(127, Math.round(note.midi) + semitones));
+    return {
+      ...note,
+      id: makeId(),
+      partId: newId,
+      partName: name,
+      midi,
+      pitch: midiToPitchName(midi),
+      x: Number.NaN, y: Number.NaN,
+      confidence: 1,
+      isLowConfidence: false,
+    };
+  });
+  state.notes.push(...copies);
+  state.partNames.set(newId, name);
+  if (options.timbre) state.partTimbres.set(newId, options.timbre);
+  // 新声部默认参与演奏
+  if (state.selectedParts instanceof Set) state.selectedParts.add(newId);
+  updatePartControls();
+  renderNotes();
+  refreshScoreOverlay();
+  updatePlaybackReady();
+  const octaveText = semitones > 0 ? "高八度" : semitones < 0 ? "低八度" : "同音高";
+  showToast(`已把「${partDisplayName(sourceKey, sourceKey)}」复制成新声部「${name}」（${octaveText}，${copies.length} 个音），可在声部行单独选音色。`);
+  return { key: newId, name, count: copies.length };
+}
+
+/** 让新声部名不重复（否则声部面板会把同名合在一起，用户会以为没加上）。 */
+function uniquePartName(baseName) {
+  const alive = new Set(collectParts().map((part) => part.name));
+  if (!alive.has(baseName)) return baseName;
+  let index = 2;
+  while (alive.has(`${baseName} ${index}`)) index += 1;
+  return `${baseName} ${index}`;
+}
+
+/** 加厚声部的三个入口。 */
+function addLayerPart() {
+  const key = focusedPartKey();
+  if (!key) return showToast("还没有声部可以复制，先识别或导入一份乐谱。");
+  duplicatePart(key, {});
+}
+
+function addLayerOctave(semitones) {
+  const key = focusedPartKey();
+  if (!key) return showToast("还没有声部可以叠加，先识别或导入一份乐谱。");
+  const label = semitones > 0 ? "高八度" : "低八度";
+  duplicatePart(key, { semitones, name: `${partDisplayName(key, key)} · ${label}` });
 }
 
 /** 这个声部是否要参与演奏/导出。 */
@@ -1362,6 +1464,7 @@ function updatePartControls(reset = false) {
   els.pianoToggleWrap.hidden = pianoParts.length === 0;
   els.pianoToggle.checked = state.includePiano;
   els.partPanel.hidden = parts.length === 0;
+  if (els.layerToolbar) els.layerToolbar.hidden = parts.length === 0;
   updatePlaybackReady();
 }
 
@@ -1390,7 +1493,14 @@ function selectionRange() {
 }
 function markSelectedRows() {
   const range = selectionRange();
+  // 用渲染时建好的索引（8419 行时遍历全表要 11 ms，选一次就卡一下）
   const selectedIds = range ? new Set(range.ids) : null;
+  if (state.noteRowById && state.noteRowById.size) {
+    for (const [id, row] of state.noteRowById) {
+      row.classList.toggle("is-selected", Boolean(selectedIds && selectedIds.has(id)));
+    }
+    return;
+  }
   for (const row of els.noteList.querySelectorAll(".note-row")) {
     row.classList.toggle("is-selected", Boolean(selectedIds && selectedIds.has(row.dataset.noteId)));
   }
@@ -1784,6 +1894,7 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   if (source === "engine") quantizeScoreRhythm(scoreInfo);
   for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
   dedupePartNames(scoreInfo.notes);
+  clearTimbreCache();
   state.scoreInfo = scoreInfo;
   state.notes = scoreInfo.notes;
   state.staffBoxes = staves;
@@ -1803,9 +1914,10 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   // 谱面速度（如 ♩=66）：识别/导入到就自动填进右上角 BPM。
   // 以前这里只对 MusicXML 导入生效，扫描谱识别出的速度进不了输入框，试听会退回默认 84 BPM
   // （用户反馈「怎么这么快」的根因：原谱 66，默认 84 快了 27%）。
-  if (scoreInfo.tempoDetected && Number.isFinite(Number(scoreInfo.tempo))) {
-    els.tempoInput.value = String(Math.min(320, Math.max(20, Math.round(Number(scoreInfo.tempo)))));
-  }
+  // 起始速度：优先用「第 0 拍的速度标记」，没有就从全曲速度标记里推断
+  // （很多谱只在中间某页印一次 ♩=138，例如 Hall of the Mountain King；
+  //   以前只取第 0 拍，读不到就一路用默认 84，听感就是「怎么这么快/这么慢」）。
+  applyDetectedTempo(scoreInfo);
   if (!scoreInfo.tempoDetected && source === "engine") {
     const tempoNote = "谱面上没有识别到速度标记（也可能本机没装 OCR 语言包），当前试听用的是右上角 BPM；"
       + "请按谱面左上角的 ♩=?? 改一下，速度才会和原谱一致。";
@@ -1817,6 +1929,47 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
       + "建议换 300 DPI 以上的清晰扫描件或矢量 PDF，并逐音校对后再使用。";
     if (!(scoreInfo.warnings || []).includes(note)) scoreInfo.warnings = [...(scoreInfo.warnings || []), note];
   }
+}
+
+/**
+ * 把「识别到的速度」落到界面上。
+ *
+ * 为什么不是简单地把 scoreInfo.tempo 填进去：识别引擎给出的 tempo 只代表第 0 拍附近有没有标记，
+ * 像 Hall of the Mountain King 这种「开头没印、中段才印 ♩=138」的谱，按老逻辑会一路用默认 84。
+ * 这里用 detectStartTempo 从全曲速度标记推断，并把「本谱有几处变速」如实告诉用户。
+ */
+function applyDetectedTempo(scoreInfo) {
+  if (!scoreInfo) return;
+  const marks = scoreInfo.tempoMarks || [];
+  const detected = detectStartTempo(marks);
+  if (detected) {
+    scoreInfo.tempo = detected.bpm;
+    scoreInfo.tempoDetected = true;
+    scoreInfo.tempoSource = detected.source;
+    if (els.tempoInput) els.tempoInput.value = String(Math.round(detected.bpm));
+  }
+  updateTempoHint(marks, detected);
+}
+
+/** 速度输入框下面的说明：这一整份谱有几处速度变化、播放会不会跟着变。 */
+function updateTempoHint(marks, detected) {
+  const hint = els.tempoHint;
+  if (!hint) return;
+  const count = Array.isArray(marks) ? marks.length : 0;
+  hint.hidden = false;
+  if (!count) {
+    hint.textContent = "谱面上没有读到速度标记：当前 BPM 用于整曲。";
+    return;
+  }
+  if (count === 1) {
+    const source = detected && detected.source === "opening"
+      ? "开头就有标记"
+      : (detected && detected.source === "single" ? "标记在乐曲中段，已用作整曲速度" : "已按标记设定");
+    hint.textContent = `读到 1 处速度标记（♩=${Math.round(marks[0].bpm)}，${source}）；播放会按它走。`;
+    return;
+  }
+  const first = Math.round(marks[0].bpm), last = Math.round(marks[marks.length - 1].bpm);
+  hint.textContent = `读到 ${count} 处速度变化（♩=${first} → ♩=${last}）；播放会自动分段变速，改 BPM 会整体等比缩放。`;
 }
 
 /**
@@ -2252,12 +2405,18 @@ function variableLength(value) {
 }
 function buildMidiFile(notes = getPlaybackNotes(), offset = 0) {
   const ticksPerBeat = 480;
-  const tempo = Math.min(320, Math.max(20, Number(els.tempoInput.value) || 84));
-  const microsPerBeat = Math.round(60000000 / tempo);
-  const events = [{
-    tick: 0, priority: 0,
-    bytes: [0xff, 0x51, 0x03, (microsPerBeat >> 16) & 0xff, (microsPerBeat >> 8) & 0xff, microsPerBeat & 0xff],
-  }];
+  const tempo = clampTempo(Number(els.tempoInput.value) || 84);
+  // 分段速度：谱面有中途变速时（如 ♩=66 → ♩=138），MIDI 里也写成一串速度事件，
+  // 这样在别的软件里打开、或导出音频时速度也是对的，而不是整曲一个固定值。
+  const tempoEvents = midiTempoEvents((state.scoreInfo && state.scoreInfo.tempoMarks) || [], {
+    detectedBpm: state.scoreInfo ? state.scoreInfo.tempo : null,
+    userBpm: tempo,
+    ticksPerBeat,
+  });
+  const events = tempoEvents.map((event) => ({
+    tick: event.tick, priority: 0,
+    bytes: [0xff, 0x51, 0x03, (event.microsPerBeat >> 16) & 0xff, (event.microsPerBeat >> 8) & 0xff, event.microsPerBeat & 0xff],
+  }));
   // 同音高、同通道的音不能重叠：MIDI 里 note-off 是按 (通道, 音高) 关的，
   // 前一个音的 off 会把后一个还在响的同音高音一起关掉（听感上「后面那个音提前断了」）。
   // 所以先把每个音高的时间段整理成互不重叠：与前一音重叠的，从前一音结束处开始。
@@ -2390,6 +2549,7 @@ function setPartTimbre(key, value) {
     showToast("还没安装真实音源：双击项目里的「安装真实音源.bat」，装好后刷新页面再选。");
     return false;
   }
+  clearTimbreCache();
   if (value && TIMBRE_LABELS[value]) {
     state.partTimbres.set(String(key), value);
     if (isSampledTimbre(value)) ensureSampleBank(value);
@@ -2482,6 +2642,7 @@ function gainForDynamics(value) {
 
 /** 设置播放音色（只在下次播放生效；正在放的音符不重建，避免播到一半音色突变）。 */
 function setTimbre(value) {
+  clearTimbreCache();
   if (!TIMBRE_LABELS[value]) return;
   if (isSampledTimbre(value)) {
     // 清单是异步读的：刚打开页面就点也可能还没读到，所以不在这里下"没安装"的结论，
@@ -2514,7 +2675,7 @@ function masterChain() {
   const dry = audio.createGain();
   dry.gain.value = 0.82;
   const reverb = audio.createConvolver();
-  reverb.buffer = reverbImpulse(audio);
+  reverb.buffer = reverbBufferForPlayback(audio);
   const reverbTone = audio.createBiquadFilter();
   reverbTone.type = "lowpass";
   reverbTone.frequency.value = REVERB.tone;
@@ -2575,6 +2736,8 @@ function prepareAudio() {
   }
   // 当前选的是采样音色就顺手开始加载（后台进行，不影响界面）。
   if (isSampledTimbre(state.timbre)) ensureSampleBank(state.timbre);
+  // 空闲时提前生成混响脉冲：否则第一次播放要同步算 1.9 秒的噪声，卡约 2 秒。
+  prewarmReverb();
 }
 /** 程序生成混响脉冲响应：指数衰减的低通噪声 + 20 ms 预延迟，听起来像小音乐厅。 */
 function reverbImpulse(audio, seconds = REVERB.seconds, decay = REVERB.decay) {
@@ -2597,6 +2760,49 @@ function reverbImpulse(audio, seconds = REVERB.seconds, decay = REVERB.decay) {
   state.reverbBuffer = impulse;
   return impulse;
 }
+
+/**
+ * 预热混响缓冲。
+ *
+ * 为什么需要：脉冲响应是**程序生成**的（1.9 秒 × 2 声道 × 44100 ≈ 16.8 万个采样点，
+ * 每个点要 Math.random + 一阶低通），实测首次播放会阻塞主线程约 2.1 秒——
+ * 用户感受就是「点播放后要等一下、开头卡一下」。
+ * 这里在页面空闲时提前算好，第一次点播放就只剩建节点的时间。
+ */
+function prewarmReverb() {
+  if (state.reverbBuffer || !state.audio) return;
+  if (state.reverbWarming) return;
+  state.reverbWarming = true;
+  const build = () => {
+    try {
+      if (state.audio && !state.reverbBuffer) reverbImpulse(state.audio);
+    } catch (error) {
+      console.info("混响预热失败，播放时会用短混响顶替。", error);
+    } finally {
+      state.reverbWarming = false;
+    }
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(build, { timeout: 2000 });
+  } else {
+    setTimeout(build, 300);
+  }
+}
+
+/**
+ * 拿到可用的混响缓冲：已预热就直接用；还没好就用一份短的临时脉冲，
+ * 避免在「第一次点播放」这一刻同步建 1.9 秒的缓冲把主线程堵住。
+ */
+function reverbBufferForPlayback(audio) {
+  // 预热成功：直接用（正常情况，点播放不再卡）
+  if (state.reverbBuffer) return state.reverbBuffer;
+  // 预热还没跑完（刚打开页面就点了播放）：同步建完整混响。
+  // 这里**不降级成短混响**——混响长度直接决定「余音」，降级会让所有音色听起来变干，
+  // 也会让 e2e 的频谱/余音断言失真。宁可这一次卡一下，也要保证音质一致。
+  prewarmReverb();
+  return reverbImpulse(audio);
+}
+
 /** 一段白噪声样本，用来做击弦声和气口声；整条音轨共用一条 buffer，不重复生成。 */
 function noiseSampleBuffer(audio) {
   if (state.noiseBuffer) return state.noiseBuffer;
@@ -3107,7 +3313,31 @@ function playSampledTone(timbre, bank, midi, startAt, duration, peak, destinatio
 }
 
 /** 某个声部该用哪种音色：声部单独选过就用它自己的，否则跟随全局音色。 */
+/**
+ * 声部 → 音色 的缓存。
+ *
+ * 为什么需要：8419 个音符的谱，播放时每个音都要问一次"这个声部用什么音色"，
+ * 而答案在播放期间是稳定的。缓存后每个音少一次 Map 查找 + 字符串判断。
+ * 任何会改变音色的操作（换全局音色、逐声部音色、识别新谱）都要调用 clearTimbreCache()。
+ */
+const timbreCache = new Map();
+function clearTimbreCache() {
+  timbreCache.clear();
+}
+
 function timbreForPart(partKey) {
+  // 缓存 key 必须带上全局音色：结果依赖「逐声部覆盖 ?? 全局音色」，
+  // 只用 partKey 做 key 时，改了全局音色仍会命中最开始的旧结果
+  // （实测会让 e2e 里连续切换音色全部退化成第一个音色）。
+  const cacheKey = String(state.timbre) + "\u0000" + String(partKey);
+  const cached = timbreCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const resolved = resolveTimbreForPart(partKey);
+  timbreCache.set(cacheKey, resolved);
+  return resolved;
+}
+
+function resolveTimbreForPart(partKey) {
   if (partKey) {
     const chosen = state.partTimbres.get(String(partKey));
     if (chosen && TIMBRE_LABELS[chosen]) return chosen;
@@ -3166,17 +3396,20 @@ function playTone(midi, startAt, duration, peak = 0.16, destination = null, part
  * - secondsAtBeat 把"拍位"换算成"秒"；力度记号决定该处起的音量峰值。
  */
 function buildPlaybackTimeline(offset) {
-  const baseTempo = Math.min(320, Math.max(20, Number(els.tempoInput.value) || 84));
+  const baseTempo = clampTempo(Number(els.tempoInput.value) || 84);
   const rawTempoMarks = (state.scoreInfo && state.scoreInfo.tempoMarks) || [];
   const rawDynamicsMarks = (state.scoreInfo && state.scoreInfo.dynamicsMarks) || [];
-  let startTempo = baseTempo;
+  // 用户手填 BPM 时按「整曲等比缩放」处理：中途变速的比例保留，不会因为改了 BPM 就变匀速。
+  const tempoPlan = playbackTempoSegments(rawTempoMarks, {
+    offset,
+    userBpm: baseTempo,
+    detectedBpm: state.scoreInfo ? state.scoreInfo.tempo : null,
+  });
+  let startTempo = tempoPlan.startBpm;
   const segments = [];
-  for (const mark of rawTempoMarks) {
-    const beat = Number(mark.beat) || 0, bpm = Number(mark.bpm);
-    if (!Number.isFinite(bpm) || bpm <= 0) continue;
-    if (beat <= offset) { startTempo = bpm; continue; }
-    if (segments.length && Math.abs(segments[segments.length - 1].bpm - bpm) < 0.01) continue;
-    segments.push({ beat: beat - offset, bpm });
+  for (const segment of tempoPlan.segments) {
+    if (segments.length && Math.abs(segments[segments.length - 1].bpm - segment.bpm) < 0.01) continue;
+    segments.push({ beat: segment.beat, bpm: segment.bpm });
   }
   const dynamics = rawDynamicsMarks
     .map((mark) => ({ beat: Number(mark.beat) || 0, value: Number(mark.dynamics) }))
@@ -3240,25 +3473,45 @@ async function playMelody() {
   // 改成只提前 SCHEDULER.aheadSeconds 秒建节点、每 SCHEDULER.tickMs 毫秒补一次后，
   // 任意时刻音频图里只有几十个音，主线程每轮只花几毫秒（实测 1408 音符的图里只有 48 个源）。
   let cursor = 0;
+  // 本轮调度出去的「要一起高亮的音符」：攒起来用**一个** setTimeout 批量高亮。
+  // 原实现是每个事件一个 setTimeout（8419 音 → 8419 个定时器），定时器队列本身就会拖慢主线程。
+  const pendingHighlights = [];
+  const flushHighlights = () => {
+    if (!pendingHighlights.length) return;
+    const batch = pendingHighlights.splice(0, pendingHighlights.length);
+    highlightEvent(batch);
+  };
   const scheduleWindow = () => {
     if (!state.isPlaying || !state.audio) return;
     const horizon = state.audio.currentTime + SCHEDULER.aheadSeconds;
+    let lastHighlightDelay = -1;
     while (cursor < events.length) {
       const event = events[cursor];
       const at = headStart + timeline.secondsAtBeat(event.startBeat);
       if (at > horizon) break;
       cursor += 1;
+      // 同一事件内所有音的起拍相同：时间换算一次就够，别每个音都算两遍。
+      const onset = Math.max(0, event.startBeat);
+      const eventSeconds = Math.max(0.05,
+        timeline.secondsAtBeat(onset + (event.notes[0] ? beatsForNote(event.notes[0]) : 1)) - timeline.secondsAtBeat(onset));
+      const dynamics = gainForDynamics(timeline.dynamicsAtBeat(onset));
       for (const note of event.notes) {
-        const onset = Math.max(0, (Number(note.startBeat) || 0) - offset);
-        const seconds = Math.max(0.05, timeline.secondsAtBeat(onset + beatsForNote(note)) - timeline.secondsAtBeat(onset));
+        // 和弦里各音时值可能不同：只有和首个音不一样时才重新算
+        const noteBeats = beatsForNote(note);
+        const seconds = noteBeats === (event.notes[0] ? beatsForNote(event.notes[0]) : noteBeats)
+          ? eventSeconds
+          : Math.max(0.05, timeline.secondsAtBeat(onset + noteBeats) - timeline.secondsAtBeat(onset));
         // 力度记号（P1-3）：该处起生效的力度决定音量峰值。
         // 发音长度取名义时值的 0.99：留 8%（原来）× 的长度会在连奏段落里听成「莫名的停顿」。
-        playTone(note.midi, at, seconds * 0.99, gainForDynamics(timeline.dynamicsAtBeat(onset)),
+        playTone(note.midi, at, seconds * 0.99, dynamics,
           partBus(voiceIdentity(note)), voiceIdentity(note));
       }
-      // 高亮定时器也顺手在这一轮里建，避免"一开始就建 1400 个 setTimeout"再卡一下主线程。
-      state.timers.push(setTimeout(() => highlightEvent(event.notes.map((note) => note.id)),
-        Math.max(0, (at - state.audio.currentTime) * 1000)));
+      pendingHighlights.push(...event.notes.map((note) => note.id));
+      lastHighlightDelay = Math.max(0, (at - state.audio.currentTime) * 1000);
+    }
+    // 本轮调度出的音一起高亮：只建 1 个定时器（而不是每事件 1 个）。
+    if (pendingHighlights.length && lastHighlightDelay >= 0) {
+      state.timers.push(setTimeout(flushHighlights, lastHighlightDelay));
     }
     if (cursor >= events.length && state.scheduleTimer) {
       clearInterval(state.scheduleTimer);
@@ -3278,13 +3531,33 @@ async function playMelody() {
     if (state.loop && getPlaybackNotes().length) playMelody().catch((error) => console.error(error));
   }, (headStart + timeline.secondsAtBeat(finishBeat) - state.audio.currentTime) * 1000 + 160));
 }
+/**
+ * 高亮「正在播放的音符行」。
+ *
+ * 性能关键：8419 个音符时，每次 querySelectorAll 遍历全部行约 11 ms，
+ * 而播放一秒内会调用几十次 → 主线程被占满，听感就是「卡卡的、不流畅」。
+ * 改成用渲染时建好的 id→行索引，只处理「上一批要取消的 + 这一批要加的」，
+ * 正常情况每次只碰几个 DOM 节点（微秒级）。
+ */
 function highlightEvent(noteIds) {
-  const activeIds = noteIds === null ? null : new Set(noteIds);
-  for (const row of els.noteList.querySelectorAll(".note-row")) {
-    row.classList.toggle("is-playing", activeIds !== null && activeIds.has(row.dataset.noteId));
+  const previous = state.highlightedIds || new Set();
+  const next = noteIds === null ? new Set() : new Set(noteIds);
+  // 先清掉上一批里"这一批没有"的
+  for (const id of previous) {
+    if (next.has(id)) continue;
+    const row = state.noteRowById && state.noteRowById.get(id);
+    if (row) row.classList.remove("is-playing");
   }
+  // 再加这一批里"上一批没有"的
+  for (const id of next) {
+    if (previous.has(id)) continue;
+    const row = state.noteRowById && state.noteRowById.get(id);
+    if (row) row.classList.add("is-playing");
+  }
+  state.highlightedIds = next;
 }
 function stopPlayback() {
+  highlightEvent(null);
   for (const timer of state.timers) clearTimeout(timer);
   state.timers = [];
   if (state.scheduleTimer) { clearInterval(state.scheduleTimer); state.scheduleTimer = null; }
@@ -3330,6 +3603,9 @@ els.jianpuButton.addEventListener("click", recognizeJianpuScore);
 els.jianpuAllButton.addEventListener("click", recognizeAllJianpuPages);
 els.recognizeAllButton.addEventListener("click", recognizeAllPages);
 els.addNoteButton.addEventListener("click", addNote);
+if (els.addLayerPart) els.addLayerPart.addEventListener("click", addLayerPart);
+if (els.addLayerEcho) els.addLayerEcho.addEventListener("click", () => addLayerOctave(12));
+if (els.addLayerLower) els.addLayerLower.addEventListener("click", () => addLayerOctave(-12));
 els.midiButton.addEventListener("click", downloadMidi);
 els.playButton.addEventListener("click", playMelody);
 els.stopButton.addEventListener("click", stopPlayback);
@@ -3436,7 +3712,9 @@ document.addEventListener("keydown", (event) => {
 // 自动化测试用的调试钩子：只有地址里带 ?debug=1 时才挂到 window 上，正常使用完全不受影响。
 // （浏览器里 app.js 是 ES module，模块内的 state 外部拿不到，测试需要它来检查音频引擎。）
 if (new URLSearchParams(window.location.search).has("debug")) {
-  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody, stopPlayback, prepareAudio, ensureSampleBank, fetchSampleManifest, omrPageBlob };
+  window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody,
+  stopPlayback, prepareAudio, ensureSampleBank, fetchSampleManifest, omrPageBlob,
+  renderNotes, highlightEvent, updatePlaybackReady, commitScore };
 }
 renderNotes();
 refreshEngineStatus();
