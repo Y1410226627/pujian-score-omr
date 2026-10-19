@@ -31,3 +31,5 @@ Thumbs.db
 tests/fixtures/_source_*.pdf
 *.pdf
 
+# 临时工作目录（识别草稿、谱例切片等），不入库
+_work/
