@@ -79,7 +79,13 @@ function undo() {
   if (!state.history.length) return;
   state.future.push(cloneScore(state.score));
   state.score = state.history.pop();
-  afterScoreChange(false);
+  // 撤销后当前声部可能已经不存在了，兜底切到第一个声部
+  if (!state.score.parts.some((part) => part.id === state.activePartId)) {
+    state.activePartId = state.score.parts[0] ? state.score.parts[0].id : null;
+  }
+  state.selection = null;
+  syncSettingsInputs();
+  afterScoreChange();
   syncHistoryButtons();
   showToast("已撤销。");
 }
@@ -88,7 +94,12 @@ function redo() {
   if (!state.future.length) return;
   state.history.push(cloneScore(state.score));
   state.score = state.future.pop();
-  afterScoreChange(false);
+  if (!state.score.parts.some((part) => part.id === state.activePartId)) {
+    state.activePartId = state.score.parts[0] ? state.score.parts[0].id : null;
+  }
+  state.selection = null;
+  syncSettingsInputs();
+  afterScoreChange();
   syncHistoryButtons();
   showToast("已重做。");
 }
@@ -303,6 +314,8 @@ function renderScore() {
   const renderer = new VF.Renderer(els.scoreEditor, VF.Renderer.Backends.SVG);
   renderer.resize(width, height);
   const svg = renderer.getContext();
+  // 热区要挂在真正的 <svg> 元素上（SVGContext 没有 getSVGElement）
+  const svgElement = els.scoreEditor.querySelector("svg");
 
   const measuresPerLine = 2;
   state.score.parts.forEach((part, partIndex) => {
@@ -329,11 +342,12 @@ function renderScore() {
         const notes = [];
         for (const item of slots) {
           const length = beatsToVfDuration(item.beats);
-          const name = midiToName(item.midi);
-          const key = `${name.toLowerCase().replace("♯", "#").replace("♭", "b")}/${clef === "bass" ? "b" : "4"}`;
+          const key = vfKeyFor(item.midi);
           const note = new VF.StaveNote({ clef, keys: [key], duration: length, auto_stem: true });
           note.__pujianId = item.id;
           note.__pujianPart = part.id;
+          note.__pujianBeats = item.beats;
+          note.__pujianKey = key;
           notes.push(note);
         }
         const remaining = remainingBeats(measure, state.score.beatsPerMeasure);
@@ -359,6 +373,7 @@ function renderScore() {
           for (const note of notes) {
             if (note instanceof VF.BarNote) note.setContext(svg).draw();
           }
+          // 热区在 renderScore() 末尾统一绘制（见 drawNoteHitAreas）
         } catch {
           // 谱面渲染失败时不阻塞输入（数据模型本身是对的）
         }
@@ -366,7 +381,74 @@ function renderScore() {
     }
   });
   els.scoreEmpty.hidden = hasAnyNote();
+  drawNoteHitAreas();
   attachNoteClicks();
+}
+
+/**
+ * 画「点音符」的透明热区。
+ * 放在渲染完成之后单独一遍：这样即使某个音符的绘制抛异常，热区也不会连带丢失。
+ * 位置按「小节内第几拍 + 音高」估算（VexFlow 5 的 DOM 元素不带 boundingBox）。
+ */
+function drawNoteHitAreas() {
+  const svgElement = els.scoreEditor.querySelector("svg");
+  if (!svgElement) return;
+  const measureCount = Math.max(1, Math.ceil(scoreTotalBeats(state.score) / state.score.beatsPerMeasure));
+  const measuresPerLine = 2;
+  const width = Math.max(680, els.scoreEditor.clientWidth || 760);
+  const staveWidth = width - 40;
+  const staveHeight = 62;
+  const systemHeight = staveHeight * state.score.parts.length + 34;
+  let added = 0;
+  state.score.parts.forEach((part, partIndex) => {
+    const clef = part.clef === "bass" ? "bass" : "treble";
+    for (let line = 0; line * measuresPerLine < measureCount; line += 1) {
+      for (let slot = 0; slot < measuresPerLine; slot += 1) {
+        const measureIndex = line * measuresPerLine + slot;
+        if (measureIndex >= measureCount) continue;
+        const x = 20 + slot * (staveWidth / measuresPerLine);
+        const y = 20 + line * systemHeight + partIndex * staveHeight;
+        const measure = part.measures[measureIndex] || { beats: [] };
+        const { slots } = buildMeasureSlots(measure, state.score.beatsPerMeasure);
+        const totalBeats = Math.max(1, state.score.beatsPerMeasure);
+        for (const item of slots) {
+          const middle = item.startBeats + item.beats / 2;
+          const key = vfKeyFor(item.midi);
+          const [letter, octaveText] = key.split("/");
+          const octave = Number(octaveText) || 4;
+          const stepIndex = ["c", "d", "e", "f", "g", "a", "b"].indexOf(letter[0].toLowerCase());
+          const referenceOctave = clef === "bass" ? 3 : 4;
+          const referenceStep = clef === "bass" ? 1 : 6;   // 低音谱表 d/3、高音谱表 b/4 在中间线
+          const diatonic = (octave * 7 + stepIndex) - (referenceOctave * 7 + referenceStep);
+          const noteY = y + 60 - diatonic * 5.5;
+          const noteX = x + 30 + (middle / totalBeats) * (staveWidth / measuresPerLine - 60);
+          const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+          rect.setAttribute("x", String(Math.round(noteX - 12)));
+          rect.setAttribute("y", String(Math.round(noteY - 16)));
+          rect.setAttribute("width", "26");
+          rect.setAttribute("height", "32");
+          rect.setAttribute("fill", "rgba(0,0,0,0)");
+          rect.setAttribute("class", "note-hit");
+          rect.setAttribute("data-note-id", item.id);
+          rect.setAttribute("data-part-id", part.id);
+          rect.style.cursor = "pointer";
+          rect.style.pointerEvents = "all";
+          svgElement.append(rect);
+          added += 1;
+        }
+      }
+    }
+  });
+  if (added === 0) console.warn("[创作室] 没有可画热区的音符");
+}
+
+/** MIDI → VexFlow 的 key 写法（如 c/4、c#/4、bb/3）。 */
+function vfKeyFor(midi) {
+  const value = Math.max(21, Math.min(108, Math.round(Number(midi) || 60)));
+  const names = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"];
+  const pitch = ((value % 12) + 12) % 12;
+  const octave = Math.floor(value / 12) - 1;
+  return `${names[pitch]}/${octave}`;
 }
 
 function keySignatureName(fifths) {
@@ -388,12 +470,19 @@ function beatsToVfDuration(beats) {
 }
 
 function attachNoteClicks() {
-  for (const element of els.scoreEditor.querySelectorAll(".vf-stavenote")) {
+  // 透明热区（每音符一块）是主要入口；键盘可达性另由左侧按钮保证
+  for (const element of els.scoreEditor.querySelectorAll(".note-hit")) {
     element.addEventListener("click", (event) => {
       event.stopPropagation();
-      const group = element.closest(".vf-stavenote");
-      const index = [...els.scoreEditor.querySelectorAll(".vf-stavenote")].indexOf(group);
-      const noteId = group.getAttribute("data-note-id");
+      const noteId = element.dataset.noteId;
+      const partId = element.dataset.partId;
+      if (partId) {
+        const part = state.score.parts.find((item) => item.id === partId);
+        if (part) {
+          state.activePartId = part.id;
+          els.partSelect.value = part.id;
+        }
+      }
       if (noteId) selectNoteById(noteId, event.shiftKey);
     });
   }

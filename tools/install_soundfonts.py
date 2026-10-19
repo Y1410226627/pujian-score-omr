@@ -206,6 +206,96 @@ def install_fluidr3(selected, force):
 
 
 # ============================================================
+# 二、B 中国民乐：二胡（aliexpress-erhu，CC0）
+# ============================================================
+ERHU_REPO = "https://github.com/sfzinstruments/aliexpress-erhu"
+ERHU_RAW = "https://raw.githubusercontent.com/sfzinstruments/aliexpress-erhu/master"
+ERHU_SAMPLE_DIR = "Samples/sus"
+ERHU_TARGET_RATE = 24000
+NOTE_TO_MIDI = {"c": 0, "cs": 1, "db": 1, "d": 2, "ds": 3, "eb": 3, "e": 4, "f": 5,
+                "fs": 6, "gb": 6, "g": 7, "gs": 8, "ab": 8, "a": 9, "as": 10, "bb": 10, "b": 11}
+
+
+def list_erhu_samples():
+    """从 GitHub 目录页里抠出 sus 采样文件名（不用 API，避免配额）。"""
+    import re
+    html = download(ERHU_REPO + "/tree/master/" + ERHU_SAMPLE_DIR, "二胡样本目录页").decode("utf-8", "replace")
+    names = sorted(set(re.findall(r'"name":"(erhu_[a-g][sb]?\d_sus_rr\d\.wav)"', html)))
+    return names
+
+
+def erhu_sample_midi(name):
+    """erhu_d5_sus_rr1.wav → MIDI 编号（d5 → D5 = 74）。"""
+    import re
+    matched = re.match(r"erhu_([a-g])([sb]?)(\d)_sus_rr\d\.wav", name)
+    if not matched:
+        return None
+    letter, accidental, octave = matched.groups()
+    pitch = NOTE_TO_MIDI.get(letter + accidental)
+    if pitch is None:
+        return None
+    return 12 * (int(octave) + 1) + pitch
+
+
+def install_erhu(force):
+    target_dir = ASSETS / "erhu" / "sus"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        names = list_erhu_samples()
+    except RuntimeError as error:
+        print("  二胡：目录页读取失败（{}），跳过".format(error))
+        return
+    # 每个音取第一条 round-robin 就够用，省一半体积
+    keep = [name for name in names if name.endswith("rr1.wav")]
+    print("  二胡：{} 个音 × round-robin，取 {} 个".format(len(names), len(keep)))
+    done = 0
+    for name in keep:
+        target = target_dir / name
+        if target.is_file() and target.stat().st_size > 1000 and not force:
+            done += 1
+            continue
+        try:
+            raw = download(ERHU_RAW + "/" + ERHU_SAMPLE_DIR + "/" + name, name, retries=2, timeout=120)
+        except RuntimeError as error:
+            print("    跳过 {}（{}）".format(name, error))
+            continue
+        source = ASSETS / "erhu" / ("_raw_" + name)
+        source.write_bytes(raw)
+        try:
+            samples = read_wav_mono_any(source)
+            write_wav_16(target, samples, ERHU_TARGET_RATE)
+            done += 1
+        finally:
+            try:
+                source.unlink()
+            except OSError:
+                pass
+    print("  二胡：{} 个样本已就绪 → {}".format(done, target_dir.relative_to(ROOT)))
+
+
+def erhu_bank():
+    """把已转换的二胡样本组织成清单条目。"""
+    directory = ASSETS / "erhu" / "sus"
+    if not directory.is_dir():
+        return {}
+    notes = {}
+    for wav in sorted(directory.glob("erhu_*_sus_rr1.wav")):
+        midi = erhu_sample_midi(wav.name)
+        if midi is None:
+            continue
+        notes[str(midi)] = {"path": wav.relative_to(ASSETS).as_posix()}
+    if not notes:
+        return {}
+    return {
+        "erhu_real": {
+            "label": "二胡（采样）", "continuous": True, "decodeRate": ERHU_TARGET_RATE,
+            "category": "china", "loopSeconds": [0.6, 1.8],
+            "layers": [{"velocity": 0.8, "notes": notes}],
+        }
+    }
+
+
+# ============================================================
 # 三、Sonatina SSO：女声/男声/混声合唱（WAV → 24 kHz 单声道，带 SFZ 循环点）
 # ============================================================
 SSO_CHORUS_SFZ = [
@@ -254,6 +344,40 @@ def read_wav_mono_24k(path):
         data = np.interp(positions, np.arange(len(data), dtype=np.float64), data)
     return data.astype(np.float32)
 
+
+
+def read_wav_mono_any(path):
+    """读任意位深（16/24/32-bit）WAV → 24 kHz 单声道 float。
+
+    二胡样本是 24-bit PCM，而原来的 read_wav_mono_24k 只处理 16-bit；
+    这里按字节宽度解开，再走同一条抗混叠 + 重采样通道，保证音色不被改变。
+    """
+    import numpy as np
+
+    with wave.open(str(path), "rb") as handle:
+        channels = handle.getnchannels()
+        rate = handle.getframerate()
+        width = handle.getsampwidth()
+        frames = handle.readframes(handle.getnframes())
+    if width == 2:
+        data = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 3:
+        raw = np.frombuffer(frames, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+        value = raw[:, 0] | (raw[:, 1] << 8) | (raw[:, 2] << 16)
+        value = np.where(value >= 1 << 23, value - (1 << 24), value)
+        data = (value.astype(np.float32) / float(1 << 23))
+    elif width == 4:
+        data = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        raise RuntimeError("不支持的 WAV 位深：{} 位".format(width * 8))
+    if channels > 1:
+        data = data.reshape(-1, channels).mean(axis=1)
+    if rate != SSO_TARGET_RATE:
+        data = np.convolve(data, design_antialias_kernel(rate), mode="same")
+        target_length = int(round(len(data) * SSO_TARGET_RATE / rate))
+        positions = np.arange(target_length, dtype=np.float64) * (rate / SSO_TARGET_RATE)
+        data = np.interp(positions, np.arange(len(data), dtype=np.float64), data)
+    return data.astype(np.float32)
 
 def write_wav_16(path, samples, rate):
     clipped = [max(-1.0, min(1.0, float(value))) for value in samples]
@@ -472,11 +596,14 @@ def build_manifest():
                 spec["loopSeconds"] = [1.0, 2.5]
             banks[bank] = spec
 
+    # 二胡
+    banks.update(erhu_bank())
+
     # SSO 合唱（女性/男性/混声）
     banks.update(sso_chorus_banks())
 
     manifest = {
-        "version": 2,
+        "version": 3,
         "banks": banks,
         "licenses": [
             {"bank": "piano_real", "name": "Salamander Grand Piano V3", "author": "Alexander Holm",
@@ -486,6 +613,10 @@ def build_manifest():
              "author": "Mattias Westlund / Peter Eastman", "license": "CC Sampling Plus 1.0",
              "url": "https://github.com/peastman/sso",
              "changes": "已转换为 24 kHz 单声道 WAV，并使用 SFZ 中的循环点"},
+            {"bank": "erhu_real", "name": "aliexpress-erhu（二胡）",
+             "author": "sfzinstruments 社区", "license": "CC0 1.0",
+             "url": "https://github.com/sfzinstruments/aliexpress-erhu",
+             "changes": "转换为 24 kHz 单声道 WAV，只保留第一轮 round-robin"},
             {"bank": "其他采样乐器", "name": "FluidR3_GM（预渲染 mp3）", "author": "Frank Wen",
              "license": "CC BY 3.0", "url": "https://github.com/gleitz/midi-js-soundfonts"},
         ],
@@ -517,6 +648,7 @@ def build_manifest():
 
 
 CATEGORY_BANKS = {
+    "china": {"erhu_real"},
     "piano": {"piano_real"},
     "voice": {"choir_female", "choir_male", "choir_real"},
     "strings": {bank for bank, meta in FLUIDR3_BANKS.items() if meta["category"] == "strings"},
@@ -552,6 +684,8 @@ def main():
     if not selected or "piano_real" in selected:
         install_piano(args.force)
     install_fluidr3(selected, args.force)
+    if not selected or "china" in selected or "erhu_real" in selected:
+        install_erhu(args.force)
     install_sso_chorus(selected, args.force)
     build_manifest()
     print("\n完成。回到谱见页面刷新：音色下拉里会出现新装的「真实…（采样）」选项；"

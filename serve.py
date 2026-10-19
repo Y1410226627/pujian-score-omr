@@ -66,7 +66,7 @@ SECURITY_HEADERS = (
         "default-src 'self'; "
         "script-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
+        "font-src 'self' data: https://fonts.gstatic.com; "
         "img-src 'self' blob: data:; "
         "media-src 'self' blob:; "
         "connect-src 'self'; "
