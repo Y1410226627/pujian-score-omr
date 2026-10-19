@@ -30,7 +30,7 @@ try {
   // 2) 加 4 个音（第一小节填满）
   for (const [keyIndex, chipBeats] of [[0, "1"], [2, "1"], [4, "1"], [7, "1"]]) {
     await page.locator("#miniKeyboard .key").nth(keyIndex).click();
-    await page.locator(`#valueChips .chip[data-beats="${chipBeats}"]`).click();
+    await page.locator(`#valueChips .chip[data-rest="false"][data-beats="${chipBeats}"]`).click();
     await page.locator("#addNote").click();
   }
   const stateAfter = await page.evaluate(() => {
@@ -59,6 +59,22 @@ try {
   console.log("点选后：", selectionText.trim());
   assert.ok(selectionText.includes("已选中"), "点音符应能选中它");
 
+  // 3c) 休止符：选「休 1」加一个，谱面上应有休止、总拍数不变
+  await page.locator('#valueChips .chip[data-rest="true"][data-beats="1"]').click();
+  await page.locator("#addNote").click();
+  const restState = await page.evaluate(() => {
+    const measures = window.__pujianComposer.state.score.parts[0].measures;
+    const rests = measures.flatMap((measure) => measure.beats).filter((event) => event.rest).length;
+    const used = measures.map((measure) => measure.beats.reduce((sum, event) => sum + event.beats, 0));
+    return { rests, used, measureCount: measures.length };
+  });
+  console.log("休止符：", JSON.stringify(restState));
+  assert.equal(restState.rests, 1, "应该有一个休止符");
+  assert.equal(restState.measureCount, 2, "第 1 小节已满，休止符进第 2 小节");
+  assert.equal(restState.used[1], 1, "第 2 小节当前 1 拍（就是这个休止符）");
+  // 切回音符模式，避免影响后面的试听
+  await page.locator('#valueChips .chip[data-rest="false"][data-beats="1"]').click();
+
   // 4) 试听：点「从头听整首」后状态变成播放中
   await page.locator("#playAll").click();
   await page.waitForFunction(() => document.querySelector("#playbackState").textContent.includes("正在播放"), null, { timeout: 8000 });
@@ -82,13 +98,18 @@ try {
   for (const [selector, expectExt] of [["#exportMusicXml", "musicxml"], ["#exportMidi", "mid"], ["#exportProject", "json"]]) {
     const [download] = await Promise.all([page.waitForEvent("download", { timeout: 15000 }), page.locator(selector).click()]);
     const name = download.suggestedFilename();
-    const path = await download.path();
-    const size = path ? require("node:fs").statSync(path).size : 0;
-    downloads.push({ name, size });
+    const savedPath = await download.path();
+    const size = savedPath ? require("node:fs").statSync(savedPath).size : 0;
+    downloads.push({ name, size, path: savedPath });
     console.log(`导出 ${expectExt}:`, name, size, "字节");
     assert.ok(name.endsWith("." + expectExt), `文件名应以 .${expectExt} 结尾，实际 ${name}`);
     assert.ok(size > 100, "导出文件不应为空");
   }
+
+  // 7b) 导出的 MusicXML 里应该有休止记号
+  const xmlPath = downloads[0].path;
+  const xmlText = require("node:fs").readFileSync(xmlPath, "utf8");
+  assert.ok(xmlText.includes("<rest/>"), "导出的 MusicXML 应包含休止符");
 
   // 8) 撤销 / 重做：连点两次撤销应回到「只有 1 个声部」，重做能再回来
   const beforeUndo = await page.evaluate(() => ({
