@@ -168,14 +168,62 @@ FLUIDR3_BANKS = {
     "horn_real": {"instrument": "french_horn", "label": "圆号（采样）", "continuous": True, "category": "winds"},
     "trombone_real": {"instrument": "trombone", "label": "长号（采样）", "continuous": True, "category": "winds"},
     # 键盘 / 音色
-    "church_organ_real": {"instrument": "church_organ", "label": "教堂管风琴（采样）", "continuous": True, "category": "keys"},
-    "electric_piano_real": {"instrument": "electric_piano_1", "label": "电钢琴（采样）", "continuous": False, "category": "keys"},
-    "harpsichord_real": {"instrument": "harpsichord", "label": "羽管键琴（采样）", "continuous": False, "category": "keys"},
-    "vibraphone_real": {"instrument": "vibraphone", "label": "颤音琴（采样）", "continuous": False, "category": "keys"},
-    "pad_real": {"instrument": "pad_2_warm", "label": "温暖铺底（采样）", "continuous": True, "category": "keys"},
+    "church_organ_real": {"instrument": "church_organ", "label": "教堂管风琴（采样）", "continuous": True, "category": "piano"},
+    "electric_piano_real": {"instrument": "electric_piano_1", "label": "电钢琴（采样）", "continuous": False, "category": "piano"},
+    "harpsichord_real": {"instrument": "harpsichord", "label": "羽管键琴（采样）", "continuous": False, "category": "piano"},
+    "vibraphone_real": {"instrument": "vibraphone", "label": "颤音琴（采样）", "continuous": False, "category": "piano"},
+    "pad_real": {"instrument": "pad_2_warm", "label": "温暖铺底（采样）", "continuous": True, "category": "piano"},
     # 其他音色
-    "voice_oohs_real": {"instrument": "voice_oohs", "label": "人声「哦」（采样）", "continuous": True, "category": "keys"},
-    "synth_choir_real": {"instrument": "synth_choir", "label": "合成人声合唱（采样）", "continuous": True, "category": "keys"},
+    "voice_oohs_real": {"instrument": "voice_oohs", "label": "人声「哦」（采样）", "continuous": True, "category": "piano"},
+    # —— 中国民族乐器：没有专门样本时，用 GM 里音色最接近的乐器（诚实标注「近似」）——
+    "guzheng_real": {"instrument": "orchestral_harp", "label": "古筝（采样·近似竖琴）", "continuous": False, "category": "china"},
+    "pipa_real": {"instrument": "banjo", "label": "琵琶（采样·近似班卓）", "continuous": False, "category": "china"},
+    "dizi_real": {"instrument": "flute", "label": "笛子（采样·近似长笛）", "continuous": True, "category": "china"},
+    "xiao_real": {"instrument": "shakuhachi", "label": "箫（采样·近似尺八）", "continuous": True, "category": "china"},
+    "sheng_real": {"instrument": "harmonica", "label": "笙（采样·近似口琴）", "continuous": True, "category": "china"},
+    "suona_real": {"instrument": "shanai", "label": "唢呐（采样·近似唢呐音色 shanai）", "continuous": True, "category": "china"},
+    "yangqin_real": {"instrument": "dulcimer", "label": "扬琴（采样·近似洋琴）", "continuous": False, "category": "china"},
+    # —— 管乐补充 ——
+    "piccolo_real": {"instrument": "piccolo", "label": "短笛（采样）", "continuous": True, "category": "winds"},
+    "english_horn_real": {"instrument": "english_horn", "label": "英国管（采样）", "continuous": True, "category": "winds"},
+    "recorder_real": {"instrument": "recorder", "label": "竖笛（采样）", "continuous": True, "category": "winds"},
+    "ocarina_real": {"instrument": "ocarina", "label": "陶笛（采样）", "continuous": True, "category": "winds"},
+    "pan_flute_real": {"instrument": "pan_flute", "label": "排箫（采样）", "continuous": True, "category": "world"},
+    "whistle_real": {"instrument": "whistle", "label": "哨笛（采样）", "continuous": True, "category": "world"},
+    "shakuhachi_real": {"instrument": "shakuhachi", "label": "尺八（采样）", "continuous": True, "category": "world"},
+    # —— 铜管 ——
+    "tuba_real": {"instrument": "tuba", "label": "大号（采样）", "continuous": True, "category": "brass"},
+    "french_horn_real": {"instrument": "french_horn", "label": "圆号（采样，close mic）", "continuous": True, "category": "brass"},
+    "brass_section_real": {"instrument": "brass_section", "label": "铜管合奏（采样）", "continuous": True, "category": "brass"},
+    # —— 萨克斯 ——
+    "soprano_sax_real": {"instrument": "soprano_sax", "label": "高音萨克斯（采样）", "continuous": True, "category": "sax"},
+    "alto_sax_real": {"instrument": "alto_sax", "label": "中音萨克斯（采样）", "continuous": True, "category": "sax"},
+    "tenor_sax_real": {"instrument": "tenor_sax", "label": "次中音萨克斯（采样）", "continuous": True, "category": "sax"},
+    "baritone_sax_real": {"instrument": "baritone_sax", "label": "上低音萨克斯（采样）", "continuous": True, "category": "sax"},
+    # —— 弹拨 / 吉他 ——
+    "nylon_guitar_real": {"instrument": "acoustic_guitar_nylon", "label": "尼龙弦吉他（采样）", "continuous": False, "category": "plucked"},
+    "steel_guitar_real": {"instrument": "acoustic_guitar_steel", "label": "民谣吉他（采样）", "continuous": False, "category": "plucked"},
+    "electric_guitar_real": {"instrument": "electric_guitar_clean", "label": "电吉他（采样）", "continuous": False, "category": "plucked"},
+    "banjo_real": {"instrument": "banjo", "label": "班卓琴（采样）", "continuous": False, "category": "plucked"},
+    "sitar_real": {"instrument": "sitar", "label": "西塔琴（采样）", "continuous": False, "category": "plucked"},
+    "shamisen_real": {"instrument": "shamisen", "label": "三味线（采样）", "continuous": False, "category": "world"},
+    "koto_real": {"instrument": "koto", "label": "日本筝（采样）", "continuous": False, "category": "world"},
+    "kalimba_real": {"instrument": "kalimba", "label": "拇指琴（采样）", "continuous": False, "category": "world"},
+    # —— 贝斯 ——
+    "acoustic_bass_real": {"instrument": "acoustic_bass", "label": "原声贝斯（采样）", "continuous": False, "category": "bass"},
+    "electric_bass_real": {"instrument": "electric_bass_finger", "label": "电贝斯（采样）", "continuous": False, "category": "bass"},
+    "fretless_bass_real": {"instrument": "fretless_bass", "label": "无品贝斯（采样）", "continuous": True, "category": "bass"},
+    # —— 打击 / 旋律打击乐 ——
+    "marimba_real": {"instrument": "marimba", "label": "马林巴（采样）", "continuous": False, "category": "percussion"},
+    "xylophone_real": {"instrument": "xylophone", "label": "木琴（采样）", "continuous": False, "category": "percussion"},
+    "glockenspiel_real": {"instrument": "glockenspiel", "label": "钟琴（采样）", "continuous": False, "category": "percussion"},
+    "celesta_real": {"instrument": "celesta", "label": "钢片琴（采样）", "continuous": False, "category": "percussion"},
+    "tubular_bells_real": {"instrument": "tubular_bells", "label": "管钟（采样）", "continuous": False, "category": "percussion"},
+    "steel_drums_real": {"instrument": "steel_drums", "label": "钢鼓（采样）", "continuous": False, "category": "percussion"},
+    "timpani_real": {"instrument": "timpani", "label": "定音鼓（采样）", "continuous": False, "category": "percussion"},
+    # —— 合成 / 键盘补充 ——
+    "accordion_real": {"instrument": "accordion", "label": "手风琴（采样）", "continuous": True, "category": "piano"},
+    "synth_lead_real": {"instrument": "lead_1_square", "label": "合成主音（采样）", "continuous": True, "category": "piano"},
 }
 
 
@@ -532,12 +580,12 @@ def sso_chorus_banks():
     banks = {}
     if female:
         banks["choir_female"] = {
-            "label": "真实女声合唱（采样）", "continuous": True, "decodeRate": 24000,
+            "label": "真实女声合唱（采样）", "continuous": True, "decodeRate": 24000, "category": "voice",
             "layers": [{"velocity": 0.8, "notes": female}],
         }
     if male:
         banks["choir_male"] = {
-            "label": "真实男声合唱（采样）", "continuous": True, "decodeRate": 24000,
+            "label": "真实男声合唱（采样）", "continuous": True, "decodeRate": 24000, "category": "voice",
             "layers": [{"velocity": 0.8, "notes": male}],
         }
     # 混声：高音区用女声、低音区用男声（同音高时女声优先）
@@ -545,7 +593,7 @@ def sso_chorus_banks():
     mixed.update(female)
     if mixed:
         banks["choir_real"] = {
-            "label": "真实混声合唱（采样）", "continuous": True, "decodeRate": 24000,
+            "label": "真实混声合唱（采样）", "continuous": True, "decodeRate": 24000, "category": "voice",
             "layers": [{"velocity": 0.8, "notes": mixed}],
         }
     return banks
@@ -575,7 +623,7 @@ def build_manifest():
     if layers:
         banks["piano_real"] = {
             "label": "真实钢琴（采样）", "continuous": False, "decodeRate": 32000,
-            "trimSeconds": 5.5, "layers": layers,
+            "trimSeconds": 5.5, "category": "piano", "layers": layers,
         }
 
     # FluidR3 的其他乐器
@@ -590,6 +638,7 @@ def build_manifest():
         if notes:
             spec = {
                 "label": meta["label"], "continuous": meta["continuous"], "decodeRate": 24000,
+                "category": meta.get("category", ""),
                 "layers": [{"velocity": 0.8, "notes": notes}],
             }
             if meta["continuous"]:
@@ -648,12 +697,19 @@ def build_manifest():
 
 
 CATEGORY_BANKS = {
-    "china": {"erhu_real"},
-    "piano": {"piano_real"},
+    "all": {bank for bank in FLUIDR3_BANKS} | {"piano_real", "choir_female", "choir_male", "choir_real", "erhu_real"},
+    "china": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "china"} | {"erhu_real"},
+    "world": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "world"},
+    "piano": {"piano_real"} | {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "piano"},
+    "keys": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "piano"},
     "voice": {"choir_female", "choir_male", "choir_real"},
-    "strings": {bank for bank, meta in FLUIDR3_BANKS.items() if meta["category"] == "strings"},
-    "winds": {bank for bank, meta in FLUIDR3_BANKS.items() if meta["category"] == "winds"},
-    "keys": {bank for bank, meta in FLUIDR3_BANKS.items() if meta["category"] == "keys"},
+    "strings": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "strings"},
+    "winds": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "winds"},
+    "brass": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "brass"},
+    "sax": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "sax"},
+    "plucked": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "plucked"},
+    "bass": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "bass"},
+    "percussion": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "percussion"},
 }
 
 
