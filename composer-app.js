@@ -8,7 +8,7 @@
 import {
   NOTE_VALUES, REST_VALUES, midiToName, isBlackKey, isRest, createScore, createPart,
   appendNote, removeNote, setNoteBeats, transposeNote, buildMeasureSlots, remainingBeats,
-  usedBeats, scoreToPlayableNotes, scoreTotalBeats, cloneScore,
+  usedBeats, scoreToPlayableNotes, scoreTotalBeats, cloneScore, accidentalFor,
 } from "./composer.js";
 import { scoreToMusicXml, scoreToMidi, scoreToProjectJson } from "./composer-export.js";
 import { TIMBRE_LABELS } from "./timbre.js";
@@ -28,7 +28,7 @@ const els = {
   playAll: byId("playAll"), playFromHere: byId("playFromHere"), playSelection: byId("playSelection"),
   stopPlay: byId("stopPlay"), loopPlay: byId("loopPlay"), playbackState: byId("playbackState"),
   exportMusicXml: byId("exportMusicXml"), exportMidi: byId("exportMidi"),
-  exportProject: byId("exportProject"), importProject: byId("importProject"),
+  exportProject: byId("exportProject"), exportPng: byId("exportPng"), importProject: byId("importProject"),
   projectInput: byId("projectInput"), exportHint: byId("exportHint"),
   scoreEditor: byId("scoreEditor"), scoreEmpty: byId("scoreEmpty"), editToolbar: byId("editToolbar"),
   selectionInfo: byId("selectionInfo"), editActions: byId("editActions"),
@@ -361,6 +361,8 @@ function renderScore() {
           }
           const key = vfKeyFor(item.midi);
           const note = new VF.StaveNote({ clef, keys: [key], duration: length, auto_stem: true });
+          // 临时升降号不在这里手动加：VexFlow 5 要用 Accidental.applyAccidentals(voices, key)
+          // 统一算一遍（见下面 voice 建好之后的调用），手动 modifier 在 5.0 里不会绘制。
           note.__pujianId = item.id;
           note.__pujianPart = part.id;
           note.__pujianBeats = item.beats;
@@ -384,6 +386,12 @@ function renderScore() {
         try {
           const voice = new VF.Voice({ num_beats: state.score.beatsPerMeasure, beat_value: 4 }).setMode(VF.Voice.Mode.SOFT);
           voice.addTickables(notes.filter((note) => note instanceof VF.StaveNote));
+          // 临时升降号：按调号与同小节/前后音自动判断该标 # / b / n（VexFlow 5 的官方做法）
+          try {
+            VF.Accidental.applyAccidentals([voice], keySignatureName(state.score.keyFifths) || "C");
+          } catch {
+            // 算不出就退化成「只画音高」，不影响其它功能
+          }
           const formatter = new VF.Formatter();
           formatter.joinVoices([voice]).format([voice], staveWidth / measuresPerLine - 30);
           voice.draw(svg, stave);
@@ -783,6 +791,55 @@ function safeName() {
   return (state.score.title || "未命名乐谱").replace(/[\\/:*?"<>|]/g, "_");
 }
 
+/** 把当前五线谱导出成 PNG 图片（打印 / 发给人看）。 */
+async function exportPng() {
+  if (!hasAnyNote()) {
+    showToast("还没有音符，先写几个音再导出。");
+    return;
+  }
+  const svg = els.scoreEditor.querySelector("svg");
+  if (!svg) {
+    showToast("五线谱还没画出来，稍等一下再试。");
+    return;
+  }
+  try {
+    const cloned = svg.cloneNode(true);
+    cloned.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    // 黑字白底：屏幕上是浅色系，打印出来要清楚
+    cloned.querySelectorAll("path, rect, text").forEach((node) => {
+      if (node.getAttribute("fill") === "transparent") return;
+      if (!node.getAttribute("fill") || node.getAttribute("fill") === "black") node.setAttribute("fill", "#111");
+      if (node.getAttribute("stroke") === "black") node.setAttribute("stroke", "#111");
+    });
+    const svgText = new XMLSerializer().serializeToString(cloned);
+    const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = reject;
+      image.src = url;
+    });
+    const scale = 2;   // 2 倍分辨率，打印/放大都清楚
+    const width = Math.max(600, image.width || svg.clientWidth || 760);
+    const height = Math.max(200, image.height || svg.clientHeight || 400);
+    const canvas = document.createElement("canvas");
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+    const pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!pngBlob) throw new Error("图片生成失败");
+    download(pngBlob, `${safeName()}.png`);
+    showToast("图片已下载（2 倍分辨率，可直接打印）。");
+  } catch {
+    showToast("图片导出失败，可以改用「MusicXML」在制谱软件里打印。");
+  }
+}
+
 function exportMusicXml() {
   if (!hasAnyNote()) {
     showToast("还没有音符，先写几个音再导出。");
@@ -927,6 +984,7 @@ function bindEvents() {
 
   els.exportMusicXml.addEventListener("click", exportMusicXml);
   els.exportMidi.addEventListener("click", exportMidi);
+  els.exportPng.addEventListener("click", exportPng);
   els.exportProject.addEventListener("click", exportProject);
   els.importProject.addEventListener("click", () => els.projectInput.click());
   els.projectInput.addEventListener("change", () => {

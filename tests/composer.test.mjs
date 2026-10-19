@@ -5,7 +5,7 @@ import {
   NOTE_VALUES, REST_VALUES, isRest, soundingNoteCount, midiToName, nameToMidi, isBlackKey, nearestNoteValue,
   usedBeats, remainingBeats, buildMeasureSlots, canAppend, createScore, createPart,
   emptyMeasure, appendNote, removeNote, setNoteBeats, transposeNote,
-  trimTrailingEmptyMeasures, scoreToPlayableNotes, scoreTotalBeats, cloneScore,
+  trimTrailingEmptyMeasures, scoreToPlayableNotes, scoreTotalBeats, cloneScore, accidentalFor,
 } from "../composer.js";
 
 test("音名与 MIDI 双向换算（含升降号与中央 C）", () => {
@@ -141,4 +141,24 @@ test("整小节都是休止：能建出来、不发声、拍数仍然齐", () =>
   assert.equal(usedBeats(part.measures[0]), 4);
   assert.equal(scoreToPlayableNotes(score).length, 0);
   assert.equal(soundingNoteCount(part), 0);
+});
+
+test("临时升降号：按调号习惯拼写，该标的标、该还原的还原", () => {
+  // C 大调：黑键要标升号，白键不标
+  assert.equal(accidentalFor(61, 0), "#");
+  assert.equal(accidentalFor(60, 0), null);
+  assert.equal(accidentalFor(66, 0), "#");
+  // G 大调：F 已被调号升过，F# 不标；F 自然要标还原号
+  assert.equal(accidentalFor(66, 1), null);
+  assert.equal(accidentalFor(65, 1), "n");
+  // F 大调：B 已被调号降过，Bb 不标；B 自然要标还原号；Db 要标降号
+  assert.equal(accidentalFor(58, -1), null);
+  assert.equal(accidentalFor(59, -1), "n");
+  assert.equal(accidentalFor(61, -1), "b");
+  // 降 B 大调：Eb 已被调号降过，不标
+  assert.equal(accidentalFor(63, -2), null);
+  assert.equal(accidentalFor(62, -2), null);
+  // 极端：超出音域也不崩（返回 null 或升降号都算正常）
+  assert.ok([null, "#", "b", "n"].includes(accidentalFor(-5, 0)));
+  assert.equal(accidentalFor(60, 99), null);
 });

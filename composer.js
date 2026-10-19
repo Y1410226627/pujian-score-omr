@@ -284,6 +284,75 @@ export function soundingNoteCount(part) {
   return count;
 }
 
+/** 调号里已经包含哪些「音级带升降」，用于判断某个音要不要标临时记号。 */
+const KEY_ALTERATIONS = {
+  "-7": { b: 7 }, "-6": { b: 6 }, "-5": { b: 5 }, "-4": { b: 4 }, "-3": { b: 3 },
+  "-2": { b: 2 }, "-1": { b: 1 }, 0: {}, 1: { "#": 1 }, 2: { "#": 2 }, 3: { "#": 3 },
+  4: { "#": 4 }, 5: { "#": 5 }, 6: { "#": 6 }, 7: { "#": 7 },
+};
+// 调号里的升降号按五度圈顺序作用在固定音级上。零基础用户不需要知道这个，但谱面要正确。
+const SHARP_ORDER = ["F", "C", "G", "D", "A", "E", "B"];
+const FLAT_ORDER = ["B", "E", "A", "D", "G", "C", "F"];
+
+/**
+ * 这个音要不要标临时记号、标什么（"#" / "b" / "n" / null）。
+ *
+ * 关键：同一个钢琴键有两种写法（MIDI 58 既可写 Bb 也可写 A#）。判断时按调号的习惯拼写：
+ *   · 降号调优先用降号拼写（F 大调里 58 = Bb，B 已经被调号降过 → 不标）；
+ *   · 升号调优先用升号拼写（G 大调里 66 = F#，F 已被调号升过 → 不标）；
+ *   · 都不匹配时再试另一种拼写，最后才给临时记号 / 还原号。
+ */
+export function accidentalFor(midi, fifths) {
+  const value = Math.max(0, Math.min(127, Math.round(Number(midi) || 0)));
+  const pitch = ((value % 12) + 12) % 12;
+
+  // 两种拼写：字母 + 需要的升降（0 = 自然音，1 = 升，-1 = 降）
+  const SPELLINGS = [
+    ["C", 0, 0], ["C", 1, 1], ["D", 0, 2], ["D", 1, 3], ["E", 0, 4], ["F", 0, 5],
+    ["F", 1, 6], ["G", 0, 7], ["G", 1, 8], ["A", 0, 9], ["A", 1, 10], ["B", 0, 11],
+  ];
+  const candidates = [];
+  const sharpSpelling = SPELLINGS.find((entry) => entry[2] === pitch);
+  const flatSpelling = SPELLINGS.find((entry) => entry[2] === (pitch + 1) % 12);
+  if (sharpSpelling) candidates.push({ letter: sharpSpelling[0], alter: sharpSpelling[1] });
+  if (flatSpelling) candidates.push({ letter: flatSpelling[0], alter: flatSpelling[1] - 1 });
+
+  const keySpec = KEY_ALTERATIONS[String(Number(fifths) || 0)] || {};
+  const keyAlterFor = (letter) => {
+    if (keySpec["#"]) return SHARP_ORDER.indexOf(letter) < keySpec["#"] ? 1 : 0;
+    if (keySpec["b"]) return FLAT_ORDER.indexOf(letter) < keySpec["b"] ? -1 : 0;
+    return 0;
+  };
+
+  // 调号习惯：降号调用降号拼写、升号调用升号拼写
+  const preferFlat = Boolean(keySpec["b"]);
+  const ordered = preferFlat ? [...candidates].reverse() : candidates;
+
+  for (const spelling of ordered) {
+    const keyAlter = keyAlterFor(spelling.letter);
+    if (spelling.alter === keyAlter) return null;              // 调号已经覆盖，不需要标
+  }
+  // 都不匹配：挑「离调号最近」的拼写；距离相同优先「用还原号」的写法
+  // （F 大调里写还原 B 比写 Cb 更符合乐谱习惯，也不会让零基础用户困惑）
+  let chosen = null;
+  let bestCost = Infinity;
+  for (const spelling of ordered) {
+    const keyAlter = keyAlterFor(spelling.letter);
+    const distance = Math.abs(spelling.alter - keyAlter);
+    const naturalWithKeyAlter = spelling.alter === 0 && keyAlter !== 0 ? 0.5 : 0;
+    const cost = distance - naturalWithKeyAlter;
+    if (cost < bestCost) {
+      bestCost = cost;
+      chosen = { ...spelling, keyAlter };
+    }
+  }
+  if (!chosen) return null;
+  if (chosen.alter === 0 && chosen.keyAlter !== 0) return "n";   // 要还原
+  if (chosen.alter === 1) return "#";
+  if (chosen.alter === -1) return "b";
+  return null;
+}
+
 /** 深拷贝（撤销/重做用；结构简单，JSON 足够）。 */
 export function cloneScore(score) {
   return JSON.parse(JSON.stringify(score));
