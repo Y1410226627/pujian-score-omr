@@ -76,7 +76,26 @@
 .key.is-active small { color: #d7e6dc; }
 .key.is-octave-mark { border-color: #a9c3b2; }
 
-.value-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.value-chips {
+  display: grid;
+  /* 通栏里横向排开：宽屏一次看全 9 个时值，窄屏自动换行 */
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+
+/* 时值通栏：横跨整页，放在乐谱区下方 */
+.duration-strip {
+  margin-top: 14px;
+  background: #fff;
+  border: 1px solid #e8ebe6;
+  border-radius: 12px;
+  box-shadow: 0 5px 22px rgba(35, 53, 42, .025);
+  padding: 16px 20px 14px;
+}
+.duration-strip-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.duration-strip-head strong { font-size: 15px; color: #23352a; }
+.duration-strip-head span { font-size: 12px; color: #7d8a82; }
 .chip {
   border: 1px solid #dfe5df;
   border-radius: 999px;
@@ -97,18 +116,22 @@
    零基础的用��看到的就是谱面上的样子，配小方块表示几拍。 */
 .chip-value {
   display: grid;
-  grid-template-rows: auto auto auto auto;
+  /* 四行固定高度：符号 / 拍数方块 / 人话 / 术语。
+     固定行高保证 18 个卡片的符号和方块横向对齐，不会因为文字长短而错位。 */
+  grid-template-rows: 42px 12px auto auto;
   justify-items: center;
-  gap: 2px;
-  min-width: 58px;
-  padding: 6px 7px 5px;
+  align-items: center;
+  gap: 3px;
+  min-width: 84px;
+  padding: 7px 8px 6px;
   border-radius: 10px;
-  line-height: 1.1;
+  line-height: 1.15;
+  text-align: center;
 }
-.chip-glyph { display: flex; align-items: center; justify-content: center; height: 40px; color: #2f3b34; }
+.chip-glyph { display: flex; align-items: center; justify-content: center; height: 42px; color: #2f3b34; }
 .chip-value.is-active .chip-glyph { color: #fff; }
 .value-glyph { display: block; }
-.beats-bar { display: flex; gap: 2px; align-items: center; }
+.beats-bar { display: flex; gap: 2px; align-items: center; justify-content: center; }
 .beat-cell {
   display: block;
   width: 8px;
@@ -119,7 +142,7 @@
 }
 .beat-cell.is-part { opacity: .38; }
 .chip-value.is-active .beat-cell { background: #fff; }
-.chip-human { font-size: 10px; color: #55635b; white-space: nowrap; }
+.chip-human { font-size: 10px; color: #55635b; line-height: 1.25; }
 .chip-value.is-active .chip-human { color: #eaf5ee; }
 .chip-term { font-size: 8.5px; color: #a3ada7; white-space: nowrap; }
 .chip-value.is-active .chip-term { color: #cfe3d7; }

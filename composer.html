@@ -33,7 +33,7 @@
             <div class="eyebrow"><span class="eyebrow-line"></span>不用懂乐理，也能写谱</div>
             <h1>想到一段旋律，<span>点出来就好。</span></h1>
             <p>
-              你不需要认识五线谱。左侧挑一个音高（像按琴键一样），选「这个音唱几拍」，
+              你不需要认识五线谱。左侧挑一个音高（像按琴键一样），在下方选「这个音唱几拍」，
               点一下 <strong>＋ 加进乐谱</strong>——五线谱会自己画好。随时可以按
               <strong>试听这一小节</strong>，满意了再导出成乐谱文件或 MIDI。
             </p>
@@ -76,11 +76,7 @@
               <div class="mini-keyboard" id="miniKeyboard" role="group" aria-label="钢琴键盘"></div>
             </div>
 
-            <div class="composer-row">
-              <span class="field-label">这个音唱几拍</span>
-              <div class="value-chips" id="valueChips"></div>
-              <p class="fine-print">不知道选哪个？先用「1 拍」——这是最常见的一拍一个音。</p>
-            </div>
+
 
             <div class="composer-actions">
               <button class="primary-button" id="addNote" type="button">
@@ -206,7 +202,16 @@
             <article><span>04</span><strong>换个乐器听</strong><p>左侧「音色」可以换成二胡、古筝、长笛、合唱……同一个旋律会变一种味道。</p></article>
           </div>
         </section>
-      </main>
+        <section class="duration-strip" id="durationStrip" aria-label="这个音唱几拍">
+    <div class="duration-strip-head">
+      <strong>② 这个音唱几拍？</strong>
+      <span>上面一排是音符（会发出声音），下面带虚线框的是「停顿」。方块越多表示越长。</span>
+    </div>
+    <div class="value-chips" id="valueChips"></div>
+    <p class="fine-print">不知道选哪个？先用「1 拍」——这是最常见的一拍一个音。点一下还能听出「这么长」。</p>
+  </section>
+
+</main>
       <footer class="footer">
         <span>谱见 <span class="footer-dot">·</span> 让写谱这件事，不再需要先学乐理</span>
         <span><a href="docs-instruments.md">乐器音源清单</a></span>

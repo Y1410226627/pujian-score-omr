@@ -41,23 +41,38 @@ function dot() {
   return `<circle cx="9.5" cy="-1.5" r="1.9" fill="currentColor" />`;
 }
 
-/** 休止符图形（四分/八分/十六分/二分/全休止）。 */
+/**
+ * 休止符图形（按标准五线谱写法画，并画出「挂在哪条线上」的示意横线）。
+ *
+ * 为什么画横线：全休止（4 拍）和二分休止（2 拍）形状都是小方块，
+ * 区别只在「挂在第四线下方」还是「坐在第三线上方」——不画线就分不出来。
+ */
 function restGlyph(kind) {
   switch (kind) {
-    case "whole":   // 全休止：挂在第四线下方的小方块
-      return `<rect x="-7" y="-3" width="14" height="5" fill="currentColor" />`;
-    case "half":    // 二分休止：坐在第三线上方的小方块
-      return `<rect x="-7" y="-2" width="14" height="5" fill="currentColor" />`;
-    case "quarter": // 四分休止：一个「之」字形
-      return `<path d="M-2.5 -13 q 7 5 0 9 q 8 4 0 10 q 7 -3 2.5 -9 q -8 -5 0 -9 z" fill="currentColor" />`;
-    case "eighth":  // 八分休止：一个小钩
-      return `<path d="M1 -12 q 6 4 0 8 q -6 -3 0 -8 z" fill="currentColor" />` +
-             `<circle cx="3.4" cy="-4" r="2.2" fill="currentColor" />`;
+    case "whole":
+      // 全休止：第四线下方的小方块
+      return `<line x1="-11" y1="-3" x2="11" y2="-3" stroke="currentColor" stroke-width="1" opacity=".45"/>` +
+             `<rect x="-7" y="-2" width="14" height="5" fill="currentColor" />`;
+    case "half":
+      // 二分休止：第三线上方的小方块
+      return `<rect x="-7" y="-3" width="14" height="5" fill="currentColor" />` +
+             `<line x1="-11" y1="2" x2="11" y2="2" stroke="currentColor" stroke-width="1" opacity=".45"/>`;
+    case "quarter":
+      // 四分休止：一个「之」字形，标准写法是两段对角的粗笔画
+      return `<path d="M-3 -11 q 5 3 1 6 q -5 3 0 6 q 5 3 0 6" ` +
+             `fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" ` +
+             `stroke-linejoin="round" transform="rotate(-8)" />`;
+    case "eighth":
+      // 八分休止：一个左上方带钩的笔画
+      return `<path d="M3 -10 q -7 4 -4 8 q 3 4 -1 7" fill="none" stroke="currentColor" ` +
+             `stroke-width="3" stroke-linecap="round" />` +
+             `<circle cx="-1.5" cy="-9" r="2.6" fill="currentColor" />`;
     case "16th":
-      return `<path d="M1 -14 q 6 4 0 8 q -6 -3 0 -8 z" fill="currentColor" />` +
-             `<circle cx="3.4" cy="-6" r="2.2" fill="currentColor" />` +
-             `<path d="M1 -6 q 6 4 0 8 q -6 -3 0 -8 z" fill="currentColor" />` +
-             `<circle cx="3.4" cy="2" r="2.2" fill="currentColor" />`;
+      // 十六分休止：两个钩
+      return `<circle cx="-1.5" cy="-10" r="2.4" fill="currentColor" />` +
+             `<path d="M3 -10 q -7 4 -4 7" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" />` +
+             `<circle cx="-1.5" cy="-2" r="2.4" fill="currentColor" />` +
+             `<path d="M3 -2 q -7 4 -4 7" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" />`;
     default:
       return `<rect x="-6" y="-2.5" width="12" height="5" fill="currentColor" />`;
   }
