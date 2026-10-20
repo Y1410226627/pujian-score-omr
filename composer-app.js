@@ -11,6 +11,8 @@ import {
   usedBeats, scoreToPlayableNotes, scoreTotalBeats, cloneScore, accidentalFor,
 } from "./composer.js";
 import { scoreToMusicXml, scoreToMidi, scoreToProjectJson } from "./composer-export.js";
+import { scoreInfoToComposerScore } from "./composer-import.js";
+import { valueGlyphSvg, beatsBarMarkup, beatsToHuman } from "./notation-glyphs.js";
 import { TIMBRE_LABELS } from "./timbre.js";
 import { SAMPLED_TIMBRES, groupBanksByCategory, fallbackTimbre, isInstalledBank } from "./soundbanks.js";
 import { fetchSampleManifest, loadSampleBank, isSampledTimbre, lookupSample } from "./sampler.js";
@@ -29,6 +31,7 @@ const els = {
   stopPlay: byId("stopPlay"), loopPlay: byId("loopPlay"), playbackState: byId("playbackState"),
   exportMusicXml: byId("exportMusicXml"), exportMidi: byId("exportMidi"),
   exportProject: byId("exportProject"), exportPng: byId("exportPng"), importProject: byId("importProject"),
+  importMusicXml: byId("importMusicXml"), musicXmlInput: byId("musicXmlInput"),
   projectInput: byId("projectInput"), exportHint: byId("exportHint"),
   scoreEditor: byId("scoreEditor"), scoreEmpty: byId("scoreEmpty"), editToolbar: byId("editToolbar"),
   selectionInfo: byId("selectionInfo"), editActions: byId("editActions"),
@@ -678,32 +681,49 @@ function updatePitchReadout() {
   els.pitchHint.textContent = state.pitch === 60 ? "中央 C · 唱名 do" : `唱名 ${solfege} · 八度 ${Math.floor(state.pitch / 12) - 1}`;
 }
 
+/**
+ * 时值选择器：每个选项都画成**谱面上的真实符号**，再配「够几拍」的小方块和一句人话。
+ *
+ * 为什么不用「四分音符 / 八分音符」这种写法：真实用户（合唱团成员、非专业）反馈
+ * 「这哪个没乐理基础的人看得懂啊」。所以这里是「看到什么就点什么」：
+ * 画的是符头符干符尾、休止符、附点，下面用小方块表示能撑几拍。
+ */
 function buildValueChips() {
   els.valueChips.replaceChildren();
-  // 第一行：音符（会发声）
+  // 第一行：音符（会发出声音）
   for (const item of NOTE_VALUES) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "chip";
+    button.className = "chip chip-value";
     button.dataset.beats = String(item.beats);
     button.dataset.rest = "false";
-    button.innerHTML = `${item.label}<small>${item.hint}</small>`;
+    button.title = `${item.label}：${beatsToHuman(item.beats)}`;
+    button.innerHTML = `
+      <span class="chip-glyph">${valueGlyphSvg(item.beats, { size: 40, title: item.label })}</span>
+      <span class="chip-bar">${beatsBarMarkup(item.beats)}</span>
+      <span class="chip-human">${beatsToHuman(item.beats)}</span>
+      <small class="chip-term">${item.label}</small>`;
     button.addEventListener("click", () => {
       state.beats = item.beats;
       state.restMode = false;
       markActiveChip();
+      previewValue(item.beats, false);
     });
     els.valueChips.append(button);
   }
-  // 第二行：休止符（只占拍数、不发声）——用虚线边框和「休」字样区分
+  // 第二行：休止符（占拍数、不发声）——画的是休止符本身
   for (const item of REST_VALUES) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "chip is-rest";
+    button.className = "chip chip-value is-rest";
     button.dataset.beats = String(item.beats);
     button.dataset.rest = "true";
-    button.innerHTML = `休 ${item.hint.replace("拍", "")}<small>${item.label}</small>`;
-    button.title = `${item.label}休止：占 ${item.hint}，不发声`;
+    button.title = `停顿（休止符）：占 ${beatsToHuman(item.beats)}，不发声`;
+    button.innerHTML = `
+      <span class="chip-glyph">${valueGlyphSvg(item.beats, { rest: true, size: 40, title: item.label + "休止" })}</span>
+      <span class="chip-bar">${beatsBarMarkup(item.beats)}</span>
+      <span class="chip-human">停顿 ${beatsToHuman(item.beats)}</span>
+      <small class="chip-term">${item.label}休止</small>`;
     button.addEventListener("click", () => {
       state.beats = item.beats;
       state.restMode = true;
@@ -712,6 +732,19 @@ function buildValueChips() {
     els.valueChips.append(button);
   }
   markActiveChip();
+}
+
+/** 点一个时值就听一下「这么长」是什么感觉（用当前选中的音高）。 */
+function previewValue(beats, rest) {
+  if (rest) return;
+  try {
+    const midi = Number(state.pitch) || 60;
+    // 1 拍 = 60/tempo 秒，按当前速度换算成人耳能感知的长度
+    const seconds = Math.max(0.12, (Number(state.score.tempo) || 84) * 0 + beats * (60 / (Number(state.score.tempo) || 84)));
+    playPitch(activePart(), midi, ensureAudio().currentTime + 0.01, seconds);
+  } catch {
+    // 试听失败不影响选择，不打断用户
+  }
 }
 
 function markActiveChip() {
@@ -882,6 +915,53 @@ async function importProject(file) {
   }
 }
 
+/**
+ * 导入一份现成的乐谱（MusicXML / MXL）到创作室。
+ *
+ * 为什么需要：用户反馈「拿真实谱子复刻不出来」——创作室原来只能从空白开始一个音一个音点，
+ * 真实乐谱（和弦、多声部、休止）根本进不来。这里把识别/MusicXML 解析出来的音符
+ * 转成创作室的数据结构（空隙补休止、和弦保留、跨小节拆段），导入后可以直接改。
+ */
+async function importMusicXmlFile(file) {
+  try {
+    const { parseMusicXmlText, readMusicXmlFile } = await import("./musicxml.js");
+    // keepRests：创作室要保留休止符，才能还原原谱的停顿（工作台默认不保留，语义不变）
+    const parseOptions = { keepRests: true };
+    const scoreInfo = /\.mxl$/i.test(file.name)
+      ? await readMusicXmlFile(file, parseOptions)
+      : parseMusicXmlText(await file.text(), parseOptions);
+    if (!scoreInfo || !scoreInfo.notes || !scoreInfo.notes.length) {
+      showToast("这份乐谱里没有读到音符。");
+      return;
+    }
+    const { score, stats } = scoreInfoToComposerScore(scoreInfo, {
+      title: scoreInfo.title || file.name.replace(/\.[^.]+$/, ""),
+    });
+    if (!score.parts.length || !stats.notes) {
+      showToast("这份乐谱里没有读到音符。");
+      return;
+    }
+    pushHistory();
+    state.score = score;
+    state.activePartId = score.parts[0].id;
+    syncSettingsInputs();
+    afterScoreChange();
+    // 如实报数：音符数按「谱面上印了几个音」算（跨小节的长音被拆成两段但仍是同一个音）。
+    const details = [];
+    if (stats.chordEntries) details.push(`${stats.chordEntries} 处和弦`);
+    if (stats.tieSegments) details.push(`${stats.tieSegments} 处跨小节连音`);
+    if (stats.parts > 1) details.push(`按 ${stats.parts} 条声部线拆开`);
+    const lost = Math.max(0, (stats.sourceNotes || 0) - stats.notes);
+    showToast(`已导入「${score.title}」：${stats.parts} 条声部线、${stats.notes} 个音` +
+      `${details.length ? `（${details.join("、")}）` : ""}、${stats.measures} 小节` +
+      (lost > 0 ? `。注意：原谱有 ${stats.sourceNotes} 个音，其中 ${lost} 个因多声部重叠无法自动排准，建议逐段核对` : "") +
+      "。可以直接改，也可以导出。");
+  } catch (error) {
+    console.info("导入乐谱失败", error);
+    showToast("这份乐谱读不进来：" + ((error && error.message) || "格式不支持"));
+  }
+}
+
 function syncSettingsInputs() {
   els.scoreTitle.value = state.score.title;
   els.scoreTempo.value = state.score.tempo;
@@ -987,6 +1067,12 @@ function bindEvents() {
   els.exportPng.addEventListener("click", exportPng);
   els.exportProject.addEventListener("click", exportProject);
   els.importProject.addEventListener("click", () => els.projectInput.click());
+if (els.importMusicXml) els.importMusicXml.addEventListener("click", () => els.musicXmlInput.click());
+if (els.musicXmlInput) els.musicXmlInput.addEventListener("change", async () => {
+  const file = els.musicXmlInput.files && els.musicXmlInput.files[0];
+  els.musicXmlInput.value = "";
+  if (file) await importMusicXmlFile(file);
+});
   els.projectInput.addEventListener("change", () => {
     const file = els.projectInput.files && els.projectInput.files[0];
     if (file) importProject(file);

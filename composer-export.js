@@ -46,7 +46,7 @@ export function noteTypeOf(beats) {
   return { type: best.type, dots: 0 };
 }
 
-function noteXml({ midi, beats, rest = false }, { clef, staff = 1, indent }) {
+function noteXml({ midi, beats, rest = false, chord = false }, { clef, staff = 1, indent }) {
   const { type, dots } = noteTypeOf(beats);
   const duration = Math.max(1, Math.round(Number(beats) * DIVISIONS));
   const pad = indent || "        ";
@@ -56,8 +56,9 @@ function noteXml({ midi, beats, rest = false }, { clef, staff = 1, indent }) {
         const { step, alter, octave } = midiToStepAlter(midi);
         return `${pad}<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ""}<octave>${octave}</octave></pitch>`;
       })();
-  const lines = [`${pad}<note>`, head, `${pad}  <duration>${duration}</duration>`,
-    `${pad}  <voice>1</voice>`, `${pad}  <type>${type}</type>`];
+  const lines = [`${pad}<note>`, chord ? `${pad}  <chord/>` : null, head,
+    `${pad}  <duration>${duration}</duration>`,
+    `${pad}  <voice>1</voice>`, `${pad}  <type>${type}</type>`].filter((line) => line !== null);
   for (let index = 0; index < dots; index += 1) lines.push(`${pad}  <dot/>`);
   lines.push(`${pad}  <staff>${staff}</staff>`, `${pad}</note>`);
   return lines.join("\n");
@@ -66,12 +67,22 @@ function noteXml({ midi, beats, rest = false }, { clef, staff = 1, indent }) {
 /** 把一小节补满（空出来的地方写休止），MusicXML 才不会被判成残小节。 */
 function measureContent(measure, beatsPerMeasure) {
   const { slots, remaining } = buildMeasureSlots(measure, beatsPerMeasure);
-  // 休止符要保留：它占拍数、在乐谱上画成休止，导出时不能变成「什么都没有」
-  const items = slots.map((slot) => ({
-    midi: slot.rest ? 0 : slot.midi,
-    beats: slot.beats,
-    rest: Boolean(slot.rest),
-  }));
+  // 休止符要保留：它占拍数、在乐谱上画成休止，导出时不能变成「什么都没有」。
+  // 和弦：一个槽位有 chordMidis 时，先写主音、再把其余音写成带 <chord/> 的 note
+  //（MusicXML 规定 <chord/> 的音不推进时间轴）。
+  const items = [];
+  for (const slot of slots) {
+    items.push({
+      midi: slot.rest ? 0 : slot.midi,
+      beats: slot.beats,
+      rest: Boolean(slot.rest),
+    });
+    if (!slot.rest && Array.isArray(slot.chordMidis)) {
+      for (const extraMidi of slot.chordMidis) {
+        items.push({ midi: extraMidi, beats: slot.beats, rest: false, chord: true });
+      }
+    }
+  }
   if (remaining > 1e-9) items.push({ beats: remaining, rest: true });
   return items;
 }

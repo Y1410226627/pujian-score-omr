@@ -237,6 +237,22 @@ export function scoreToPlayableNotes(score) {
       const { slots } = buildMeasureSlots(measure, beatsPerMeasure);
       for (const slot of slots) {
         if (slot.rest) continue;   // 休止符占拍但不发声
+        // 和弦：同一拍位可以同时有多个音高（chordMidis）。实测用户提供的谱子里和弦极常见
+        // （Hall 曲 1769 个音符中 738 个是 <chord>），不展开就会丢音。
+        if (Array.isArray(slot.chordMidis)) {
+          for (const extraMidi of slot.chordMidis) {
+            notes.push({
+              midi: extraMidi,
+              startBeat: round(measureIndex * beatsPerMeasure + slot.startBeats),
+              durationBeats: slot.beats,
+              partId: part.id,
+              partName: part.name || part.id,
+              timbre: part.timbre || "piano",
+              volume: Number.isFinite(Number(part.volume)) ? Number(part.volume) : 1,
+              chord: true,
+            });
+          }
+        }
         notes.push({
           midi: slot.midi,
           startBeat: round(measureIndex * beatsPerMeasure + slot.startBeats),

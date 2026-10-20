@@ -96,6 +96,7 @@ function mergeTiedNotes(notes) {
  *
  * @param {string} source
  * @param {{timeSignature?: string}} [options]
+ *   keepRests：为 true 时把休止符也放进 notes（默认 false，与工作台的空页判断保持一致）。
  *   timeSignature：**已知拍号**（来自前面几页）。后面的页面通常不再印拍号，
  *   Audiveris 在没有拍号时会把小节时值按谱面宽度猜（实测整小节休止被猜成 5–11 拍），
  *   越往后错得越多。传入已知拍号后，这些页面的小节就按拍号算长度。
@@ -215,7 +216,23 @@ export function parseMusicXmlText(source, options = {}) {
           skippedNotes++;
           continue;
         }
-        if (childNamed(item, "rest")) continue;
+        if (childNamed(item, "rest")) {
+          // 默认不返回休止符（工作台靠「有没有音符」判断空页，语义不变）。
+          // 创作室导入显式要求 keepRests 时才保留：它要靠休止符还原原谱的停顿，
+          // 只靠拍位空隙反推会丢掉休止的具体时值。
+          if (options.keepRests) {
+            trackNotes.push({
+              partId, partName,
+              voice: textOf(item, "voice") || "1", staff: textOf(item, "staff") || "1",
+              measure: measure.getAttribute("number") || String(measureNumber),
+              measureIndex, startInMeasure, durationBeats: duration,
+              pitch: "休止", midi: 0, rest: true,
+              x: Number.NaN, y: Number.NaN,
+              tieStart: false, tieStop: false,
+            });
+          }
+          continue;
+        }
 
         const pitch = childNamed(item, "pitch");
         const step = textOf(pitch, "step").toUpperCase();
@@ -406,7 +423,7 @@ async function readMxl(file) {
   return readZipTextEntry(archive, musicXmlEntry);
 }
 
-export async function readMusicXmlFile(file) {
+export async function readMusicXmlFile(file, options = {}) {
   if (file.size > 100 * 1024 * 1024) throw new Error("MusicXML 文件超过 100 MB，无法载入。");
   const name = file.name.toLowerCase();
   const source = name.endsWith(".mxl") ? await readMxl(file) : await file.text();

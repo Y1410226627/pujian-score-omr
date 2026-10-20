@@ -93,6 +93,37 @@
 .chip.is-active small { color: #d7e6dc; }
 .chip.is-rest { border-style: dashed; }
 
+/* 时值选择器：画真实符号（符头符干符尾 / 休止符 / 附点），而不是只写「四分音符」。
+   零基础的用��看到的就是谱面上的样子，配小方块表示几拍。 */
+.chip-value {
+  display: grid;
+  grid-template-rows: auto auto auto auto;
+  justify-items: center;
+  gap: 2px;
+  min-width: 58px;
+  padding: 6px 7px 5px;
+  border-radius: 10px;
+  line-height: 1.1;
+}
+.chip-glyph { display: flex; align-items: center; justify-content: center; height: 40px; color: #2f3b34; }
+.chip-value.is-active .chip-glyph { color: #fff; }
+.value-glyph { display: block; }
+.beats-bar { display: flex; gap: 2px; align-items: center; }
+.beat-cell {
+  display: block;
+  width: 8px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--green);
+  opacity: .75;
+}
+.beat-cell.is-part { opacity: .38; }
+.chip-value.is-active .beat-cell { background: #fff; }
+.chip-human { font-size: 10px; color: #55635b; white-space: nowrap; }
+.chip-value.is-active .chip-human { color: #eaf5ee; }
+.chip-term { font-size: 8.5px; color: #a3ada7; white-space: nowrap; }
+.chip-value.is-active .chip-term { color: #cfe3d7; }
+
 .composer-actions { display: flex; gap: 8px; flex-wrap: nowrap; align-items: center; margin-top: 12px; }
 .composer-actions.wrap { flex-wrap: wrap; }
 .composer-actions .primary-button { flex: 1 1 auto; justify-content: center; }
