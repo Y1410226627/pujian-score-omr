@@ -261,3 +261,10 @@
 .dyn-sfz, .dyn-fp { font-size: 13px; font-weight: 800; color: #b5563a; }
 
 #staffSelector, #voiceSelector { min-width: 120px; }
+
+
+/* 中途变速输入行 */
+.tempo-inline { align-items: center; }
+.tempo-inline .inline-group { gap: 4px; align-items: center; }
+.tempo-inline input { width: 58px; }
+.tempo-label { font-size: 11px; color: #7d8a82; white-space: nowrap; }

@@ -399,12 +399,16 @@ function readMidi(noteNode) {
 export function v2ToMusicXml(score) {
   const DIVISIONS = 480;
   const per = beatsPerMeasure(score);
-  const totalMeasures = Math.max(
-    1,
-    ...score.parts.map((part) => Math.ceil(
-      Math.max(0, ...part.staves.flatMap((staff) => staff.voices.flatMap((voice) =>
-        (voice.events || []).map((event) => event.beat + event.beats)))) / per - 1e-9)),
-  );
+  // 小节数取三个来源的最大值：
+  //   1) 音符覆盖到的拍位；2) 变速点覆盖到的拍位；3) 表情文字覆盖到的拍位。
+  // 只按音符算时，「标了变速但那一带还没写音符」的变速会被截掉（实测丢失）。
+  const coveredBeat = (score) => Math.max(0, ...[
+    ...(score.parts || []).flatMap((part) => (part.staves || []).flatMap((staff) =>
+      (staff.voices || []).flatMap((voice) => (voice.events || []).map((event) => event.beat + event.beats)))),
+    ...((score.tempoChanges || []).map((change) => change.beat + 1)),
+    ...((score.systemTexts || []).map((text) => text.beat + 1)),
+  ]);
+  const totalMeasures = Math.max(1, Math.ceil(coveredBeat(score) / per - 1e-9));
   const lines = [];
   lines.push('<?xml version="1.0" encoding="UTF-8"?>');
   lines.push('<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">');
@@ -437,9 +441,10 @@ export function v2ToMusicXml(score) {
           `<per-minute>${Math.round(score.tempo)}</per-minute></metronome></direction-type>` +
           `<sound tempo="${Math.round(score.tempo)}"/></direction>`);
       }
-      // 中途变速与文字
+      // 中途变速与文字：按绝对拍位找落在本小节内的变速点。
+      // （之前要求 change.beat 恰好等于小节起点，落在小节中间的就丢了。）
       for (const change of score.tempoChanges || []) {
-        if (Math.abs(change.beat - measureStart) < 1e-6) {
+        if (change.beat >= measureStart - 1e-6 && change.beat < measureEnd - 1e-6) {
           lines.push(`      <direction><direction-type><metronome><beat-unit>quarter</beat-unit>` +
             `<per-minute>${Math.round(change.bpm)}</per-minute></metronome></direction-type>` +
             `<sound tempo="${Math.round(change.bpm)}"/></direction>`);

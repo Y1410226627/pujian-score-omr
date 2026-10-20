@@ -47,7 +47,8 @@ const els = {
   pitchLabel: byId("pitchLabel"), pitchHint: byId("pitchHint"), pitchDown: byId("pitchDown"),
   pitchUp: byId("pitchUp"), pitchPlay: byId("pitchPlay"), miniKeyboard: byId("miniKeyboard"),
   valueChips: byId("valueChips"), addNote: byId("addNote"), undo: byId("undo"), redo: byId("redo"),
-  scoreTitle: byId("scoreTitle"), scoreTempo: byId("scoreTempo"), scoreBeats: byId("scoreBeats"),
+  scoreTitle: byId("scoreTitle"), scoreTempo: byId("scoreTempo"), scoreTime: byId("scoreTime"),
+  tempoBeat: byId("tempoBeat"), tempoBpm: byId("tempoBpm"), addTempoChange: byId("addTempoChange"),
   scoreKey: byId("scoreKey"), scoreClef: byId("scoreClef"), scoreTimbre: byId("scoreTimbre"),
   measureStatus: byId("measureStatus"),
   playAll: byId("playAll"), playFromHere: byId("playFromHere"), playSelection: byId("playSelection"),
@@ -464,7 +465,13 @@ function renderScore() {
     return;
   }
   const { Factory } = VF;
-  const view = state.scoreView;
+  /** v2 的原始拍号（VexFlow 要用「3/8」这种，不能用换算成四分音符的 1.5）。 */
+function scoreTimeSignature() {
+  const score = currentScore();
+  return (score && score.timeSignature) || { beats: 4, beatType: 4 };
+}
+
+const view = state.scoreView;
   if (!view) return;
   const measureCount = Math.max(1, Math.ceil(v2TotalBeats(state.score) / view.beatsPerMeasure));
   const width = Math.max(680, els.scoreEditor.clientWidth || 760);
@@ -481,6 +488,7 @@ function renderScore() {
   // 热区要挂在真正的 <svg> 元素上（SVGContext 没有 getSVGElement）
   const svgElement = els.scoreEditor.querySelector("svg");
 
+  const time = scoreTimeSignature();
   const measuresPerLine = 2;
   view.parts.forEach((part, partIndex) => {
     const clef = part.clef === "bass" ? "bass" : part.clef === "alto" ? "alto" : part.clef === "tenor" ? "tenor" : "treble";
@@ -496,7 +504,7 @@ function renderScore() {
           if (partIndex === 0) {
             const keyName = keySignatureName(view.keyFifths);
             if (keyName) stave.addKeySignature(keyName);
-            stave.addTimeSignature(`${view.beatsPerMeasure}/${view.beatType}`);
+            stave.addTimeSignature(`${time.beats}/${time.beatType}`);
           }
         }
         stave.setContext(svg).draw();
@@ -1165,6 +1173,25 @@ function appendMeasureIfNeeded() {
   afterScoreChange();
 }
 
+/**
+ * 加一处「中途变速」：从第 N 小节起速度改成 X BPM。
+ * v2 模型里是 tempoChanges: [{beat, bpm}]，导出 MusicXML 会写成 <sound tempo>。
+ */
+function addTempoChange() {
+  const score = currentScore();
+  if (!score) return;
+  const measureNumber = Math.max(1, Math.round(Number(els.tempoBeat.value) || 1));
+  const bpm = Math.min(320, Math.max(20, Math.round(Number(els.tempoBpm.value) || 90)));
+  const beat = Math.round(v2BeatsPerMeasure(score) * (measureNumber - 1) * 1e6) / 1e6;
+  pushHistory();
+  score.tempoChanges = (score.tempoChanges || []).filter((item) => Math.abs(item.beat - beat) > 1e-6);
+  score.tempoChanges.push({ beat, bpm });
+  score.tempoChanges.sort((left, right) => left.beat - right.beat);
+  if (measureNumber === 1) score.tempo = bpm;
+  afterScoreChange();
+  showToast(`已记下：第 ${measureNumber} 小节起改成 ${bpm} BPM（共 ${score.tempoChanges.length} 处）。`);
+}
+
 function number(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -1344,7 +1371,7 @@ function syncSettingsInputs() {
   els.scoreTitle.value = score.title || "未命名乐谱";
   els.scoreTempo.value = String(score.tempo || 84);
   const time = score.timeSignature || { beats: 4, beatType: 4 };
-  els.scoreBeats.value = String(time.beats);
+  if (els.scoreTime) els.scoreTime.value = `${time.beats}/${time.beatType}`;
   els.scoreKey.value = String(score.keyFifths || 0);
   const ref = v2ClampVoiceRef(score, state.activeRef);
   const part = (score.parts || [])[ref.partIndex];
@@ -1357,13 +1384,15 @@ function syncSettingsInputs() {
 function applySettings() {
   const score = currentScore();
   if (!score) return;
-  const beats = Number(els.scoreBeats.value) || 4;
+  const timeMatch = /^(\d+)\s*\/\s*(\d+)$/.exec(els.scoreTime.value || "4/4");
   score.title = els.scoreTitle.value.trim() || "未命名乐谱";
   score.tempo = Math.min(320, Math.max(20, Number(els.scoreTempo.value) || 84));
-  score.timeSignature = {
-    beats: Math.min(12, Math.max(1, Math.round(beats))),
-    beatType: (score.timeSignature || {}).beatType || 4,
-  };
+  if (timeMatch) {
+    score.timeSignature = {
+      beats: Math.min(16, Math.max(1, Number(timeMatch[1]))),
+      beatType: Math.min(16, Math.max(1, Number(timeMatch[2]))),
+    };
+  }
   score.keyFifths = Math.min(7, Math.max(-7, Number(els.scoreKey.value) || 0));
   const ref = v2ClampVoiceRef(score, state.activeRef);
   const part = (score.parts || [])[ref.partIndex];
@@ -1377,11 +1406,12 @@ function applySettings() {
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
   els.addNote.addEventListener("click", addCurrentNote);
+  if (els.addTempoChange) els.addTempoChange.addEventListener("click", addTempoChange);
   els.undo.addEventListener("click", undo);
   for (const [element, handler] of [
     [els.scoreTitle, () => applySettings()],
     [els.scoreTempo, () => applySettings()],
-    [els.scoreBeats, () => applySettings()],
+    [els.scoreTime, () => applySettings()],
     [els.scoreKey, () => applySettings()],
     [els.scoreClef, () => applySettings()],
   ]) {
@@ -1446,30 +1476,29 @@ function bindEvents() {
     afterScoreChange();
   });
 
-  els.scoreTitle.addEventListener("input", () => { state.score.title = els.scoreTitle.value || "未命名乐谱"; });
-  els.scoreTempo.addEventListener("input", () => {
-    state.score.tempo = Math.max(20, Math.min(320, Number(els.scoreTempo.value) || 84));
-  });
-  els.scoreBeats.addEventListener("change", () => {
-    pushHistory();
-    state.score.beatsPerMeasure = Number(els.scoreBeats.value) || 4;
-    afterScoreChange();
-  });
+  els.scoreTitle.addEventListener("input", () => applySettings());
+  els.scoreTempo.addEventListener("input", () => applySettings());
   els.scoreKey.addEventListener("change", () => {
     pushHistory();
-    state.score.keyFifths = Number(els.scoreKey.value) || 0;
+    const score = currentScore();
+    if (score) score.keyFifths = Math.min(7, Math.max(-7, Number(els.scoreKey.value) || 0));
     afterScoreChange();
   });
   els.scoreClef.addEventListener("change", () => {
-    const part = activePart();
-    if (!part) return;
-    pushHistory();
-    part.clef = els.scoreClef.value;
-    afterScoreChange();
+    const score = currentScore();
+    if (!score) return;
+    const ref = v2ClampVoiceRef(score, state.activeRef);
+    const part = (score.parts || [])[ref.partIndex];
+    if (part && part.staves && part.staves[ref.staffIndex]) {
+      pushHistory();
+      part.staves[ref.staffIndex].clef = els.scoreClef.value || "treble";
+      afterScoreChange();
+    }
   });
   els.scoreTimbre.addEventListener("change", async () => {
     const part = activePart();
     if (!part) return;
+    pushHistory();
     part.timbre = els.scoreTimbre.value;
     await ensureSampleBank(part.timbre);
     showToast(`「${part.name}」的音色换成「${TIMBRE_LABELS[part.timbre] || part.timbre}」。`);

@@ -121,12 +121,27 @@
               <div class="setting-grid">
                 <label class="inline-field"><span>标题</span><input id="scoreTitle" type="text" value="未命名乐谱" aria-label="乐谱标题" /></label>
                 <label class="inline-field"><span>速度</span><input id="scoreTempo" type="number" min="20" max="320" value="84" aria-label="每分钟拍数" /><small>BPM</small></label>
-                <label class="inline-field"><span>每小节</span>
-                  <select id="scoreBeats" aria-label="每小节拍数">
-                    <option value="4" selected>4 拍（最常见）</option>
-                    <option value="3">3 拍（圆舞曲）</option>
-                    <option value="2">2 拍</option>
-                    <option value="6">6 拍</option>
+                <div class="inline-field tempo-inline">
+                  <span>中途变速</span>
+                  <div class="inline-group">
+                    <input id="tempoBeat" type="number" min="1" step="1" value="1" aria-label="从第几小节开始变速" title="从第几小节开始" />
+                    <span class="tempo-label">小节起，改成</span>
+                    <input id="tempoBpm" type="number" min="20" max="320" value="90" aria-label="新的每分钟拍数" />
+                    <small>BPM</small>
+                    <button class="ghost-button small" id="addTempoChange" type="button" title="在这里加一个速度变化">＋ 加变速</button>
+                  </div>
+                </div>
+                <label class="inline-field"><span>拍号</span>
+                  <select id="scoreTime" aria-label="拍号（每小节几拍 / 几分音符算一拍）">
+                    <option value="4/4" selected>4 / 4（最常见，一小节数 4 下）</option>
+                    <option value="3/4">3 / 4（圆舞曲：1、2、3）</option>
+                    <option value="2/4">2 / 4（进行曲：1、2）</option>
+                    <option value="4/8">4 / 8（八分音符算一拍）</option>
+                    <option value="3/8">3 / 8（一小节只有 1 拍半）</option>
+                    <option value="6/8">6 / 8（1、2、3，每下两小拍）</option>
+                    <option value="9/8">9 / 8</option>
+                    <option value="12/8">12 / 8</option>
+                    <option value="2/2">2 / 2（二分音符算一拍）</option>
                   </select>
                 </label>
                 <label class="inline-field"><span>调号</span>
