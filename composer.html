@@ -76,6 +76,25 @@
               <div class="mini-keyboard" id="miniKeyboard" role="group" aria-label="钢琴键盘"></div>
             </div>
 
+            <div class="composer-row">
+              <span class="field-label">写到哪一行（同一小节里可以同时写好几行）</span>
+              <div class="inline-group">
+                <select id="staffSelector" aria-label="第几行谱表"></select>
+                <select id="voiceSelector" aria-label="这一行的第几条声部线"></select>
+                <button class="ghost-button small" id="addVoice" type="button" title="在同一行谱表里再开一条声部线（比如钢琴左手的伴奏）">＋ 声部线</button>
+                <button class="ghost-button small" id="addStaff" type="button" title="再加一行谱表（比如钢琴的低音谱表）">＋ 谱表</button>
+              </div>
+              <p class="fine-print">谱面上同时进行的旋律（例如钢琴「左手弹低音、右手弹和弦」）要分开写，才不会互相挤掉。</p>
+            </div>
+
+            <div class="composer-row">
+              <span class="field-label">和弦（同一个拍子上一起按下的好几个音）</span>
+              <div class="composer-actions wrap">
+                <button class="ghost-button" id="chordToneButton" type="button" title="把当前选中的音高叠加到「谱面上选中的那个音」上">⎄ 叠到选中的音上</button>
+              </div>
+              <p class="fine-print">先在下方谱面里<strong>点一个音</strong>，再选好要叠加的音高，点「叠到选中的音上」。</p>
+            </div>
+
 
 
             <div class="composer-actions">
@@ -84,6 +103,12 @@
               </button>
               <button class="ghost-button" id="undo" type="button" title="撤销（Ctrl+Z）">↶ 撤销</button>
               <button class="ghost-button" id="redo" type="button" title="重做（Ctrl+Shift+Z）">↷ 重做</button>
+            </div>
+
+            <div class="composer-row">
+              <span class="field-label">给选中的音加记号</span>
+              <p class="fine-print">先在谱面上点一个音，再点下面的记号；再点一次取消。</p>
+              <div class="mark-groups" id="markGroups"></div>
             </div>
 
             <div class="divider"></div>

@@ -34,16 +34,23 @@ try {
     await page.locator("#addNote").click();
   }
   const stateAfter = await page.evaluate(() => {
-    const score = window.__pujianComposer.state.score;
+    const state = window.__pujianComposer.state;
+    // v2：声部 → 谱表 → 声部线 → 事件（绝对拍位）
+    const voice = state.score.parts[0].staves[0].voices[0];
+    const view = state.scoreView;
     return {
-      parts: score.parts.length,
-      measures: score.parts[0].measures.length,
-      notes: score.parts[0].measures[0].beats.map((note) => note.midi),
+      parts: state.score.parts.length,
+      voices: state.score.parts[0].staves[0].voices.length,
+      events: voice.events.length,
+      notes: voice.events.map((event) => event.midi),
+      beats: voice.events.map((event) => event.beat),
+      viewBeats: view.parts[0].measures[0] ? view.parts[0].measures[0].beats.length : 0,
     };
   });
   console.log("写进去的音：", JSON.stringify(stateAfter));
-  assert.equal(stateAfter.notes.length, 4, "第一小节应有 4 个音");
+  assert.equal(stateAfter.events, 4, "应写入 4 个事件");
   assert.ok(stateAfter.notes.every((midi) => Number.isFinite(midi)));
+  assert.deepEqual(stateAfter.beats, [0, 1, 2, 3], "四个音按时序排在第 0/1/2/3 拍");
 
   // 3) 五线谱渲染出来了（SVG 里有符头），并且每个音都有可点击的热区
   const svgNotes = await page.locator("#scoreEditor svg [class*=stavenote]").count();
@@ -63,15 +70,24 @@ try {
   await page.locator('#valueChips .chip[data-rest="true"][data-beats="1"]').click();
   await page.locator("#addNote").click();
   const restState = await page.evaluate(() => {
-    const measures = window.__pujianComposer.state.score.parts[0].measures;
-    const rests = measures.flatMap((measure) => measure.beats).filter((event) => event.rest).length;
-    const used = measures.map((measure) => measure.beats.reduce((sum, event) => sum + event.beats, 0));
-    return { rests, used, measureCount: measures.length };
+    const state = window.__pujianComposer.state;
+    const voice = state.score.parts[0].staves[0].voices[0];
+    const view = state.scoreView;
+    return {
+      rests: voice.events.filter((event) => event.rest).length,
+      events: voice.events.length,
+      totalBeats: voice.events.reduce((sum, event) => sum + event.beats, 0),
+      viewMeasures: view.parts[0].measures.length,
+    };
   });
   console.log("休止符：", JSON.stringify(restState));
   assert.equal(restState.rests, 1, "应该有一个休止符");
-  assert.equal(restState.measureCount, 2, "第 1 小节已满，休止符进第 2 小节");
-  assert.equal(restState.used[1], 1, "第 2 小节当前 1 拍（就是这个休止符）");
+  assert.equal(restState.viewMeasures, 2, "第 1 小节已满，休止符进第 2 小节");
+  assert.equal(restState.totalBeats, 5, "4 个音 + 1 拍休止 = 5 拍");
+  // 休止符确实落在第 4 拍之后（绝对拍位）
+  const restEvent = await page.evaluate(() =>
+    window.__pujianComposer.state.score.parts[0].staves[0].voices[0].events.find((event) => event.rest));
+  assert.equal(restEvent.beat, 4, "休止符从第 4 拍（第 2 小节开头）开始");
   // 切回音符模式，避免影响后面的试听
   await page.locator('#valueChips .chip[data-rest="false"][data-beats="1"]').click();
 

@@ -6,13 +6,36 @@
 //   · 写错了永远能撤销，删音就是点旁边的小 ×；
 //   · 试听可以「从头」「从选中的音开始」「只听选中的一段」，避免听一大段找那一句。
 import {
-  NOTE_VALUES, REST_VALUES, midiToName, isBlackKey, isRest, createScore, createPart,
-  appendNote, removeNote, setNoteBeats, transposeNote, buildMeasureSlots, remainingBeats,
-  usedBeats, scoreToPlayableNotes, scoreTotalBeats, cloneScore, accidentalFor,
+  NOTE_VALUES, REST_VALUES, midiToName, isBlackKey, isRest,
+  scoreToPlayableNotes, accidentalFor, cloneScore, remainingBeats, usedBeats,
+  appendNote, removeNote, setNoteBeats, transposeNote, buildMeasureSlots,
 } from "./composer.js";
-import { scoreToMusicXml, scoreToMidi, scoreToProjectJson } from "./composer-export.js";
+import { scoreToMidi, scoreToProjectJson } from "./composer-export.js";
 import { scoreInfoToComposerScore } from "./composer-import.js";
-import { valueGlyphSvg, beatsBarMarkup, beatsToHuman } from "./notation-glyphs.js";
+import { valueGlyphSvg, beatsBarMarkup, beatsToHuman, symbolMarkup } from "./notation-glyphs.js";
+// v2 模型：多声部 + 绝对拍位（同一小节可并行多条声部线）
+import {
+  createScore as createV2Score, createPart as createV2Part,
+  createStaff as createV2Staff, createVoice as createV2Voice,
+  scoreToPlayableNotes as v2PlayableNotes, beatsPerMeasure as v2BeatsPerMeasure,
+  scoreTotalBeats as v2TotalBeats, cloneScore as cloneV2Score,
+} from "./composer-model.js";
+import { v2ToMusicXml, musicXmlToV2 } from "./composer-v2xml.js";
+import {
+  appendNote as v2AppendNote, appendChordTone as v2AppendChordTone,
+  deleteEvent as v2DeleteEvent, changeEventBeats as v2ChangeEventBeats,
+  changeEventMidi as v2ChangeEventMidi, changeEventBeat as v2ChangeEventBeat,
+  toggleFlag as v2ToggleFlag, addVoiceTo as v2AddVoiceTo, addStaffTo as v2AddStaffTo,
+  buildMeasureView as v2BuildMeasureView, describeEvent as v2DescribeEvent,
+  explainReason as v2ExplainReason, currentVoice as v2CurrentVoice,
+  defaultVoiceRef as v2DefaultVoiceRef, clampVoiceRef as v2ClampVoiceRef,
+  insertNoteAt as v2InsertNoteAt,
+  NOTE_VALUES as V2_NOTE_VALUES, DYNAMICS as V2_DYNAMICS,
+  ARTICULATIONS as V2_ARTICULATIONS, ORNAMENTS as V2_ORNAMENTS,
+} from "./composer-ui-model.js";
+import {
+  v2ScoreToV1, isV2Part, v2EventsOf, v2VoiceFor, writeBackEvent,
+} from "./composer-v2adapter.js";
 import { TIMBRE_LABELS } from "./timbre.js";
 import { SAMPLED_TIMBRES, groupBanksByCategory, fallbackTimbre, isInstalledBank } from "./soundbanks.js";
 import { fetchSampleManifest, loadSampleBank, isSampledTimbre, lookupSample } from "./sampler.js";
@@ -33,6 +56,9 @@ const els = {
   exportProject: byId("exportProject"), exportPng: byId("exportPng"), importProject: byId("importProject"),
   importMusicXml: byId("importMusicXml"), musicXmlInput: byId("musicXmlInput"),
   projectInput: byId("projectInput"), exportHint: byId("exportHint"),
+  staffSelector: byId("staffSelector"), voiceSelector: byId("voiceSelector"),
+  addVoice: byId("addVoice"), addStaff: byId("addStaff"),
+  chordToneButton: byId("chordToneButton"), markGroups: byId("markGroups"),
   scoreEditor: byId("scoreEditor"), scoreEmpty: byId("scoreEmpty"), editToolbar: byId("editToolbar"),
   selectionInfo: byId("selectionInfo"), editActions: byId("editActions"),
   toast: byId("toast"),
@@ -42,8 +68,14 @@ const SOLFEGE = ["do", "di", "re", "ri", "mi", "fa", "fi", "sol", "si", "la", "l
 const KEYBOARD_START = 48;   // C3
 const KEYBOARD_END = 84;     // C6
 
+// 当前编辑的声部位置（v2：声部 / 第几行谱表 / 第几条声部线）
+const DEFAULT_REF = { partIndex: 0, staffIndex: 0, voiceIndex: 0 };
+
 const state = {
-  score: createScore({ title: "未命名乐谱", tempo: 84, beatsPerMeasure: 4 }),
+  // v2 谱（多声部 + 绝对拍位）；界面渲染时转成 v1 视图，操作全部写回这里
+  score: null,
+  scoreView: null,        // v2ScoreToV1 的结果（界面与旧导出用）
+  activeRef: { ...DEFAULT_REF },
   activePartId: null,
   pitch: 60,               // 当前输入音高（C4）
   beats: 1,                // 当前选中的时值
@@ -55,6 +87,120 @@ const state = {
   sampleManifest: null, sampleBanks: new Map(),
 };
 
+/* ---------------- v2 界面辅助：声部线选择 / 记号面板 ---------------- */
+
+/**
+ * 刷新「写到哪一行」的两个下拉框（第几行谱表 / 第几条声部线）。
+ */
+function refreshStaffVoiceSelectors() {
+  const score = currentScore();
+  if (!score) return;
+  const ref = v2ClampVoiceRef(score, state.activeRef);
+  state.activeRef = ref;
+  const part = (score.parts || [])[ref.partIndex];
+  if (!part) return;
+  if (els.staffSelector) {
+    const current = ref.staffIndex;
+    els.staffSelector.replaceChildren();
+    (part.staves || []).forEach((staff, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = `第 ${index + 1} 行谱表`;
+      if (index === current) option.selected = true;
+      els.staffSelector.append(option);
+    });
+  }
+  if (els.voiceSelector) {
+    const staff = (part.staves || [])[ref.staffIndex];
+    const current = ref.voiceIndex;
+    els.voiceSelector.replaceChildren();
+    ((staff && staff.voices) || []).forEach((voice, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = (staff.voices || []).length > 1 ? `第 ${index + 1} 条声部线` : "（这一行只有一条）";
+      if (index === current) option.selected = true;
+      els.voiceSelector.append(option);
+    });
+  }
+}
+
+/** 力度记号的小图形（用文字排版出强弱感）。 */
+function dynamicGlyph(key) {
+  return `<span class="dynamic-glyph dyn-${key}">${key}</span>`;
+}
+
+/** 演奏记号/装饰音的图形（真实符号）。 */
+function symbolGlyph(kind) {
+  const map = {
+    staccato: "staccato", accent: "accent", tenuto: "staccato",
+    marcato: "accent", fermata: "fermata", trill: "fermata",
+    turn: "slur", mordent: "accent", grace: "slur",
+    tie: "tie", slur: "slur",
+  };
+  const real = map[kind] || kind;
+  return `<svg class="value-glyph" viewBox="0 0 32 32" width="26" height="26">${symbolMarkup(real, { size: 32 })}</svg>`;
+}
+
+/**
+ * 「记号」面板：强弱、怎么弹、装饰音、连线。
+ * 全部画成真实符号；先点谱面上的一个音，再点这里。
+ */
+function buildMarkGroups() {
+  if (!els.markGroups) return;
+  const groups = [
+    {
+      title: "强弱（声音大小）", key: "dynamic",
+      items: V2_DYNAMICS.map((item) => ({ value: item.key, label: item.label, glyph: dynamicGlyph(item.key) })),
+    },
+    {
+      title: "怎么弹（断奏 / 重音 / 保持 / 延音）", key: "articulations",
+      items: V2_ARTICULATIONS.map((item) => ({ value: item.key, label: item.label, glyph: symbolGlyph(item.key) })),
+    },
+    {
+      title: "装饰音", key: "ornaments",
+      items: V2_ORNAMENTS.map((item) => ({ value: item.key, label: item.label, glyph: symbolGlyph(item.key) })),
+    },
+    {
+      title: "连线（把相邻的音连起来）", key: "tie",
+      items: [
+        { value: "start", label: "开始连音线", glyph: symbolGlyph("tie") },
+        { value: "stop", label: "结束连音线", glyph: symbolGlyph("tie") },
+        { value: "slur", label: "圆滑线（一弓/一口气）", glyph: symbolGlyph("slur") },
+      ],
+    },
+  ];
+  els.markGroups.replaceChildren();
+  for (const group of groups) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "mark-group";
+    const title = document.createElement("span");
+    title.className = "mark-title";
+    title.textContent = group.title;
+    wrapper.append(title);
+    const row = document.createElement("div");
+    row.className = "mark-row";
+    for (const item of group.items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "chip chip-mark";
+      button.title = item.label;
+      button.dataset.markKey = group.key;
+      button.dataset.markValue = item.value;
+      button.innerHTML = `${item.glyph}<small>${item.label}</small>`;
+      button.addEventListener("click", () => {
+        const result = toggleMarkOnSelection(group.key, item.value);
+        if (result) {
+          button.classList.toggle("is-active", Boolean(result.on));
+          showToast(result.on ? `已加上「${item.label}」` : `已取消「${item.label}」`);
+        }
+      });
+      row.append(button);
+    }
+    wrapper.append(row);
+    els.markGroups.append(wrapper);
+  }
+}
+
 /* ---------------- 基础工具 ---------------- */
 function showToast(message) {
   els.toast.textContent = message;
@@ -63,12 +209,29 @@ function showToast(message) {
   state.toastTimer = setTimeout(() => els.toast.classList.remove("is-visible"), 2600);
 }
 
+/**
+ * 把 v2 谱转成界面/播放用的 v1 视图。
+ * 界面仍然用「小节 × 拍位」的画法（VexFlow 那边不用改），
+ * 但每个拍位都带 v2Event 引用，所以改 v1 能写回 v2。
+ */
+function syncScoreView() {
+  if (!state.score) return;
+  state.scoreView = v2ScoreToV1(state.score);
+}
+
+/** 当前 v2 谱（对外统一入口）。 */
+function currentScore() {
+  return state.score;
+}
+
+/** 当前 v1 视图里的声部（界面用；v1 视图由 v2 谱转来，每个 (声部,谱表,声部线) 一项）。 */
 function activePart() {
-  return state.score.parts.find((part) => part.id === state.activePartId) || state.score.parts[0];
+  const parts = (state.scoreView && state.scoreView.parts) || [];
+  return parts[state.activeRef.partIndex] || parts[0] || null;
 }
 
 function pushHistory() {
-  state.history.push(cloneScore(state.score));
+  state.history.push(cloneV2Score(state.score));
   if (state.history.length > 60) state.history.shift();
   state.future.length = 0;
   syncHistoryButtons();
@@ -81,32 +244,25 @@ function syncHistoryButtons() {
 
 function undo() {
   if (!state.history.length) return;
-  state.future.push(cloneScore(state.score));
+  state.future.push(cloneV2Score(state.score));
   state.score = state.history.pop();
-  // 撤销后当前声部可能已经不存在了，兜底切到第一个声部
-  if (!state.score.parts.some((part) => part.id === state.activePartId)) {
-    state.activePartId = state.score.parts[0] ? state.score.parts[0].id : null;
-  }
-  state.selection = null;
-  syncSettingsInputs();
+  state.activeRef = v2ClampVoiceRef(state.score, state.activeRef);
   afterScoreChange();
   syncHistoryButtons();
   showToast("已撤销。");
 }
 
+
 function redo() {
   if (!state.future.length) return;
-  state.history.push(cloneScore(state.score));
+  state.history.push(cloneV2Score(state.score));
   state.score = state.future.pop();
-  if (!state.score.parts.some((part) => part.id === state.activePartId)) {
-    state.activePartId = state.score.parts[0] ? state.score.parts[0].id : null;
-  }
-  state.selection = null;
-  syncSettingsInputs();
+  state.activeRef = v2ClampVoiceRef(state.score, state.activeRef);
   afterScoreChange();
   syncHistoryButtons();
   showToast("已重做。");
 }
+
 
 /* ---------------- 音频：合成音色 + 采样音色 ---------------- */
 function ensureAudio() {
@@ -266,7 +422,7 @@ function stopPlayback(showMessage = true) {
 function playRange(beatFrom = 0, beatTo = Infinity) {
   stopPlayback(false);
   const context = ensureAudio();
-  const notes = scoreToPlayableNotes(state.score).filter((note) => {
+  const notes = scoreToPlayableNotes(state.scoreView).filter((note) => {
     const start = note.startBeat;
     const end = start + note.durationBeats;
     return end > beatFrom + 1e-9 && start < beatTo - 1e-9;
@@ -284,7 +440,7 @@ function playRange(beatFrom = 0, beatTo = Infinity) {
     const part = state.score.parts.find((item) => item.id === note.partId);
     playPitch(part || { timbre: "piano" }, note.midi, startAt + offset * secondsPerBeat, duration * secondsPerBeat);
   }
-  const totalSeconds = (Math.min(beatTo, scoreTotalBeats(state.score)) - beatFrom) * secondsPerBeat;
+  const totalSeconds = (Math.min(beatTo, v2TotalBeats(state.score)) - beatFrom) * secondsPerBeat;
   state.isPlaying = true;
   els.stopPlay.disabled = false;
   els.playbackState.textContent = `正在播放 ${Math.max(0, totalSeconds).toFixed(1)} 秒`;
@@ -308,10 +464,12 @@ function renderScore() {
     return;
   }
   const { Factory } = VF;
-  const measureCount = Math.max(1, Math.ceil(scoreTotalBeats(state.score) / state.score.beatsPerMeasure));
+  const view = state.scoreView;
+  if (!view) return;
+  const measureCount = Math.max(1, Math.ceil(v2TotalBeats(state.score) / view.beatsPerMeasure));
   const width = Math.max(680, els.scoreEditor.clientWidth || 760);
   const staveWidth = width - 40;
-  const partCount = state.score.parts.length;
+  const partCount = view.parts.length;
   const staveHeight = 62;
   const systemHeight = staveHeight * partCount + 34;
   const height = Math.max(320, systemHeight * 4 + 40);
@@ -324,7 +482,7 @@ function renderScore() {
   const svgElement = els.scoreEditor.querySelector("svg");
 
   const measuresPerLine = 2;
-  state.score.parts.forEach((part, partIndex) => {
+  view.parts.forEach((part, partIndex) => {
     const clef = part.clef === "bass" ? "bass" : part.clef === "alto" ? "alto" : part.clef === "tenor" ? "tenor" : "treble";
     for (let line = 0; line * measuresPerLine < measureCount; line += 1) {
       for (let slot = 0; slot < measuresPerLine; slot += 1) {
@@ -336,15 +494,15 @@ function renderScore() {
         if (measureIndex === 0) {
           stave.addClef(clef);
           if (partIndex === 0) {
-            const keyName = keySignatureName(state.score.keyFifths);
+            const keyName = keySignatureName(view.keyFifths);
             if (keyName) stave.addKeySignature(keyName);
-            stave.addTimeSignature(`${state.score.beatsPerMeasure}/4`);
+            stave.addTimeSignature(`${view.beatsPerMeasure}/${view.beatType}`);
           }
         }
         stave.setContext(svg).draw();
 
         const measure = part.measures[measureIndex] || { beats: [] };
-        const { slots } = buildMeasureSlots(measure, state.score.beatsPerMeasure);
+        const { slots } = buildMeasureSlots(measure, view.beatsPerMeasure);
         const notes = [];
         for (const item of slots) {
           const length = beatsToVfDuration(item.beats);
@@ -421,24 +579,28 @@ function renderScore() {
 function drawNoteHitAreas() {
   const svgElement = els.scoreEditor.querySelector("svg");
   if (!svgElement) return;
-  const measureCount = Math.max(1, Math.ceil(scoreTotalBeats(state.score) / state.score.beatsPerMeasure));
+  const view = state.scoreView;
+  if (!view) return;
+  const measureCount = Math.max(1, Math.ceil(v2TotalBeats(state.score) / view.beatsPerMeasure));
   const measuresPerLine = 2;
   const width = Math.max(680, els.scoreEditor.clientWidth || 760);
   const staveWidth = width - 40;
   const staveHeight = 62;
-  const systemHeight = staveHeight * state.score.parts.length + 34;
+  const systemHeight = staveHeight * view.parts.length + 34;
   let added = 0;
-  state.score.parts.forEach((part, partIndex) => {
+  // 遍历 v1 视图（v2 → v1 转换保证了每个拍位都带 v2Event 引用）
+  view.parts.forEach((part, partIndex) => {
     const clef = part.clef === "bass" ? "bass" : "treble";
     for (let line = 0; line * measuresPerLine < measureCount; line += 1) {
       for (let slot = 0; slot < measuresPerLine; slot += 1) {
         const measureIndex = line * measuresPerLine + slot;
         if (measureIndex >= measureCount) continue;
+        const measure = part.measures[measureIndex];
+        if (!measure) continue;
         const x = 20 + slot * (staveWidth / measuresPerLine);
         const y = 20 + line * systemHeight + partIndex * staveHeight;
-        const measure = part.measures[measureIndex] || { beats: [] };
-        const { slots } = buildMeasureSlots(measure, state.score.beatsPerMeasure);
-        const totalBeats = Math.max(1, state.score.beatsPerMeasure);
+        const { slots } = buildMeasureSlots(measure, view.beatsPerMeasure);
+        const totalBeats = Math.max(1, view.beatsPerMeasure);
         for (const item of slots) {
           const middle = item.startBeats + item.beats / 2;
           const key = item.rest ? (clef === "bass" ? "d/3" : "b/4") : vfKeyFor(item.midi);
@@ -505,10 +667,12 @@ function attachNoteClicks() {
       const noteId = element.dataset.noteId;
       const partId = element.dataset.partId;
       if (partId) {
-        const part = state.score.parts.find((item) => item.id === partId);
-        if (part) {
-          state.activePartId = part.id;
-          els.partSelect.value = part.id;
+        const parts = (state.scoreView && state.scoreView.parts) || [];
+        const index = parts.findIndex((item) => item.id === partId);
+        if (index >= 0) {
+          state.activeRef = { ...state.activeRef, partIndex: index };
+          if (els.partSelect) els.partSelect.value = String(index);
+          refreshStaffVoiceSelectors();
         }
       }
       if (noteId) selectNoteById(noteId, event.shiftKey);
@@ -518,30 +682,32 @@ function attachNoteClicks() {
 
 /* ---------------- 选中 / 编辑 ---------------- */
 function selectNoteById(noteId, extend = false) {
-  for (const part of state.score.parts) {
+  // 在 v1 视图里找（每个拍位带 v2Event 引用）
+  for (const part of (state.scoreView && state.scoreView.parts) || []) {
     for (let measureIndex = 0; measureIndex < part.measures.length; measureIndex += 1) {
-      const note = part.measures[measureIndex].beats.find((item) => item.id === noteId);
+      const note = (part.measures[measureIndex].beats || []).find((item) => item.id === noteId);
       if (!note) continue;
-      if (extend && state.selection && state.selection.partId === part.id) {
-        state.selection = { partId: part.id, fromNote: state.selection.noteId || state.selection.fromNote, toNote: noteId };
-      } else {
-        state.selection = { partId: part.id, noteId, measureIndex };
-      }
-      state.activePartId = part.id;
-      els.partSelect.value = part.id;
+      const partIndex = state.scoreView.parts.indexOf(part);
+      state.selection = { partId: part.id, partIndex, noteId, measureIndex };
+      state.activeRef = { ...state.activeRef, partIndex };
       updateSelectionBar();
+      refreshStaffVoiceSelectors();
       renderScore();
-      playPitch(part, note.midi, ensureAudio().currentTime + 0.01, 0.35);
+      // 点到的音先听一声，确认选对了
+      const midi = note.v2Event ? note.v2Event.midi : note.midi;
+      const beatLength = note.v2Event ? note.v2Event.beats : note.beats;
+      playPitch(part, midi, ensureAudio().currentTime + 0.01,
+        Math.max(0.2, beatLength * (60 / (Number(state.score.tempo) || 84))));
       return;
     }
   }
 }
 
 function selectionBeats() {
-  if (!state.selection) return null;
-  const part = state.score.parts.find((item) => item.id === state.selection.partId);
+  if (!state.selection || !state.scoreView) return null;
+  const part = (state.scoreView.parts || []).find((item) => item.id === state.selection.partId);
   if (!part) return null;
-  const measureBeats = state.score.beatsPerMeasure;
+  const measureBeats = state.scoreView.beatsPerMeasure;
   if (state.selection.noteId) {
     const flat = [];
     part.measures.forEach((measure, measureIndex) => {
@@ -560,21 +726,29 @@ function updateSelectionBar() {
     els.editToolbar.hidden = true;
     return;
   }
-  const part = state.score.parts.find((item) => item.id === state.selection.partId);
-  const note = (part && part.measures[state.selection.measureIndex].beats.find((item) => item.id === state.selection.noteId)) || null;
+  // 在 v1 视图里找选中的拍位（每个拍位带 v2Event 引用）
+  const part = ((state.scoreView && state.scoreView.parts) || [])
+    .find((item) => item.id === state.selection.partId);
+  const note = part && part.measures[state.selection.measureIndex]
+    ? (part.measures[state.selection.measureIndex].beats || [])
+      .find((item) => item.id === state.selection.noteId) || null
+    : null;
   if (!note) {
     els.editToolbar.hidden = true;
     return;
   }
+  const event = note.v2Event || note;
   els.editToolbar.hidden = false;
-  els.selectionInfo.textContent = `已选中：第 ${state.selection.measureIndex + 1} 小节 · ${midiToName(note.midi)} · ${note.beats === 1 ? "1 拍" : `${note.beats} 拍`}`;
+  els.selectionInfo.textContent =
+    `已选中：第 ${state.selection.measureIndex + 1} 小节 · ${midiToName(event.midi)} · ` +
+    `${event.beats === 1 ? "1 拍" : `${event.beats} 拍`}`;
   els.editActions.replaceChildren();
   const actions = [
-    ["↑ 高半音", () => applySelection((item) => transposeNote(part, item.id, 1))],
-    ["↓ 低半音", () => applySelection((item) => transposeNote(part, item.id, -1))],
-    ["更长（+半拍）", () => applySelection((item) => setNoteBeats(part, item.id, item.beats + 0.5, state.score.beatsPerMeasure))],
-    ["更短（−半拍）", () => applySelection((item) => setNoteBeats(part, item.id, Math.max(0.25, item.beats - 0.5), state.score.beatsPerMeasure))],
-    ["删除这个音", () => applySelection((item) => removeNote(part, item.id), "已删掉这个音。")],
+    ["↑ 高半音", () => applySelectionEvent((target) => changeSelectedMidi(target.midi + 1))],
+    ["↓ 低半音", () => applySelectionEvent((target) => changeSelectedMidi(target.midi - 1))],
+    ["更长（+半拍）", () => applySelectionEvent((target) => changeSelectedBeats(target.beats + 0.5))],
+    ["更短（−半拍）", () => applySelectionEvent((target) => changeSelectedBeats(Math.max(0.25, target.beats - 0.5)))],
+    ["删除这个音", () => deleteSelectedNote()],
     ["取消选中", () => { state.selection = null; updateSelectionBar(); renderScore(); }],
   ];
   for (const [label, handler] of actions) {
@@ -586,6 +760,24 @@ function updateSelectionBar() {
     els.editActions.append(button);
   }
 }
+
+/** 对「当前选中的 v2 事件」做一次修改，并刷新界面。 */
+function applySelectionEvent(mutator) {
+  const event = selectedEvent(currentScore());
+  if (!event) {
+    showToast("请先在谱面上点一个音。");
+    return;
+  }
+  const result = mutator(event);
+  if (result === null) return;
+  if (result && result.ok === false) {
+    showToast(v2ExplainReason(result.reason));
+    return;
+  }
+  pushHistory();
+  afterScoreChange();
+}
+
 
 function applySelection(mutator, message = "已修改。") {
   const part = state.score.parts.find((item) => item.id === state.selection?.partId);
@@ -605,44 +797,63 @@ function applySelection(mutator, message = "已修改。") {
 
 /* ---------------- 界面同步 ---------------- */
 function hasAnyNote() {
-  return state.score.parts.some((part) => part.measures.some((measure) => measure.beats.length > 0));
+  const parts = (state.scoreView && state.scoreView.parts) || [];
+  return parts.some((part) => part.measures.some((measure) => measure.beats.length > 0));
 }
 
 function afterScoreChange(rerender = true) {
-  syncPartSelect();
-  if (rerender) renderScore();
-  else renderScore();
+  syncScoreView();
   updateSelectionBar();
   updateMeasureStatus();
-  els.scoreEmpty.hidden = hasAnyNote();
+  syncPartSelect();
+  refreshStaffVoiceSelectors();
+  buildMarkGroups();
+  if (rerender) renderScore();
+  syncHistoryButtons();
 }
 
+
 function updateMeasureStatus() {
-  const part = activePart();
-  if (!part) return;
+  const parts = (state.scoreView && state.scoreView.parts) || [];
+  const part = parts[state.activeRef.partIndex] || parts[0];
+  if (!part) {
+    els.measureStatus.textContent = "还没有音符";
+    return;
+  }
   const last = part.measures[part.measures.length - 1];
-  const remaining = remainingBeats(last, state.score.beatsPerMeasure);
+  if (!last) {
+    els.measureStatus.textContent = "第 1 小节还差 " + state.scoreView.beatsPerMeasure + " 拍";
+    return;
+  }
+  const remaining = remainingBeats(last, state.scoreView.beatsPerMeasure);
   const index = part.measures.length;
   els.measureStatus.textContent = remaining > 1e-9
     ? `第 ${index} 小节还差 ${remaining} 拍`
     : `第 ${index} 小节已满，下一个音会进第 ${index + 1} 小节`;
 }
 
-function syncPartSelect() {
-  els.partSelect.replaceChildren();
-  for (const part of state.score.parts) {
-    const option = document.createElement("option");
-    option.value = part.id;
-    option.textContent = part.name;
-    els.partSelect.append(option);
-  }
-  els.partSelect.value = state.activePartId;
-  els.removePart.disabled = state.score.parts.length <= 1;
-  const part = activePart();
+/** 同步「当前声部」相关的控件（音色/谱号/删除按钮可用性）。 */
+function syncActivePartControls() {
+  const parts = (state.scoreView && state.scoreView.parts) || [];
+  if (els.removePart) els.removePart.disabled = parts.length <= 1;
+  const part = parts[state.activeRef.partIndex];
   if (part) {
-    els.scoreClef.value = part.clef;
-    els.scoreTimbre.value = part.timbre;
+    if (els.scoreTimbre) els.scoreTimbre.value = part.timbre || "piano";
   }
+}
+
+function syncPartSelect() {
+  if (!els.partSelect) return;
+  const parts = (state.scoreView && state.scoreView.parts) || [];
+  els.partSelect.replaceChildren();
+  parts.forEach((part, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = part.name;
+    if (index === state.activeRef.partIndex) option.selected = true;
+    els.partSelect.append(option);
+  });
+  syncActivePartControls();
 }
 
 function buildKeyboard() {
@@ -789,26 +1000,176 @@ function buildTimbreOptions() {
 }
 
 /* ---------------- 输入：加音 / 删除 ---------------- */
+/**
+ * 「＋ 加进乐谱」：把当前选中的音高/时值加到当前声部线的末尾。
+ *
+ * v2 模型里这就是「在光标位置 append 一个事件」；光标 = 该 voice 已用到的最远拍位。
+ * 失败（拍位冲突等）会明确告诉用户原因，不再静默丢数据。
+ */
 function addCurrentNote() {
-  const part = activePart();
-  if (!part) return;
-  const used = usedBeats(part.measures[part.measures.length - 1] || { beats: [] });
-  const measureFull = used >= state.score.beatsPerMeasure - 1e-9;
-  pushHistory();
-  const event = state.restMode
-    ? { rest: true, beats: state.beats }
-    : { midi: state.pitch, beats: state.beats };
-  const placed = appendNote(part, event, state.score.beatsPerMeasure);
-  state.selection = { partId: part.id, noteId: placed.note.id, measureIndex: placed.measureIndex };
-  afterScoreChange();
-  if (!state.restMode) {
-    playPitch(part, state.pitch, ensureAudio().currentTime + 0.01, Math.max(0.25, state.beats * (60 / state.score.tempo)));
+  const score = currentScore();
+  if (!score) return;
+  const beatValue = Number(state.beats) || 1;
+  const result = v2AppendNote(score, state.activeRef, {
+    midi: state.pitch, beats: beatValue, rest: state.restMode,
+  });
+  if (!result.ok) {
+    showToast(v2ExplainReason(result.reason));
+    return;
   }
-  const what = state.restMode ? "一个休止符" : midiToName(state.pitch);
-  showToast(measureFull ? `已加到第 ${placed.measureIndex + 1} 小节开头。` : `第 ${placed.measureIndex + 1} 小节加了${what}。`);
+  pushHistory();
+  afterScoreChange();
+  refreshStaffVoiceSelectors();
+  // 加完试听一下，确认是对的
+  playPitch(activePart(), state.restMode ? 0 : state.pitch,
+    ensureAudio().currentTime + 0.01, beatValue * (60 / (number(els.scoreTempo.value) || 84)));
 }
 
-/* ---------------- 导出 ---------------- */
+/** 「叠到选中的音上」：把当前音高作为和弦音叠加到谱面上选中的那个音。 */
+function addChordToneToSelection() {
+  const score = currentScore();
+  if (!score) return;
+  const selected = selectedEvent(score);
+  if (!selected) {
+    showToast("请先在下方谱面里点一个音，再叠加和弦。");
+    return;
+  }
+  const result = v2AppendChordTone(score, state.activeRef, selected.id, state.pitch);
+  if (!result.ok) {
+    showToast(v2ExplainReason(result.reason));
+    return;
+  }
+  pushHistory();
+  syncScoreView();      // 立刻刷新视图，界面上能看到和弦
+  afterScoreChange();
+  showToast("已叠加上去，这个拍位现在是和弦。");
+}
+
+/** 谱面上当前选中的 v2 事件（点音符行得到）。 */
+function selectedEvent(score) {
+  const view = state.scoreView;
+  if (!view || !state.selection) return null;
+  const noteId = state.selection.noteId;
+  if (!noteId) return null;
+  // v1 拍位带 v2Event 引用
+  for (const part of view.parts || []) {
+    for (const measure of part.measures || []) {
+      for (const beat of measure.beats || []) {
+        if (beat.id === noteId && beat.v2Event) return beat.v2Event;
+      }
+    }
+  }
+  return null;
+}
+
+/** 删除选中的音。 */
+function deleteSelectedNote() {
+  const score = currentScore();
+  const selected = selectedEvent(score);
+  if (!selected) {
+    showToast("请先点一个要删掉的音。");
+    return;
+  }
+  const result = v2DeleteEvent(score, state.activeRef, selected.id);
+  if (!result.ok) {
+    showToast(v2ExplainReason(result.reason));
+    return;
+  }
+  pushHistory();
+  state.selection = null;
+  afterScoreChange();
+  refreshStaffVoiceSelectors();
+  showToast("已删掉这个音。");
+}
+
+/** 改选中音的时值（右侧「时值」点一下就直接改这个音）。 */
+function changeSelectedBeats(beats) {
+  const score = currentScore();
+  const selected = selectedEvent(score);
+  if (!selected) return null;
+  return v2ChangeEventBeats(score, state.activeRef, selected.id, beats);
+}
+
+/** 改选中音的音高。 */
+function changeSelectedMidi(midi) {
+  const score = currentScore();
+  const selected = selectedEvent(score);
+  if (!selected) return null;
+  return v2ChangeEventMidi(score, state.activeRef, selected.id, midi);
+}
+
+/** 给选中的音加/取消一个记号。 */
+function toggleMarkOnSelection(key, value) {
+  const score = currentScore();
+  const selected = selectedEvent(score);
+  if (!selected) {
+    showToast("请先在谱面里点一个音，再加记号。");
+    return null;
+  }
+  const result = v2ToggleFlag(score, state.activeRef, selected.id, key, value);
+  if (!result.ok) {
+    showToast(v2ExplainReason(result.reason));
+    return null;
+  }
+  pushHistory();
+  afterScoreChange();
+  return result;
+}
+
+/** 加一条声部线（同一行谱表里并行写第二条，例如钢琴左手伴奏）。 */
+function addVoiceLine() {
+  const score = currentScore();
+  const result = v2AddVoiceTo(score, state.activeRef);
+  if (!result.ok) {
+    showToast(v2ExplainReason(result.reason));
+    return;
+  }
+  pushHistory();
+  state.activeRef = { ...state.activeRef, voiceIndex: result.voiceIndex };
+  afterScoreChange();
+  refreshStaffVoiceSelectors();
+  showToast("已新开一条声部线，现在写的是它。");
+}
+
+/** 加一行谱表（钢琴的低音谱表、或再分一行写）。 */
+function addStaffLine() {
+  const score = currentScore();
+  const result = v2AddStaffTo(score, state.activeRef);
+  if (!result.ok) {
+    showToast(v2ExplainReason(result.reason));
+    return;
+  }
+  pushHistory();
+  state.activeRef = { ...state.activeRef, staffIndex: result.staffIndex, voiceIndex: 0 };
+  afterScoreChange();
+  refreshStaffVoiceSelectors();
+  showToast("已加一行谱表。");
+}
+
+/**
+ * 每小节后面加一个空小节（写满当前小节时用）。
+ * v2 里小节是「算出来的」，所以这里做的是确保「有音写到那一拍」——
+ * 用一个占位休止把长度顶到目标小节数。
+ */
+function appendMeasureIfNeeded() {
+  const score = currentScore();
+  if (!score) return;
+  const per = v2BeatsPerMeasure(score);
+  const total = v2TotalBeats(score);
+  const target = Math.ceil(total / per) * per + per;
+  const voice = v2CurrentVoice(score, state.activeRef);
+  if (!voice) return;
+  // 在末尾补一个全小节休止（界面看起来就是多了一个空小节）
+  v2AppendNote(score, state.activeRef, { midi: 0, beats: target - total, rest: true });
+  pushHistory();
+  afterScoreChange();
+}
+
+function number(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function download(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -874,27 +1235,32 @@ async function exportPng() {
 }
 
 function exportMusicXml() {
-  if (!hasAnyNote()) {
-    showToast("还没有音符，先写几个音再导出。");
-    return;
-  }
-  const xml = scoreToMusicXml(state.score);
+  // v2 → MusicXML 精确互转（音符/拍位/时值/调号/拍号/速度全部保留）
+  const xml = v2ToMusicXml(state.score);
   download(new Blob([xml], { type: "application/vnd.recordare.musicxml+xml" }), `${safeName()}.musicxml`);
-  showToast("MusicXML 已下载，可用 MuseScore 等软件打开或打印。");
+  showToast("MusicXML 已下载，可用 MuseScore、Finale 等继续编辑或打印。");
 }
+
 
 function exportMidi() {
   if (!hasAnyNote()) {
     showToast("还没有音符，先写几个音再导出。");
     return;
   }
-  const midi = scoreToMidi(state.score);
+  // scoreToMidi 是 v1 API：给它 v1 视图（v2 → v1 已保证拍位/时值/和弦一致）
+  const midi = scoreToMidi(state.scoreView);
   download(new Blob([midi], { type: "audio/midi" }), `${safeName()}.mid`);
   showToast("MIDI 已下载。");
 }
 
 function exportProject() {
-  download(new Blob([scoreToProjectJson(state.score)], { type: "application/json" }), `${safeName()}.pujian.json`);
+  // 存 v2（多声部/绝对拍位/记号都在）；加载时自动识别新旧格式
+  const payload = JSON.stringify({
+    version: 2,
+    score: state.score,
+    saved: new Date().toISOString(),
+  }, null, 1);
+  download(new Blob([payload], { type: "application/json" }), `${safeName()}.pujian.json`);
   showToast("工程文件已下载，下次「导入工程」可以继续改。");
 }
 
@@ -924,56 +1290,117 @@ async function importProject(file) {
  */
 async function importMusicXmlFile(file) {
   try {
-    const { parseMusicXmlText, readMusicXmlFile } = await import("./musicxml.js");
-    // keepRests：创作室要保留休止符，才能还原原谱的停顿（工作台默认不保留，语义不变）
-    const parseOptions = { keepRests: true };
-    const scoreInfo = /\.mxl$/i.test(file.name)
-      ? await readMusicXmlFile(file, parseOptions)
-      : parseMusicXmlText(await file.text(), parseOptions);
-    if (!scoreInfo || !scoreInfo.notes || !scoreInfo.notes.length) {
-      showToast("这份乐谱里没有读到音符。");
+    // 直接进 v2 模型：精确互转（音符/拍位/时值/调号/拍号/速度/并行声部全部保留）
+    const source = /\.mxl$/i.test(file.name)
+      ? await readMxlZip(file)
+      : await file.text();
+    let score;
+    try {
+      score = musicXmlToV2(source).score;
+    } catch (error) {
+      showToast("这份乐谱读不进来：" + ((error && error.message) || "格式不支持"));
       return;
     }
-    const { score, stats } = scoreInfoToComposerScore(scoreInfo, {
-      title: scoreInfo.title || file.name.replace(/\.[^.]+$/, ""),
-    });
-    if (!score.parts.length || !stats.notes) {
+    // 用 v2 的展开函数（v1 的 scoreToPlayableNotes 读不了 v2 结构）
+    const notes = v2PlayableNotes(score);
+    if (!notes.length) {
       showToast("这份乐谱里没有读到音符。");
       return;
     }
     pushHistory();
     state.score = score;
-    state.activePartId = score.parts[0].id;
+    state.activeRef = { ...DEFAULT_REF };
     syncSettingsInputs();
     afterScoreChange();
-    // 如实报数：音符数按「谱面上印了几个音」算（跨小节的长音被拆成两段但仍是同一个音）。
+    // 如实报数（数「原谱印了几个音」，不含跨小节拆段）
+    const voices = score.parts.reduce((sum, part) => sum
+      + (part.staves || []).reduce((inner, staff) => inner + (staff.voices || []).length, 0), 0);
+    const staves = score.parts.reduce((sum, part) => sum + (part.staves || []).length, 0);
+    const chords = score.parts.reduce((sum, part) => sum
+      + (part.staves || []).reduce((inner, staff) => inner
+        + (staff.voices || []).reduce((deep, voice) => deep
+          + (voice.events || []).filter((event) => event.chordWith).length, 0), 0), 0);
     const details = [];
-    if (stats.chordEntries) details.push(`${stats.chordEntries} 处和弦`);
-    if (stats.tieSegments) details.push(`${stats.tieSegments} 处跨小节连音`);
-    if (stats.parts > 1) details.push(`按 ${stats.parts} 条声部线拆开`);
-    const lost = Math.max(0, (stats.sourceNotes || 0) - stats.notes);
-    showToast(`已导入「${score.title}」：${stats.parts} 条声部线、${stats.notes} 个音` +
-      `${details.length ? `（${details.join("、")}）` : ""}、${stats.measures} 小节` +
-      (lost > 0 ? `。注意：原谱有 ${stats.sourceNotes} 个音，其中 ${lost} 个因多声部重叠无法自动排准，建议逐段核对` : "") +
-      "。可以直接改，也可以导出。");
+    if (voices > 1) details.push(`${voices} 条声部线`);
+    if (chords) details.push(`${chords} 处和弦`);
+    if (staves > 1) details.push(`${staves} 行谱表`);
+    showToast(`已导入「${score.title}」：${notes.length} 个音` +
+      `${details.length ? `（${details.join("、")}）` : ""}、可直接改也可导出。`);
   } catch (error) {
     console.info("导入乐谱失败", error);
     showToast("这份乐谱读不进来：" + ((error && error.message) || "格式不支持"));
   }
 }
 
+/** 读 MXL（zip 里的 MusicXML）。 */
+async function readMxlZip(file) {
+  const { readMusicXmlFile } = await import("./musicxml.js");
+  return readMusicXmlFile(file);
+}
+
 function syncSettingsInputs() {
-  els.scoreTitle.value = state.score.title;
-  els.scoreTempo.value = state.score.tempo;
-  els.scoreBeats.value = String(state.score.beatsPerMeasure);
-  els.scoreKey.value = String(state.score.keyFifths);
+  const score = currentScore();
+  if (!score) return;
+  els.scoreTitle.value = score.title || "未命名乐谱";
+  els.scoreTempo.value = String(score.tempo || 84);
+  const time = score.timeSignature || { beats: 4, beatType: 4 };
+  els.scoreBeats.value = String(time.beats);
+  els.scoreKey.value = String(score.keyFifths || 0);
+  const ref = v2ClampVoiceRef(score, state.activeRef);
+  const part = (score.parts || [])[ref.partIndex];
+  const staff = part && (part.staves || [])[ref.staffIndex];
+  if (staff && els.scoreClef) els.scoreClef.value = staff.clef || "treble";
   syncPartSelect();
 }
+
+/** 把设置项的改动写回 v2。 */
+function applySettings() {
+  const score = currentScore();
+  if (!score) return;
+  const beats = Number(els.scoreBeats.value) || 4;
+  score.title = els.scoreTitle.value.trim() || "未命名乐谱";
+  score.tempo = Math.min(320, Math.max(20, Number(els.scoreTempo.value) || 84));
+  score.timeSignature = {
+    beats: Math.min(12, Math.max(1, Math.round(beats))),
+    beatType: (score.timeSignature || {}).beatType || 4,
+  };
+  score.keyFifths = Math.min(7, Math.max(-7, Number(els.scoreKey.value) || 0));
+  const ref = v2ClampVoiceRef(score, state.activeRef);
+  const part = (score.parts || [])[ref.partIndex];
+  if (part && part.staves && part.staves[ref.staffIndex]) {
+    part.staves[ref.staffIndex].clef = els.scoreClef.value || "treble";
+  }
+  afterScoreChange();
+}
+
 
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
   els.addNote.addEventListener("click", addCurrentNote);
   els.undo.addEventListener("click", undo);
+  for (const [element, handler] of [
+    [els.scoreTitle, () => applySettings()],
+    [els.scoreTempo, () => applySettings()],
+    [els.scoreBeats, () => applySettings()],
+    [els.scoreKey, () => applySettings()],
+    [els.scoreClef, () => applySettings()],
+  ]) {
+    if (element) element.addEventListener("change", handler);
+  }
+
+  if (els.addVoice) els.addVoice.addEventListener("click", addVoiceLine);
+  if (els.addStaff) els.addStaff.addEventListener("click", addStaffLine);
+  if (els.chordToneButton) els.chordToneButton.addEventListener("click", addChordToneToSelection);
+  if (els.staffSelector) els.staffSelector.addEventListener("change", () => {
+    state.activeRef = { ...state.activeRef, staffIndex: Number(els.staffSelector.value) || 0, voiceIndex: 0 };
+    refreshStaffVoiceSelectors();
+    updateMeasureStatus();
+  });
+  if (els.voiceSelector) els.voiceSelector.addEventListener("change", () => {
+    state.activeRef = { ...state.activeRef, voiceIndex: Number(els.voiceSelector.value) || 0 };
+    refreshStaffVoiceSelectors();
+    updateMeasureStatus();
+  });
   els.redo.addEventListener("click", redo);
 
   els.pitchDown.addEventListener("click", () => { state.pitch = Math.max(0, state.pitch - 1); updatePitchReadout(); markActiveKey(); playPitch(activePart(), state.pitch, ensureAudio().currentTime + 0.01, 0.35); });
@@ -988,15 +1415,17 @@ function bindEvents() {
 
   els.addPart.addEventListener("click", () => {
     pushHistory();
-    const part = createPart({ name: `声部 ${state.score.parts.length + 1}` });
+    // v2：加一个「声部」（演奏单元），默认带一行谱表一条声部线
+    const part = createV2Part({ name: `声部 ${state.score.parts.length + 1}` });
     state.score.parts.push(part);
-    state.activePartId = part.id;
+    state.activeRef = { partIndex: state.score.parts.length - 1, staffIndex: 0, voiceIndex: 0 };
     afterScoreChange();
     showToast("新声部已加好，它会和别的声部一起演奏。");
   });
 
   els.renamePart.addEventListener("click", () => {
-    const part = activePart();
+    const ref = state.activeRef;
+    const part = (state.score.parts || [])[ref.partIndex];
     if (!part) return;
     const name = window.prompt("给这个声部起个名字", part.name);
     if (!name) return;
@@ -1102,7 +1531,10 @@ if (els.musicXmlInput) els.musicXmlInput.addEventListener("change", async () => 
 
 /* ---------------- 启动 ---------------- */
 async function boot() {
-  state.activePartId = state.score.parts[0].id;
+  // v2 模型：多声部 + 绝对拍位（同一小节可并行多条声部线）
+  state.score = createV2Score({ title: "未命名乐谱", tempo: 84 });
+  state.activeRef = { ...DEFAULT_REF };
+  syncScoreView();
   buildKeyboard();
   buildValueChips();
   buildTimbreOptions();

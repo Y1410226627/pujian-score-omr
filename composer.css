@@ -229,3 +229,35 @@
   .guide-grid { grid-template-columns: 1fr; }
   .setting-grid { grid-template-columns: 1fr; }
 }
+
+
+/* ---------- v2：谱表/声部线选择、记号面板 ---------- */
+.mark-groups { display: grid; gap: 10px; margin-top: 6px; }
+.mark-group { display: grid; gap: 4px; }
+.mark-title { font-size: 11px; color: #7d8a82; }
+.mark-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+.chip-mark small { font-size: 10px; }
+.chip-mark.is-active { background: var(--green); border-color: var(--green-dark); color: #fff; }
+.chip-mark.is-active .dynamic-glyph { color: #fff; }
+
+/* 力度记号：用字号体现强弱，比纯文字直观 */
+.dynamic-glyph { font-weight: 700; color: #2f3b34; }
+.dyn-ppp { font-size: 9px; opacity: .55; }
+.dyn-pp { font-size: 11px; opacity: .65; }
+.dyn-p { font-size: 12px; opacity: .78; }
+.dyn-mp { font-size: 13px; }
+.dyn-mf { font-size: 14px; font-weight: 800; }
+.dyn-f { font-size: 15px; font-weight: 800; opacity: .9; }
+.dyn-ff { font-size: 16px; font-weight: 900; }
+.dyn-fff { font-size: 18px; font-weight: 900; }
+.dyn-sfz, .dyn-fp { font-size: 13px; font-weight: 800; color: #b5563a; }
+
+#staffSelector, #voiceSelector { min-width: 120px; }

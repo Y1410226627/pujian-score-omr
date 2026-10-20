@@ -198,7 +198,7 @@ FluidR3_GM，需按各自许可署名；SSO 的样本被转成 24 kHz 单声道�
 npm test          # 或 node --test "tests/**/*.test.mjs"（本机受限环境下逐个文件跑：node tests/xxx.test.mjs）
 ```
 
-当前共 **167 个单元/回归测试**，另有 9 个需要浏览器（Edge + playwright-core）的端到端脚本（e2e-audio 音色、e2e-jianpu 简谱、e2e-composer 创作室、e2e-workbench 变速/编辑/加厚/流畅度、e2e-audio-export 导出 MP3、e2e-hall-export 真实长曲子导出、e2e-composer-friendly 零基础符号可视化、e2e-real-import 真实乐谱导入）。
+当前共 **201 个单元/回归测试**，另有 9 个需要浏览器（Edge + playwright-core）的端到端脚本（`e2e-audio` 音色、`e2e-jianpu` 简谱、`e2e-composer` 创作室、`e2e-workbench` 变速/编辑/加厚/流畅度、`e2e-audio-export` 导出 MP3、`e2e-hall-export` 真实长曲子导出、`e2e-composer-friendly` 零基础符号可视化、`e2e-composer-v2` 多声部复刻、`e2e-composer-fidelity` 真实乐谱逐音对账）。
 采样音源相关的端到端测试会在**没装音源的机器上自动跳过**（装了才跑）。
 
 - `tests/musicxml.test.mjs`：MusicXML 解析（和弦/休止/连音线/速度/力度/调性/微分音）、悬空连音线、弱起小节、
