@@ -17,7 +17,7 @@
 - **多乐器多声部**：可以加任意多个声部，每个声部单独选音色（含二胡、古筝、长笛、合唱等采样音色）与谱号，一起演奏。
 - **随时试听**：整首 / 从选中的音开始 / 只听选中的一段（点一个音选中，Shift+点另一个音选一段），支持循环。
 - **改错很方便**：撤销/重做、点音符选中后升降半音、加长缩短、删除。
-- **导出四种东西**：MusicXML（MuseScore、Finale 等都能打开/打印）、MIDI（任何音乐软件都能放）、
+- **导出四种东西**：MusicXML（MuseScore、Finale 等都能打开/打印）、MIDI（任何音乐软件都能放）、MP3 音频（手机/微信/音箱直接放）、
   工程文件（下次导入继续改），以及直接打印浏览器里的五线谱。
 - 快捷键：`↑`/`↓` 换音高、`Enter` 加音、`Delete` 删音、`Ctrl+Z` 撤销、`空格` 试听、`Esc` 停止。
 
@@ -198,7 +198,7 @@ FluidR3_GM，需按各自许可署名；SSO 的样本被转成 24 kHz 单声道�
 npm test          # 或 node --test "tests/**/*.test.mjs"（本机受限环境下逐个文件跑：node tests/xxx.test.mjs）
 ```
 
-当前共 **123 个单元/回归测试**，另有 4 个需要浏览器（Edge + playwright-core）的端到端脚本（e2e-audio 音色、e2e-jianpu 简谱、e2e-composer 创作室、e2e-workbench 变速/编辑/加厚/流畅度）。
+当前共 **147 个单元/回归测试**，另有 6 个需要浏览器（Edge + playwright-core）的端到端脚本（`e2e-audio` 音色、`e2e-jianpu` 简谱、`e2e-composer` 创作室、`e2e-workbench` 变速/编辑/加厚/流畅度、`e2e-audio-export` 导出 MP3、`e2e-hall-export` 真实长曲子导出）。
 采样音源相关的端到端测试会在**没装音源的机器上自动跳过**（装了才跑）。
 
 - `tests/musicxml.test.mjs`：MusicXML 解析（和弦/休止/连音线/速度/力度/调性/微分音）、悬空连音线、弱起小节、

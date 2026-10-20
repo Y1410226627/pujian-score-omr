@@ -13,6 +13,9 @@ import {
   SAMPLED_TIMBRES, SAMPLED_TARGET_RMS, isSampledTimbre, fetchSampleManifest, loadSampleBank, lookupSample,
 } from "./sampler.js";
 import { detectStartTempo, playbackTempoSegments, midiTempoEvents, clampTempo } from "./tempo.js";
+import {
+  buildAudioPlan, normalizePeak, stereoChannels, audioFileName, formatDuration, secondsAtBeat,
+} from "./audio-export.js";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -32,7 +35,8 @@ const els = {
   scoreDetails: byId("scoreDetails"), scoreWarnings: byId("scoreWarnings"), noteCount: byId("noteCount"), noteList: byId("noteList"),
   partPanel: byId("partPanel"), partList: byId("partList"), partSelectAll: byId("partSelectAll"),
   partSelectNone: byId("partSelectNone"), pianoToggle: byId("pianoToggle"), pianoToggleWrap: byId("pianoToggleWrap"),
-  notesEmpty: byId("notesEmpty"), addNoteButton: byId("addNoteButton"), midiButton: byId("midiButton"), playButton: byId("playButton"),
+  notesEmpty: byId("notesEmpty"), addNoteButton: byId("addNoteButton"), midiButton: byId("midiButton"),
+  audioButton: byId("audioButton"), audioExportLabel: byId("audioExportLabel"), playButton: byId("playButton"),
   playIcon: byId("playIcon"), playLabel: byId("playLabel"), stopButton: byId("stopButton"),
   tempoInput: byId("tempoInput"), toast: byId("toast"), chooseFileButton: byId("chooseFileButton"),
   recognitionBanner: byId("recognitionBanner"), recognitionSource: byId("recognitionSource"), recognitionDetail: byId("recognitionDetail"),
@@ -1572,6 +1576,7 @@ function updatePlaybackReady() {
   els.noteCount.innerHTML = activeNotes.length + " <small>个</small>";
   els.playButton.disabled = activeNotes.length === 0 || activeNotes.some((note) => !Number.isFinite(note.midi)) || state.isPlaying;
   els.midiButton.disabled = activeNotes.length === 0;
+  if (els.audioButton) els.audioButton.disabled = activeNotes.length === 0 || state.isPlaying;
   els.midiButton.title = selectionRange() ? "下载所选片段的 MIDI 文件" : "下载 MIDI 文件";
   // 播放控件文案与选区状态保持一致：没有选区时就是「播放全曲」，选了片段就只播那一段。
   els.playIcon.textContent = state.isPlaying ? "Ⅱ" : "▶";
@@ -2741,6 +2746,288 @@ function buildMidiFile(notes = getPlaybackNotes(), offset = 0) {
   const trackHeader = [0x4d, 0x54, 0x72, 0x6b, (track.length >>> 24) & 0xff, (track.length >>> 16) & 0xff, (track.length >>> 8) & 0xff, track.length & 0xff];
   return new Blob([new Uint8Array([...header, ...trackHeader, ...track])], { type: "audio/midi" });
 }
+
+// ===== 导出 MP3 / WAV 音频 =====
+/** 采样率与码率：44.1 kHz / 128 kbps 立体声，兼容性最好。 */
+const AUDIO_EXPORT_RATE = 44100;
+const AUDIO_EXPORT_KBPS = 128;
+
+/**
+ * 离线渲染整曲（或选中片段）为 AudioBuffer。
+ *
+ * 复用实时播放用的同一套发声函数（playTone / partBus / masterChain），
+ * 所以导出听到的声音 = 试听到的声音（含分段变速、逐声部音色与音量、混响压限）。
+ */
+async function renderPlanToBuffer(plan, { onProgress } = {}) {
+  const total = Math.max(1, Math.ceil(plan.totalSeconds * AUDIO_EXPORT_RATE));
+  const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!OfflineContext) throw new Error("当前浏览器不支持离线音频渲染。");
+  const offline = new OfflineContext(2, total, AUDIO_EXPORT_RATE);
+  // 保存实时上下文状态，渲染结束后原样恢复
+  const backup = {
+    audio: state.audio,
+    master: state.master,
+    reverbBuffer: state.reverbBuffer,
+    vibrato: state.vibrato,
+    noiseBuffer: state.noiseBuffer,
+    waves: new Map(state.waves),
+    partBuses: new Map(state.partBuses),
+    partPanners: new Map(state.partPanners),
+    sources: new Set(state.sources),
+  };
+  try {
+    state.audio = offline;
+    state.master = null;
+    state.reverbBuffer = null;
+    state.vibrato = null;
+    state.noiseBuffer = null;
+    state.waves = new Map();
+    state.partBuses = new Map();
+    state.partPanners = new Map();
+    state.sources = new Set();
+    // 按开始时间顺序调度（同一时刻的和弦也逐个建节点，不影响结果）
+    for (let index = 0; index < plan.notes.length; index += 1) {
+      const note = plan.notes[index];
+      const destination = partBus(note.partKey);
+      // 导出时把声部音量乘进峰值：playTone 的 peak 参数已经包含力度，这里再叠音量
+      // 声部音量由 partBus 的总线增益负责（与试听完全一致），这里不要再乘一次。
+      // 若这里再乘 note.volume，实际听到的是「音量²」，滑到 50% 就只剩 25% 响度。
+      playTone(note.midi, note.startSeconds + 0.02, note.durationSeconds * 0.99,
+        note.peak, destination, note.partKey);
+      if (onProgress && index % 200 === 0) {
+        onProgress(index / Math.max(1, plan.notes.length), `正在安排音符 ${index + 1} / ${plan.notes.length}`);
+      }
+    }
+    if (onProgress) onProgress(0.85, "正在渲染音频…");
+    const buffer = await offline.startRendering();
+    return buffer;
+  } finally {
+    state.audio = backup.audio;
+    state.master = backup.master;
+    state.reverbBuffer = backup.reverbBuffer;
+    state.vibrato = backup.vibrato;
+    state.noiseBuffer = backup.noiseBuffer;
+    state.waves = backup.waves;
+    state.partBuses = backup.partBuses;
+    state.partPanners = backup.partPanners;
+    state.sources = backup.sources;
+  }
+}
+
+/** 懒加载本地 MP3 编码器（vendor/lamejs，不联网）。 */
+let lameLoading = null;
+function loadLame() {
+  if (window.lamejs || window.Mp3Encoder) return Promise.resolve(true);
+  if (lameLoading) return lameLoading;
+  lameLoading = new Promise((resolve) => {
+    const script = document.createElement("script");
+    script.src = "vendor/lamejs/lame.min.js";
+    script.onload = () => {
+      // lamejs 单文件是「函数」形式，调用后才挂到全局
+      if (typeof window.lamejs === "function" && !window.Mp3Encoder) {
+        try { window.lamejs(); } catch (error) { console.info("lamejs 初始化失败", error); }
+      }
+      resolve(Boolean(window.lamejs && window.lamejs.Mp3Encoder));
+    };
+    script.onerror = () => resolve(false);
+    document.head.append(script);
+  });
+  return lameLoading;
+}
+
+/** PCM（左右声道 Float32）→ MP3 Blob。 */
+function encodeMp3(left, right, sampleRate = AUDIO_EXPORT_RATE, kbps = AUDIO_EXPORT_KBPS) {
+  const Encoder = window.lamejs && window.lamejs.Mp3Encoder;
+  if (!Encoder) throw new Error("MP3 编码器不可用");
+  const encoder = new Encoder(2, sampleRate, kbps);
+  const leftPcm = new Int16Array(left.length);
+  const rightPcm = new Int16Array(right.length);
+  for (let index = 0; index < left.length; index += 1) {
+    leftPcm[index] = Math.max(-32768, Math.min(32767, Math.round(left[index] * 32767)));
+    rightPcm[index] = Math.max(-32768, Math.min(32767, Math.round(right[index] * 32767)));
+  }
+  const chunks = [];
+  const blockSize = 1152;
+  for (let offset = 0; offset < leftPcm.length; offset += blockSize) {
+    const leftChunk = leftPcm.subarray(offset, offset + blockSize);
+    const rightChunk = rightPcm.subarray(offset, offset + blockSize);
+    const encoded = encoder.encodeBuffer(leftChunk, rightChunk);
+    if (encoded.length > 0) chunks.push(new Int8Array(encoded));
+  }
+  const tail = encoder.flush();
+  if (tail.length > 0) chunks.push(new Int8Array(tail));
+  return new Blob(chunks, { type: "audio/mpeg" });
+}
+
+/** WAV 兜底（16 位 PCM 立体声）。 */
+function encodeWav(left, right, sampleRate = AUDIO_EXPORT_RATE) {
+  const frames = left.length;
+  const bytesPerSample = 2;
+  const dataSize = frames * 2 * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const writeText = (offset, value) => {
+    for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
+  };
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeText(8, "WAVE");
+  writeText(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);          // PCM
+  view.setUint16(22, 2, true);          // 立体声
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2 * bytesPerSample, true);
+  view.setUint16(32, 2 * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeText(36, "data");
+  view.setUint32(40, dataSize, true);
+  let offset = 44;
+  for (let index = 0; index < frames; index += 1) {
+    view.setInt16(offset, Math.max(-32768, Math.min(32767, Math.round(left[index] * 32767))), true);
+    view.setInt16(offset + 2, Math.max(-32768, Math.min(32767, Math.round(right[index] * 32767))), true);
+    offset += 4;
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+/**
+ * 导出音频主流程（按钮入口）。
+ *
+ * 「任意音高 / 任意响度 / 任意乐器 / 任意声部 / 任意片段」分别对应：
+ *   音高 → 右下「整体移调」+ 声部八度下拉（都进 buildAudioPlan）
+ *   响度 → 声部音量滑条
+ *   乐器 → 全局音色 + 逐声部音色
+ *   声部 → 声部勾选
+ *   片段 → 音符选区（点序号 / Shift+点）
+ */
+async function exportAudio() {
+  const playbackNotes = getPlaybackNotes();
+  if (!playbackNotes.length) {
+    showToast("还没有音符，先识别或导入一份乐谱。");
+    return;
+  }
+  if (state.isPlaying) stopPlayback();
+  const selection = selectionRange();
+  const { notes: timelineNotes } = playbackTimeline();
+  const offset = timelineNotes.length
+    ? Math.min(...timelineNotes.map((note) => Number(note.startBeat) || 0))
+    : 0;
+  const scoreInfo = state.scoreInfo || {};
+  const tempoPlan = playbackTempoSegments(scoreInfo.tempoMarks || [], {
+    offset: 0,
+    userBpm: clampTempo(Number(els.tempoInput.value) || 84),
+    detectedBpm: scoreInfo.tempo,
+  });
+  const beatRange = selection
+    ? (() => {
+        const starts = selection.ids
+          .map((id) => state.notes.find((note) => note.id === id))
+          .filter(Boolean)
+          .map((note) => Number(note.startBeat) || 0);
+        const ends = selection.ids
+          .map((id) => state.notes.find((note) => note.id === id))
+          .filter(Boolean)
+          .map((note) => (Number(note.startBeat) || 0) + beatsForNote(note));
+        return starts.length ? { fromBeat: Math.min(...starts), toBeat: Math.max(...ends) } : null;
+      })()
+    : null;
+  const plan = buildAudioPlan({
+    notes: playbackNotes,
+    tempoSegments: [{ beat: 0, bpm: tempoPlan.startBpm }, ...tempoPlan.segments],
+    startBpm: tempoPlan.startBpm,
+    enabledParts: null,
+    partTimbres: state.partTimbres,
+    globalTimbre: state.timbre,
+    partVolumes: state.partVolumes,
+    // 声部八度修正已经写进了 note.midi（setPartOctave 直接改音符），这里不再重复加；
+    // 「整体移调」输入框还没写进音符，所以要在计划里加。
+    partTranspose: new Map(),
+    transpose: Number(els.transposeInput && els.transposeInput.value) || 0,
+    selection: beatRange,
+    tailSeconds: 2.5,
+  });
+  if (!plan.notes.length) {
+    showToast("选中范围内没有音符。");
+    return;
+  }
+  const totalText = formatDuration(plan.totalSeconds);
+  const message = selection
+    ? `准备导出选中片段（${plan.notes.length} 个音，约 ${totalText}）`
+    : `准备导出整曲（${plan.notes.length} 个音，约 ${totalText}）`;
+  els.audioExportLabel.textContent = "正在渲染…";
+  els.audioButton.disabled = true;
+  showToast(message + "，请稍候…");
+  try {
+    // 采样音源没准备好就渲染，那些声部会退回合成音色（和试听不一致）。
+    // 这里把用到的采样音源先都加载完。
+    const neededTimbres = new Set();
+    for (const key of plan.partKeys) neededTimbres.add(timbreForPart(key));
+    for (const timbre of neededTimbres) {
+      if (!isSampledTimbre(timbre)) continue;
+      els.audioExportLabel.textContent = "载入音源…";
+      try {
+        await ensureSampleBank(timbre);
+      } catch (error) {
+        console.info("音源加载失败，这段会用合成音色", timbre, error);
+      }
+    }
+    els.audioExportLabel.textContent = "正在渲染…";
+    els.audioExportLabel.textContent = "渲染中…";
+    const buffer = await renderPlanToBuffer(plan, {
+      onProgress: (fraction, label) => {
+        // 复用识别进度条的位置，但文案必须说清是「导出」，否则用户以为是又在识别
+        setRecognizeProgress(fraction, 1, `导出音频 · ${label}`);
+        els.recognizeProgress.hidden = false;
+      },
+    });
+    const channels = [];
+    for (let index = 0; index < buffer.numberOfChannels; index += 1) {
+      channels.push(buffer.getChannelData(index));
+    }
+    const { left, right } = stereoChannels(channels);
+    const normalized = normalizePeak(left, right, 0.89);
+    els.audioExportLabel.textContent = "编码中…";
+    setRecognizeProgress(0.95, 1, "导出音频 · 正在压缩成 MP3…");
+    let blob = null;
+    let extension = "wav";
+    if (await loadLame()) {
+      try {
+        blob = encodeMp3(normalized.left, normalized.right);
+        extension = "mp3";
+      } catch (error) {
+        console.info("MP3 编码失败，改用 WAV", error);
+      }
+    }
+    if (!blob) {
+      blob = encodeWav(normalized.left, normalized.right);
+      extension = "wav";
+      showToast("MP3 编码器不可用，已导出 WAV（音质更好，体积更大）。");
+    }
+    const name = audioFileName(els.scoreTitle.textContent || (state.file && state.file.name) || "谱见",
+      beatRange, extension);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = name;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    if (extension === "mp3") {
+      const sizeMb = (blob.size / 1024 / 1024).toFixed(1);
+      showToast(`已导出 ${name}（${totalText}，${sizeMb} MB）。`);
+    }
+  } catch (error) {
+    console.error(error);
+    showToast("导出音频失败：" + ((error && error.message) || "未知错误"));
+  } finally {
+    els.audioExportLabel.textContent = "↓ MP3";
+    els.audioButton.disabled = false;
+    els.recognizeProgress.hidden = true;
+  }
+}
+
 function downloadMidi() {
   const { notes, offset } = playbackTimeline();
   if (!notes.length) return;
@@ -3991,6 +4278,7 @@ if (els.addLayerPart) els.addLayerPart.addEventListener("click", addLayerPart);
 if (els.addLayerEcho) els.addLayerEcho.addEventListener("click", () => addLayerOctave(12));
 if (els.addLayerLower) els.addLayerLower.addEventListener("click", () => addLayerOctave(-12));
 els.midiButton.addEventListener("click", downloadMidi);
+if (els.audioButton) els.audioButton.addEventListener("click", exportAudio);
 els.playButton.addEventListener("click", playMelody);
 els.stopButton.addEventListener("click", stopPlayback);
 els.canvasWrap.addEventListener("click", focusNearestScoreNote);

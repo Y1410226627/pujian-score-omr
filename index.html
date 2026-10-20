@@ -195,7 +195,7 @@
               <label class="tempo-box" title="试听速度（每分钟四分音符数）。识别到谱面的 ♩=66 这类标记会自动填入；手动改只影响播放速度，不会改谱。"><span class="summary-label">速度</span><span class="tempo-value"><input id="tempoInput" type="number" min="20" max="320" value="84" aria-label="每分钟拍数（BPM）" /><small>BPM</small></span></label>
             </div>
             <p class="tempo-hint" id="tempoHint" hidden></p>
-            <div class="notes-toolbar"><span class="field-label">旋律音符</span><div class="note-actions"><button class="ghost-button" id="lowConfidenceButton" type="button" title="只显示置信度偏低、建议校对的音符" hidden>只看待校对</button><button class="midi-button" id="midiButton" type="button" title="下载 MIDI 文件" disabled>↓ MIDI</button><button class="add-note-button" id="addNoteButton" type="button" title="添加音符">＋ 添加</button></div></div>
+            <div class="notes-toolbar"><span class="field-label">旋律音符</span><div class="note-actions"><button class="ghost-button" id="lowConfidenceButton" type="button" title="只显示置信度偏低、建议校对的音符" hidden>只看待校对</button><button class="midi-button" id="midiButton" type="button" title="下载 MIDI 文件" disabled>↓ MIDI</button><button class="midi-button" id="audioButton" type="button" title="导出 MP3 音频（按当前声部/音色/音量/移调/选区）" disabled><span id="audioExportLabel">↓ MP3</span></button><button class="add-note-button" id="addNoteButton" type="button" title="添加音符">＋ 添加</button></div></div>
             <div class="part-panel" id="partPanel" hidden>
               <div class="part-panel-head">
                 <span class="field-label">要演奏哪些声部</span>
