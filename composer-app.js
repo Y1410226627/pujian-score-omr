@@ -21,6 +21,7 @@ import {
   scoreTotalBeats as v2TotalBeats, cloneScore as cloneV2Score,
 } from "./composer-model.js";
 import { v2ToMusicXml, musicXmlToV2 } from "./composer-v2xml.js";
+import { recognizePdfToMusicXml } from "./composer-pdf.js";
 import {
   appendNote as v2AppendNote, appendChordTone as v2AppendChordTone,
   deleteEvent as v2DeleteEvent, changeEventBeats as v2ChangeEventBeats,
@@ -467,6 +468,84 @@ function playRange(beatFrom = 0, beatTo = Infinity) {
 
 /* ---------------- 五线谱绘制 ---------------- */
 const VF = window.VexFlow || window.Vex;
+/* 乐谱字形字体：VexFlow 5 默认从 CDN 下载 Bravura，离线环境下载失败，
+   符头就会退化成黑色方块（实测：Font.load 报 "A network error occurred."）。
+   这里改为加载 vendor/vexflow-fonts/ 下的本地字体。 */
+let scoreFontReady = false;
+async function loadScoreFonts() {
+  if (scoreFontReady) return;
+  try {
+    await VF.Font.load("Bravura");
+    scoreFontReady = true;
+    if (typeof renderScore === "function") renderScore();
+  } catch (error) {
+    console.info("[创作室] 乐谱字体没能加载（谱面会退化成方块）：", error && error.message);
+  }
+}
+loadScoreFonts();
+/**
+ * 在谱面上画出「连音线 / 圆滑线」。
+ *
+ * 为什么单独一遍：VexFlow 的 StaveTie / Curve 必须在音符已经绘制之后再画，
+ * 否则拿不到正确坐标。之前只把 tie 记在数据里、谱面完全看不到——
+ * 用户反馈「加了连音线在谱子上看不到」就漏在这里。
+ *
+ * VexFlow 5 的参数是驼峰 firstNote / lastNote（4.x 是 first_note），
+ * 传错会抛 "Tie needs to have either firstNote or lastNote set."（实测）。
+ */
+function drawConnections(notes, svg) {
+  try {
+    drawConnectionsInner(notes, svg);
+  } catch (error) {
+    // 连线是附加内容：画不出来绝不能让整个小节渲染失败（之前就是这样导致谱面空白）
+    console.warn("[创作室] 画连线失败（不影响谱面）：", error && error.message);
+  }
+}
+
+function drawConnectionsInner(notes, svg) {
+  // 只取「真正参与排版、且有 TickContext」的音符：休止符与 BarNote 不画连线，没有 TickContext 的音符硬画会抛 NoTickContext（实测）。
+  const staveNotes = notes.filter((note) => note instanceof VF.StaveNote
+    && !note.__pujianRest
+    && typeof note.getTickContext === "function"
+    && note.getTickContext());
+  // 诊断信息挂到 window（只在 ?debug=1 时有用，不影响正常使用）
+  if (window.__pujianTieDebug !== undefined) {
+    window.__pujianTieDebug = {
+      staveNotes: staveNotes.length,
+      flags: staveNotes.map((note) => ({ tie: Boolean(note.__pujianTie), slur: Boolean(note.__pujianSlur) })),
+      hasTickContext: staveNotes.map((note) => Boolean(note.getTickContext && note.getTickContext())),
+    };
+  }
+  for (let index = 0; index < staveNotes.length - 1; index += 1) {
+    const from = staveNotes[index];
+    const to = staveNotes[index + 1];
+    const drawTie = from.__pujianTie || to.__pujianTie;
+    const drawSlur = from.__pujianSlur || to.__pujianSlur;
+    if (!drawTie && !drawSlur) continue;
+    try {
+      if (drawTie && VF.StaveTie) {
+        // VexFlow 5 的 StaveTie 需要音符已完成 format（有 TickContext）。
+        // 用 setContext(...).draw() 时它会读音符坐标，拿不到就抛 NoTickContext（实测）。
+        const tie = new VF.StaveTie({
+          firstNote: from, lastNote: to,
+          firstIndexes: [0], lastIndexes: [0],
+        });
+        tie.setContext(svg);
+        tie.draw();
+      }
+      if (drawSlur && VF.Curve) {
+        new VF.Curve(from, to, {
+          cps: [{ x: 0, y: 12 }, { x: 0, y: 12 }],
+          thickness: 2,
+        }).setContext(svg).draw();
+      }
+    } catch (tieError) {
+      // 连线画不出来不影响其它内容，但要能定位原因
+      console.warn("[创作室] 画连线失败：", tieError && tieError.message);
+    }
+  }
+}
+
 function renderScore() {
   if (!VF) {
     els.scoreEditor.textContent = "五线谱渲染组件没加载成功（vendor/vexflow/vexflow.js）。";
@@ -515,6 +594,10 @@ const view = state.scoreView;
             stave.addTimeSignature(`${time.beats}/${time.beatType}`);
           }
         }
+        // 行尾/曲尾用双重小节线（不需要 TickContext，画笔直接画）
+        if (slot === measuresPerLine - 1 || measureIndex === measureCount - 1) {
+          stave.setEndBarType(VF.Barline.type.END);
+        }
         stave.setContext(svg).draw();
 
         const measure = part.measures[measureIndex] || { beats: [] };
@@ -544,9 +627,12 @@ const view = state.scoreView;
           note.__pujianPart = part.id;
           note.__pujianBeats = item.beats;
           note.__pujianKey = key;
+          // 记号：连音线 / 圆滑线（渲染时在音符画完之后再画线，见 drawConnections）
+          note.__pujianTie = Boolean(item.tie || item.tieFromPrev);
+          note.__pujianSlur = Boolean(item.slur || item.slurStop);
           notes.push(note);
         }
-        const remaining = remainingBeats(measure, state.score.beatsPerMeasure);
+        const remaining = remainingBeats(measure, view.beatsPerMeasure);
         if (remaining > 1e-9) {
           const rest = new VF.StaveNote({ clef, keys: [clef === "bass" ? "d/3" : "b/4"], duration: beatsToVfDuration(remaining) + "r" });
           notes.push(rest);
@@ -561,23 +647,37 @@ const view = state.scoreView;
           notes.push(endBar);
         }
         try {
-          const voice = new VF.Voice({ num_beats: state.score.beatsPerMeasure, beat_value: 4 }).setMode(VF.Voice.Mode.SOFT);
+          // 注意：v2 谱没有 beatsPerMeasure 字段（那是 v1 的），要用拍号换算值，
+          // 否则 Voice 的 num_beats 是 undefined，format 会失败、音符拿不到 TickContext，
+          // 连音线也会跟着报 NoTickContext（实测）。
+          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("voice-start");
+          const voice = new VF.Voice({ num_beats: view.beatsPerMeasure, beat_value: view.beatType || 4 })
+            .setMode(VF.Voice.Mode.SOFT);
           voice.addTickables(notes.filter((note) => note instanceof VF.StaveNote));
           // 临时升降号：按调号与同小节/前后音自动判断该标 # / b / n（VexFlow 5 的官方做法）
           try {
-            VF.Accidental.applyAccidentals([voice], keySignatureName(state.score.keyFifths) || "C");
+            VF.Accidental.applyAccidentals([voice], keySignatureName(view.keyFifths) || "C");
           } catch {
             // 算不出就退化成「只画音高」，不影响其它功能
           }
           const formatter = new VF.Formatter();
+          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("before-format:" + notes.length);
           formatter.joinVoices([voice]).format([voice], staveWidth / measuresPerLine - 30);
+          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("after-format");
+          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("before-draw");
           voice.draw(svg, stave);
+          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("after-draw");
           for (const note of notes) {
-            if (note instanceof VF.BarNote) note.setContext(svg).draw();
+            // 小节线用 Stave.setEndBarType 画（VexFlow 5 的 BarNote.draw 需要 TickContext，
+            // 拿不到会抛 NoTickContext 并让整个 try 中断，连音线就永远画不出来——实测踩到）。
+            void note;
           }
+          // 连音线 / 圆滑线：必须在音符绘制之后再画，才拿得到坐标
+          drawConnections(notes, svg);
           // 热区在 renderScore() 末尾统一绘制（见 drawNoteHitAreas）
-        } catch {
-          // 谱面渲染失败时不阻塞输入（数据模型本身是对的）
+        } catch (renderError) {
+          // 谱面渲染失败时不阻塞输入（数据模型本身是对的），但要能看到原因
+          console.warn("[创作室] 谱面渲染出错：", renderError && renderError.message);
         }
       }
     }
@@ -1415,12 +1515,20 @@ async function importProject(file) {
  * 真实乐谱（和弦、多声部、休止）根本进不来。这里把识别/MusicXML 解析出来的音符
  * 转成创作室的数据结构（空隙补休止、和弦保留、跨小节拆段），导入后可以直接改。
  */
+/**
+ * 导入一份现成的乐谱：**PDF 或 MusicXML / MXL**。
+ *
+ * PDF 会先在浏览器里逐页渲染成高清图，交给本机识别引擎换成 MusicXML，
+ * 再走同一条 v2 精确导入路径——所以「PDF → 可编辑乐谱」一步到位。
+ */
 async function importMusicXmlFile(file) {
+  const isPdf = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
   try {
-    // 直接进 v2 模型：精确互转（音符/拍位/时值/调号/拍号/速度/并行声部全部保留）
-    const source = /\.mxl$/i.test(file.name)
-      ? await readMxlZip(file)
-      : await file.text();
+    if (isPdf) {
+      await importPdfFile(file);
+      return;
+    }
+    const source = /\.mxl$/i.test(file.name) ? await readMxlZip(file) : await file.text();
     let score;
     try {
       score = musicXmlToV2(source).score;
@@ -1428,7 +1536,6 @@ async function importMusicXmlFile(file) {
       showToast("这份乐谱读不进来：" + ((error && error.message) || "格式不支持"));
       return;
     }
-    // 用 v2 的展开函数（v1 的 scoreToPlayableNotes 读不了 v2 结构）
     const notes = v2PlayableNotes(score);
     if (!notes.length) {
       showToast("这份乐谱里没有读到音符。");
@@ -1439,27 +1546,154 @@ async function importMusicXmlFile(file) {
     state.activeRef = { ...DEFAULT_REF };
     syncSettingsInputs();
     afterScoreChange();
-    // 如实报数（数「原谱印了几个音」，不含跨小节拆段）
-    const voices = score.parts.reduce((sum, part) => sum
-      + (part.staves || []).reduce((inner, staff) => inner + (staff.voices || []).length, 0), 0);
-    const staves = score.parts.reduce((sum, part) => sum + (part.staves || []).length, 0);
-    const chords = score.parts.reduce((sum, part) => sum
-      + (part.staves || []).reduce((inner, staff) => inner
-        + (staff.voices || []).reduce((deep, voice) => deep
-          + (voice.events || []).filter((event) => event.chordWith).length, 0), 0), 0);
-    const details = [];
-    if (voices > 1) details.push(`${voices} 条声部线`);
-    if (chords) details.push(`${chords} 处和弦`);
-    if (staves > 1) details.push(`${staves} 行谱表`);
-    showToast(`已导入「${score.title}」：${notes.length} 个音` +
-      `${details.length ? `（${details.join("、")}）` : ""}、可直接改也可导出。`);
+    showToast(describeImport(score, notes.length));
   } catch (error) {
     console.info("导入乐谱失败", error);
     showToast("这份乐谱读不进来：" + ((error && error.message) || "格式不支持"));
   }
 }
 
-/** 读 MXL（zip 里的 MusicXML）。 */
+/** PDF 导入：渲染 → 识别 → 合并成一份乐谱。 */
+async function importPdfFile(file) {
+  const label = document.querySelector("#importPdfLabel");
+  setImportBusy(true, "准备识别…");
+  try {
+    const result = await recognizePdfToMusicXml({
+      file,
+      onProgress: ({ label: text }) => setImportBusy(true, text),
+    });
+    const xmlPages = result.pages.filter((item) => item.musicxml);
+    if (!xmlPages.length) {
+      showToast(`识别没读到音符（共 ${result.pageCount} 页）。可能是扫描太淡，或这些页是简谱——简谱请到工作台用「按简谱识别」。`);
+      return;
+    }
+    // 多页合并：第一页的骨架 + 后面页的小节接上
+    const merged = mergePdfPages(xmlPages);
+    if (!merged) {
+      showToast("识别结果拼不起来，请先用工作台逐页识别。");
+      return;
+    }
+    pushHistory();
+    state.score = merged.score;
+    state.activeRef = { ...DEFAULT_REF };
+    syncSettingsInputs();
+    afterScoreChange();
+    showToast(`已从 PDF 识别并打开：${xmlPages.length} / ${result.pageCount} 页，${describeImport(merged.score, v2PlayableNotes(merged.score).length)}`);
+  } catch (error) {
+    console.info("PDF 导入失败", error);
+    showToast("PDF 识别失败：" + ((error && error.message) || "未知错误"));
+  } finally {
+    setImportBusy(false, "");
+  }
+}
+
+/** 把多页 MusicXML 合并成一份：以第 1 页为骨架，后续页追加小节。 */
+/**
+ * 把多页 PDF 的 MusicXML 合并成一份乐谱。
+ *
+ * 关键点：每一页都是**同一个作品的不同页**，所以对应 part/谱表/声部线必须接在
+ * 原来的那条线上，而不是每页各新建一套（否则 3 页就会变成 6 行谱表，排布全乱）。
+ * 做法：以第 1 页为骨架，后续页按 (partIndex, staffIndex, voiceIndex) 接上，
+ * 拍位整体平移到上一页结束之后。
+ */
+function mergePdfPages(xmlPages) {
+  let base = null;
+  for (const item of xmlPages) {
+    let parsed;
+    try {
+      parsed = musicXmlToV2(item.musicxml);
+    } catch {
+      continue;
+    }
+    const pageScore = parsed && parsed.score ? parsed.score : parsed;
+    if (!pageScore || !pageScore.parts) continue;
+    if (!base) {
+      base = { score: pageScore, endBeat: 0 };
+      base.endBeat = scoreEndBeat(pageScore);
+      continue;
+    }
+    const per = beatsPerMeasureOf(base.score);
+    // 下一页从「上一页结束处之后对齐到小节线」开始
+    const offset = Math.ceil((base.endBeat - 1e-6) / per) * per;
+    for (const [partIndex, part] of pageScore.parts.entries()) {
+      const targetPart = base.score.parts[partIndex];
+      if (!targetPart) continue;   // 页数多的部分（例如某页只有 2 个 part）不强行新建
+      for (const [staffIndex, staff] of part.staves.entries()) {
+        const targetStaff = targetPart.staves[staffIndex];
+        if (!targetStaff) continue;
+        for (const [voiceIndex, voice] of staff.voices.entries()) {
+          const targetVoice = targetStaff.voices[voiceIndex];
+          if (!targetVoice) continue;
+          const anchorMap = new Map();
+          for (const event of voice.events || []) {
+            const moved = {
+              ...event,
+              id: `${event.id}-p${item.page}`,
+              beat: event.beat + offset,
+            };
+            // 和弦音要指向新 id 的锚音
+            if (event.chordWith && anchorMap.has(event.chordWith)) {
+              moved.chordWith = anchorMap.get(event.chordWith);
+            }
+            if (!event.chordWith) anchorMap.set(event.id, moved.id);
+            targetVoice.events.push(moved);
+          }
+        }
+      }
+    }
+    base.endBeat = Math.max(base.endBeat, scoreEndBeat(pageScore) + offset);
+  }
+  if (!base) return null;
+  return { score: base.score };
+}
+
+/** 一份 v2 乐谱最后一个音的结束拍位。 */
+function scoreEndBeat(score) {
+  let end = 0;
+  for (const part of score.parts || []) {
+    for (const staff of part.staves || []) {
+      for (const voice of staff.voices || []) {
+        for (const event of voice.events || []) {
+          end = Math.max(end, (Number(event.beat) || 0) + (Number(event.beats) || 0));
+        }
+      }
+    }
+  }
+  return end;
+}
+
+/** 每小节拍数（按拍号换算成四分音符单位）。 */
+function beatsPerMeasureOf(score) {
+  const time = (score && score.timeSignature) || { beats: 4, beatType: 4 };
+  const per = (Number(time.beats) || 4) * 4 / (Number(time.beatType) || 4);
+  return per > 0 ? per : 4;
+}
+
+/** 生成一句「导入了什么」的说明。 */
+function describeImport(score, noteCount) {
+  const voices = score.parts.reduce((sum, part) => sum
+    + (part.staves || []).reduce((inner, staff) => inner + (staff.voices || []).length, 0), 0);
+  const staves = score.parts.reduce((sum, part) => sum + (part.staves || []).length, 0);
+  const chords = score.parts.reduce((sum, part) => sum
+    + (part.staves || []).reduce((inner, staff) => inner
+      + (staff.voices || []).reduce((deep, voice) => deep
+        + (voice.events || []).filter((event) => event.chordWith).length, 0), 0), 0);
+  const details = [];
+  if (voices > 1) details.push(`${voices} 条声部线`);
+  if (staves > 1) details.push(`${staves} 行谱表`);
+  if (chords) details.push(`${chords} 处和弦`);
+  return `${noteCount} 个音${details.length ? `（${details.join("、")}）` : ""}，可直接改也可导出`;
+}
+
+/** 导入进行中的界面状态。 */
+function setImportBusy(busy, text) {
+  const button = document.querySelector("#importMusicXml");
+  if (button) button.disabled = busy;
+  const label = document.querySelector("#importPdfLabel");
+  if (label) label.textContent = busy ? (text || "正在识别…") : "↑ 导入 PDF / 乐谱";
+}
+
+
 async function readMxlZip(file) {
   const { readMusicXmlFile } = await import("./musicxml.js");
   return readMusicXmlFile(file);
@@ -1506,6 +1740,12 @@ function applySettings() {
 /* ---------------- 事件绑定 ---------------- */
 function bindEvents() {
   els.addNote.addEventListener("click", addCurrentNote);
+  // 折叠区外的试听快捷按钮（不折叠，随时点得到）
+  const playAllQuick = document.querySelector("#playAllQuick");
+  if (playAllQuick) playAllQuick.addEventListener("click", () => playRange(0, Infinity));
+  const stopQuick = document.querySelector("#stopQuick");
+  if (stopQuick) stopQuick.addEventListener("click", () => stopPlayback());
+
   if (els.addTempoChange) els.addTempoChange.addEventListener("click", addTempoChange);
   if (els.addRepeatStart) els.addRepeatStart.addEventListener("click", () => addRepeatMark("start"));
   if (els.addRepeatEnd) els.addRepeatEnd.addEventListener("click", () => addRepeatMark("end"));

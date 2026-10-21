@@ -11,6 +11,17 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_CORE || "playwright-core");
 const appUrl = process.env.APP_URL || "http://127.0.0.1:4492/";
 
+// 「试听 / 导出 / 设置」收在折叠区里，点它们之前要先展开（本轮布局调整）
+async function expandAdvancedPanel() {
+  await page.evaluate(() => {
+    for (const id of ["advancedPanel", "markPanel"]) {
+      const panel = document.querySelector("#" + id);
+      if (panel) panel.open = true;
+    }
+  });
+  await page.waitForTimeout(150);
+}
+
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await browser.newPage({ acceptDownloads: true });
 const errors = [];
@@ -92,9 +103,11 @@ try {
   await page.locator('#valueChips .chip[data-rest="false"][data-beats="1"]').click();
 
   // 4) 试听：点「从头听整首」后状态变成播放中
+  await expandAdvancedPanel();
   await page.locator("#playAll").click();
   await page.waitForFunction(() => document.querySelector("#playbackState").textContent.includes("正在播放"), null, { timeout: 8000 });
   console.log("试听状态：", await page.textContent("#playbackState"));
+  await expandAdvancedPanel();
   await page.locator("#stopPlay").click();
 
   // 5) 换音色（含未安装的采样音色也要能选，退回合成）

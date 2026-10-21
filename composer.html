@@ -28,20 +28,10 @@
       </header>
 
       <main class="composer-main">
-        <section class="composer-hero">
-          <div>
-            <div class="eyebrow"><span class="eyebrow-line"></span>不用懂乐理，也能写谱</div>
-            <h1>想到一段旋律，<span>点出来就好。</span></h1>
-            <p>
-              你不需要认识五线谱。左侧挑一个音高（像按琴键一样），在下方选「这个音唱几拍」，
-              点一下 <strong>＋ 加进乐谱</strong>——五线谱会自己画好。随时可以按
-              <strong>试听这一小节</strong>，满意了再导出成乐谱文件或 MIDI。
-            </p>
-          </div>
-          <div class="hero-steps">
-            <div><span>1</span><strong>选音高</strong><small>钢琴键盘上点一个键，或用上下键挑选</small></div>
-            <div><span>2</span><strong>选几拍</strong><small>「1 拍」「半拍」「2 拍」···按拍子说就行</small></div>
-            <div><span>3</span><strong>加进去 + 试听</strong><small>放错了就撤销，或直接点掉那个音</small></div>
+        <section class="composer-hero is-compact">
+          <div class="hero-line">
+            <h1>想到一段旋律，点出来就好。</h1>
+            <p>点键盘选音高 → 选几拍 → 加进乐谱。五线谱自己画好，随时试听、导出。</p>
           </div>
         </section>
 
@@ -97,6 +87,11 @@
 
 
 
+            <div class="composer-row">
+              <span class="field-label">这个音唱几拍？（方块越多越长）</span>
+              <div class="value-chips" id="valueChips"></div>
+              <p class="fine-print">不知道选哪个？先用「1 拍」。点一下还能听出「这么长」。</p>
+            </div>
             <div class="composer-actions">
               <button class="primary-button" id="addNote" type="button">
                 <span class="button-spark" aria-hidden="true">✳</span><span>＋ 加进乐谱</span><span class="button-arrow" aria-hidden="true">→</span>
@@ -105,128 +100,143 @@
               <button class="ghost-button" id="redo" type="button" title="重做（Ctrl+Shift+Z）">↷ 重做</button>
             </div>
 
-            <div class="composer-row">
-              <span class="field-label">给选中的音加记号</span>
-              <p class="fine-print">先在谱面上点一个音，再点下面的记号；再点一次取消。</p>
-              <div class="mark-groups" id="markGroups"></div>
-            </div>
-
+            <details class="advanced-panel" id="markPanel">
+              <summary>✎ 给选中的音加记号（强弱 / 断奏 / 连音线）</summary>
+              <div class="advanced-body">
+                <div class="composer-row">
+                  <span class="field-label">给选中的音加记号</span>
+                  <p class="fine-print">先在谱面上点一个音，再点下面的记号；再点一次取消。</p>
+                  <div class="mark-groups" id="markGroups"></div>
+                </div>
+    
+              </div>
+            </details>
             <div class="divider"></div>
 
-            <div class="composer-row">
-              <div class="row-head">
-                <span class="field-label">乐谱设置</span>
-                <span class="auto-tag" id="measureStatus">第 1 小节还差 4 拍</span>
-              </div>
-              <div class="setting-grid">
-                <label class="inline-field"><span>标题</span><input id="scoreTitle" type="text" value="未命名乐谱" aria-label="乐谱标题" /></label>
-                <label class="inline-field"><span>速度</span><input id="scoreTempo" type="number" min="20" max="320" value="84" aria-label="每分钟拍数" /><small>BPM</small></label>
-                <div class="inline-field tempo-inline">
-                  <span>反复记号</span>
-                  <div class="inline-group">
-                    <input id="repeatBar" type="number" min="1" step="1" value="1" aria-label="第几小节" title="第几小节" />
-                    <span class="tempo-label">小节</span>
-                    <button class="ghost-button small" id="addRepeatStart" type="button" title="从这里开始反复">↺ 起点</button>
-                    <button class="ghost-button small" id="addRepeatEnd" type="button" title="到这里回到起点">↻ 终点</button>
-                    <input id="repeatTimes" type="number" min="2" max="16" step="1" value="2" aria-label="反复几遍" title="反复几遍" />
-                    <span class="tempo-label">遍</span>
+            <div class="play-shortcut">
+              <button class="ghost-button" id="playAllQuick" type="button">▶ 从头听</button>
+              <button class="ghost-button" id="stopQuick" type="button">■ 停止</button>
+              <span class="auto-tag" id="playbackQuickState">未在播放</span>
+            </div>
+            <details class="advanced-panel" id="advancedPanel">
+              <summary>⚙ 更多设置（拍号 / 调号 / 音色 / 变速 / 反复 / 试听 / 导出）</summary>
+              <div class="advanced-body">
+                <div class="composer-row">
+                  <div class="row-head">
+                    <span class="field-label">乐谱设置</span>
+                    <span class="auto-tag" id="measureStatus">第 1 小节还差 4 拍</span>
                   </div>
-                  <p class="fine-print" id="repeatInfo">还没有反复记号。先点「↺ 起点」再点「↻ 终点」，中间那段就会反复。</p>
-                  <div class="inline-group" style="margin-top:6px">
-                    <span class="tempo-label">房子（两遍唱不一样的结尾）</span>
-                    <input id="endingStart" type="number" min="1" step="1" value="3" aria-label="房子起始小节" title="房子起始小节" />
-                    <span class="tempo-label">到</span>
-                    <input id="endingEnd" type="number" min="1" step="1" value="3" aria-label="房子结束小节" title="房子结束小节" />
-                    <span class="tempo-label">小节，第</span>
-                    <input id="endingNumber" type="number" min="1" max="9" step="1" value="1" aria-label="第几遍的房子" title="第几遍的房子" />
-                    <span class="tempo-label">遍唱</span>
-                    <button class="ghost-button small" id="addEnding" type="button" title="加一个房子">＋ 加房子</button>
+                  <div class="setting-grid">
+                    <label class="inline-field"><span>标题</span><input id="scoreTitle" type="text" value="未命名乐谱" aria-label="乐谱标题" /></label>
+                    <label class="inline-field"><span>速度</span><input id="scoreTempo" type="number" min="20" max="320" value="84" aria-label="每分钟拍数" /><small>BPM</small></label>
+                    <div class="inline-field tempo-inline">
+                      <span>反复记号</span>
+                      <div class="inline-group">
+                        <input id="repeatBar" type="number" min="1" step="1" value="1" aria-label="第几小节" title="第几小节" />
+                        <span class="tempo-label">小节</span>
+                        <button class="ghost-button small" id="addRepeatStart" type="button" title="从这里开始反复">↺ 起点</button>
+                        <button class="ghost-button small" id="addRepeatEnd" type="button" title="到这里回到起点">↻ 终点</button>
+                        <input id="repeatTimes" type="number" min="2" max="16" step="1" value="2" aria-label="反复几遍" title="反复几遍" />
+                        <span class="tempo-label">遍</span>
+                      </div>
+                      <p class="fine-print" id="repeatInfo">还没有反复记号。先点「↺ 起点」再点「↻ 终点」，中间那段就会反复。</p>
+                      <div class="inline-group" style="margin-top:6px">
+                        <span class="tempo-label">房子（两遍唱不一样的结尾）</span>
+                        <input id="endingStart" type="number" min="1" step="1" value="3" aria-label="房子起始小节" title="房子起始小节" />
+                        <span class="tempo-label">到</span>
+                        <input id="endingEnd" type="number" min="1" step="1" value="3" aria-label="房子结束小节" title="房子结束小节" />
+                        <span class="tempo-label">小节，第</span>
+                        <input id="endingNumber" type="number" min="1" max="9" step="1" value="1" aria-label="第几遍的房子" title="第几遍的房子" />
+                        <span class="tempo-label">遍唱</span>
+                        <button class="ghost-button small" id="addEnding" type="button" title="加一个房子">＋ 加房子</button>
+                      </div>
+                    </div>
+                    <div class="inline-field tempo-inline">
+                      <span>中途变速</span>
+                      <div class="inline-group">
+                        <input id="tempoBeat" type="number" min="1" step="1" value="1" aria-label="从第几小节开始变速" title="从第几小节开始" />
+                        <span class="tempo-label">小节起，改成</span>
+                        <input id="tempoBpm" type="number" min="20" max="320" value="90" aria-label="新的每分钟拍数" />
+                        <small>BPM</small>
+                        <button class="ghost-button small" id="addTempoChange" type="button" title="在这里加一个速度变化">＋ 加变速</button>
+                      </div>
+                    </div>
+                    <label class="inline-field"><span>拍号</span>
+                      <select id="scoreTime" aria-label="拍号（每小节几拍 / 几分音符算一拍）">
+                        <option value="4/4" selected>4 / 4（最常见，一小节数 4 下）</option>
+                        <option value="3/4">3 / 4（圆舞曲：1、2、3）</option>
+                        <option value="2/4">2 / 4（进行曲：1、2）</option>
+                        <option value="4/8">4 / 8（八分音符算一拍）</option>
+                        <option value="3/8">3 / 8（一小节只有 1 拍半）</option>
+                        <option value="6/8">6 / 8（1、2、3，每下两小拍）</option>
+                        <option value="9/8">9 / 8</option>
+                        <option value="12/8">12 / 8</option>
+                        <option value="2/2">2 / 2（二分音符算一拍）</option>
+                      </select>
+                    </label>
+                    <label class="inline-field"><span>调号</span>
+                      <select id="scoreKey" aria-label="调号">
+                        <option value="0" selected>C 大调（没有升降号，最好上手）</option>
+                        <option value="1">G 大调（1 个升号）</option>
+                        <option value="-1">F 大调（1 个降号）</option>
+                        <option value="2">D 大调（2 个升号）</option>
+                        <option value="-2">降 B 大调（2 个降号）</option>
+                        <option value="3">A 大调（3 个升号）</option>
+                        <option value="-3">降 E 大调（3 个降号）</option>
+                      </select>
+                    </label>
+                    <label class="inline-field"><span>谱号</span>
+                      <select id="scoreClef" aria-label="谱号">
+                        <option value="treble" selected>高音谱号（一般旋律）</option>
+                        <option value="bass">低音谱号（低音/贝斯）</option>
+                        <option value="alto">中音谱号</option>
+                        <option value="tenor">次中音谱号</option>
+                        <option value="treble8">高音谱号（低八度，男高音）</option>
+                      </select>
+                    </label>
+                    <label class="inline-field"><span>音色</span>
+                      <select id="scoreTimbre" aria-label="声部音色"></select>
+                    </label>
                   </div>
                 </div>
-                <div class="inline-field tempo-inline">
-                  <span>中途变速</span>
-                  <div class="inline-group">
-                    <input id="tempoBeat" type="number" min="1" step="1" value="1" aria-label="从第几小节开始变速" title="从第几小节开始" />
-                    <span class="tempo-label">小节起，改成</span>
-                    <input id="tempoBpm" type="number" min="20" max="320" value="90" aria-label="新的每分钟拍数" />
-                    <small>BPM</small>
-                    <button class="ghost-button small" id="addTempoChange" type="button" title="在这里加一个速度变化">＋ 加变速</button>
+    
+                <div class="divider"></div>
+    
+                <div class="composer-row">
+                  <div class="row-head">
+                    <span class="field-label">试听</span>
+                    <span class="auto-tag" id="playbackState">未在播放</span>
                   </div>
+                  <div class="composer-actions wrap">
+                    <button class="ghost-button" id="playAll" type="button">▶ 从头听整首</button>
+                    <button class="ghost-button" id="playFromHere" type="button">▶ 从选中的音开始听</button>
+                    <button class="ghost-button" id="playSelection" type="button">▶ 只听选中的一段</button>
+                    <button class="ghost-button" id="stopPlay" type="button">■ 停止</button>
+                    <label class="loop-toggle"><input type="checkbox" id="loopPlay" /><span>循环</span></label>
+                  </div>
+                  <p class="fine-print">
+                    在下方乐谱里点一个音就能选中它；按住 <strong>Shift</strong> 再点另一个音，就选中这两个音之间的整段。
+                  </p>
                 </div>
-                <label class="inline-field"><span>拍号</span>
-                  <select id="scoreTime" aria-label="拍号（每小节几拍 / 几分音符算一拍）">
-                    <option value="4/4" selected>4 / 4（最常见，一小节数 4 下）</option>
-                    <option value="3/4">3 / 4（圆舞曲：1、2、3）</option>
-                    <option value="2/4">2 / 4（进行曲：1、2）</option>
-                    <option value="4/8">4 / 8（八分音符算一拍）</option>
-                    <option value="3/8">3 / 8（一小节只有 1 拍半）</option>
-                    <option value="6/8">6 / 8（1、2、3，每下两小拍）</option>
-                    <option value="9/8">9 / 8</option>
-                    <option value="12/8">12 / 8</option>
-                    <option value="2/2">2 / 2（二分音符算一拍）</option>
-                  </select>
-                </label>
-                <label class="inline-field"><span>调号</span>
-                  <select id="scoreKey" aria-label="调号">
-                    <option value="0" selected>C 大调（没有升降号，最好上手）</option>
-                    <option value="1">G 大调（1 个升号）</option>
-                    <option value="-1">F 大调（1 个降号）</option>
-                    <option value="2">D 大调（2 个升号）</option>
-                    <option value="-2">降 B 大调（2 个降号）</option>
-                    <option value="3">A 大调（3 个升号）</option>
-                    <option value="-3">降 E 大调（3 个降号）</option>
-                  </select>
-                </label>
-                <label class="inline-field"><span>谱号</span>
-                  <select id="scoreClef" aria-label="谱号">
-                    <option value="treble" selected>高音谱号（一般旋律）</option>
-                    <option value="bass">低音谱号（低音/贝斯）</option>
-                    <option value="alto">中音谱号</option>
-                    <option value="tenor">次中音谱号</option>
-                    <option value="treble8">高音谱号（低八度，男高音）</option>
-                  </select>
-                </label>
-                <label class="inline-field"><span>音色</span>
-                  <select id="scoreTimbre" aria-label="声部音色"></select>
-                </label>
+    
+                <div class="divider"></div>
+    
+                <div class="composer-row">
+                  <span class="field-label">导出 / 保存</span>
+                  <div class="composer-actions wrap">
+                    <button class="ghost-button" id="exportMusicXml" type="button" title="MusicXML：可以用 MuseScore、Finale 等制谱软件继续编辑或打印">↓ MusicXML（乐谱文件）</button>
+                    <button class="ghost-button" id="exportMidi" type="button" title="MIDI：在任何音乐软件里都能播放">↓ MIDI</button>
+                    <button class="ghost-button" id="exportPng" type="button" title="图片：可直接打印或发给人看">↓ 图片（PNG）</button>
+                    <button class="ghost-button" id="exportProject" type="button" title="工程文件：下次导入可以继续改">↓ 工程文件</button>
+                    <button class="ghost-button" id="importProject" type="button" title="导入之前保存的工程文件">↑ 导入工程</button>
+                    <button class="ghost-button" id="importMusicXml" type="button" title="导入 PDF 或 MusicXML：PDF 会先在浏览器里识别成乐谱再打开编辑">↑ 导入 PDF / 乐谱</button>
+                    <input id="projectInput" type="file" accept=".json,application/json" hidden />
+                    <input id="musicXmlInput" type="file" accept=".musicxml,.xml,.mxl,application/pdf,.pdf" hidden />
+                  </div>
+                  <p class="fine-print" id="exportHint">导出的 MusicXML 每个小节都补齐了拍数，用别的软件打开不会报错。</p>
+                </div>
               </div>
-            </div>
-
-            <div class="divider"></div>
-
-            <div class="composer-row">
-              <div class="row-head">
-                <span class="field-label">试听</span>
-                <span class="auto-tag" id="playbackState">未在播放</span>
-              </div>
-              <div class="composer-actions wrap">
-                <button class="ghost-button" id="playAll" type="button">▶ 从头听整首</button>
-                <button class="ghost-button" id="playFromHere" type="button">▶ 从选中的音开始听</button>
-                <button class="ghost-button" id="playSelection" type="button">▶ 只听选中的一段</button>
-                <button class="ghost-button" id="stopPlay" type="button">■ 停止</button>
-                <label class="loop-toggle"><input type="checkbox" id="loopPlay" /><span>循环</span></label>
-              </div>
-              <p class="fine-print">
-                在下方乐谱里点一个音就能选中它；按住 <strong>Shift</strong> 再点另一个音，就选中这两个音之间的整段。
-              </p>
-            </div>
-
-            <div class="divider"></div>
-
-            <div class="composer-row">
-              <span class="field-label">导出 / 保存</span>
-              <div class="composer-actions wrap">
-                <button class="ghost-button" id="exportMusicXml" type="button" title="MusicXML：可以用 MuseScore、Finale 等制谱软件继续编辑或打印">↓ MusicXML（乐谱文件）</button>
-                <button class="ghost-button" id="exportMidi" type="button" title="MIDI：在任何音乐软件里都能播放">↓ MIDI</button>
-                <button class="ghost-button" id="exportPng" type="button" title="图片：可直接打印或发给人看">↓ 图片（PNG）</button>
-                <button class="ghost-button" id="exportProject" type="button" title="工程文件：下次导入可以继续改">↓ 工程文件</button>
-                <button class="ghost-button" id="importProject" type="button" title="导入之前保存的工程文件">↑ 导入工程</button>
-                <button class="ghost-button" id="importMusicXml" type="button" title="导入现成的乐谱（MusicXML / MXL）继续改，不用从空白开始">↑ 导入乐谱</button>
-                <input id="projectInput" type="file" accept=".json,application/json" hidden />
-                <input id="musicXmlInput" type="file" accept=".musicxml,.xml,.mxl" hidden />
-              </div>
-              <p class="fine-print" id="exportHint">导出的 MusicXML 每个小节都补齐了拍数，用别的软件打开不会报错。</p>
-            </div>
+            </details>
           </aside>
 
           <!-- ===== 右：五线谱 + 说明 ===== -->
@@ -264,14 +274,6 @@
             <article><span>04</span><strong>换个乐器听</strong><p>左侧「音色」可以换成二胡、古筝、长笛、合唱……同一个旋律会变一种味道。</p></article>
           </div>
         </section>
-        <section class="duration-strip" id="durationStrip" aria-label="这个音唱几拍">
-    <div class="duration-strip-head">
-      <strong>② 这个音唱几拍？</strong>
-      <span>上面一排是音符（会发出声音），下面带虚线框的是「停顿」。方块越多表示越长。</span>
-    </div>
-    <div class="value-chips" id="valueChips"></div>
-    <p class="fine-print">不知道选哪个？先用「1 拍」——这是最常见的一拍一个音。点一下还能听出「这么长」。</p>
-  </section>
 
 </main>
       <footer class="footer">

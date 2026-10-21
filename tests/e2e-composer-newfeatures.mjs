@@ -2,6 +2,17 @@
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_CORE);
+// 「试听 / 导出 / 设置」收在折叠区里，点它们之前要先展开（本轮布局调整）
+async function expandAdvancedPanel() {
+  await page.evaluate(() => {
+    for (const id of ["advancedPanel", "markPanel"]) {
+      const panel = document.querySelector("#" + id);
+      if (panel) panel.open = true;
+    }
+  });
+  await page.waitForTimeout(150);
+}
+
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await browser.newPage();
 const errors = [];
@@ -17,6 +28,7 @@ const check = (name, ok, detail) => {
 try {
   await page.goto("http://127.0.0.1:4492/composer.html?debug=1", { waitUntil: "networkidle" });
   await page.waitForTimeout(900);
+  await expandAdvancedPanel();
 
   // ---- 1) 拍型：选 3/8 ----
   await page.selectOption("#scoreTime", "3/8");

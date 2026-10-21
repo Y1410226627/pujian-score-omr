@@ -58,6 +58,17 @@ function readExpected(xml) {
 
 const keyToKey = (note) => `${note.beat.toFixed(6)}|${note.midi}|${note.staff}|${note.voice}`;
 
+// 「试听 / 导出 / 设置」收在折叠区里，点它们之前要先展开（本轮布局调整）
+async function expandAdvancedPanel() {
+  await page.evaluate(() => {
+    for (const id of ["advancedPanel", "markPanel"]) {
+      const panel = document.querySelector("#" + id);
+      if (panel) panel.open = true;
+    }
+  });
+  await page.waitForTimeout(150);
+}
+
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await browser.newPage({ acceptDownloads: true });
 const errors = [];
@@ -136,6 +147,7 @@ try {
 
   // 2) 导出 → 再导入 → 仍一致
   const downloadPromise = page.waitForEvent("download", { timeout: 120000 });
+  await expandAdvancedPanel();
   await page.click("#exportMusicXml");
   const download = await downloadPromise;
   const target = join(process.env.TEMP || ".", "final-roundtrip.musicxml");

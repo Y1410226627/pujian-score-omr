@@ -268,3 +268,112 @@
 .tempo-inline .inline-group { gap: 4px; align-items: center; }
 .tempo-inline input { width: 58px; }
 .tempo-label { font-size: 11px; color: #7d8a82; white-space: nowrap; }
+
+
+/* ================= 布局重排（本轮） =================
+   用户反馈「找音符要往下翻半天、又丑又没规律」。
+   目标：最常用的三件事（选音高 / 选时值 / 加进去）全在首屏第一屏内。 */
+
+/* 压缩顶部介绍：只留一行标题 + 一句说明 */
+.composer-hero.is-compact { padding: 18px 0 10px; }
+.composer-hero.is-compact .hero-line { display: grid; gap: 4px; }
+.composer-hero.is-compact h1 { font-size: 24px; margin: 0; line-height: 1.25; }
+.composer-hero.is-compact p { margin: 0; font-size: 13px; color: #7d8a82; }
+
+/* 左栏：更紧凑的间距，让核心输入区装得下 */
+.input-panel { padding: 14px 16px 12px; }
+.input-panel .composer-row { margin-top: 10px; }
+.input-panel .panel-heading { margin-bottom: 6px; }
+.input-panel .panel-heading h2 { font-size: 16px; margin: 2px 0 0; }
+
+/* 时值选择器回到左栏：紧凑四列网格 */
+.input-panel .value-chips {
+  grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+  gap: 5px;
+  margin: 6px 0 2px;
+}
+.input-panel .chip-value {
+  grid-template-rows: 30px 10px auto;
+  min-width: 0;
+  padding: 4px 3px 3px;
+  border-radius: 8px;
+  gap: 1px;
+}
+.input-panel .chip-glyph { height: 30px; }
+.input-panel .chip-glyph svg { width: 26px; height: 26px; }
+.input-panel .chip-human { font-size: 9px; line-height: 1.2; }
+/* 左栏里不必再重复显示术语，把空间留给图形 */
+.input-panel .chip-term { display: none; }
+
+/* 键盘：稍微降低高度，省出首屏空间 */
+.mini-keyboard { max-height: 104px; }
+
+/* 折叠区：设置 / 试听 / 导出 收起来，需要时再展开 */
+.advanced-panel {
+  margin-top: 14px;
+  border: 1px solid #e4eae5;
+  border-radius: 10px;
+  background: #fafcfb;
+}
+.advanced-panel > summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  color: #4d5b53;
+  user-select: none;
+  list-style: none;
+}
+.advanced-panel > summary::-webkit-details-marker { display: none; }
+.advanced-panel > summary::before { content: "▸ "; color: #8ba394; }
+.advanced-panel[open] > summary::before { content: "▾ "; }
+.advanced-panel[open] > summary { border-bottom: 1px solid #e8eee9; }
+.advanced-body { padding: 4px 12px 12px; }
+.advanced-body .composer-row:first-child { margin-top: 6px; }
+
+/* 记号面板：两列网格，别一长条铺下去 */
+.mark-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 5px; }
+.chip-mark { padding: 4px 6px; font-size: 10.5px; }
+
+
+/* 时值卡片：网格放宽一点，避免文字挤成三行 */
+.input-panel .value-chips {
+  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+  gap: 6px;
+}
+.input-panel .chip-value {
+  grid-template-rows: 32px 10px auto;
+  padding: 5px 4px 4px;
+}
+.input-panel .chip-human { font-size: 9.5px; line-height: 1.25; }
+
+/* 「加进乐谱」这一行跟随滚动吸底，永远点得到 */
+.input-panel .composer-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 6;
+  background: linear-gradient(to top, #fff 72%, rgba(255,255,255,0));
+  padding: 10px 0 8px;
+  margin-top: 6px;
+}
+
+/* 左侧栏不要留白条：内容顶格 */
+.composer-layout { align-items: start; }
+.input-panel { display: block; }
+
+/* 说明性小字缩短行宽，读起来不累 */
+.input-panel .fine-print { font-size: 11px; line-height: 1.45; color: #8b978f; }
+
+
+/* 折叠区外的试听快捷条：永远点得到 */
+.play-shortcut {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 9px 11px;
+  border: 1px solid #e4eae5;
+  border-radius: 10px;
+  background: #f7faf8;
+}
+.play-shortcut .ghost-button { padding: 6px 12px; }
+.play-shortcut .auto-tag { margin-left: auto; font-size: 11px; color: #7d8a82; }

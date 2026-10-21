@@ -7,6 +7,17 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_CORE);
 const appUrl = process.env.APP_URL || "http://127.0.0.1:4492/";
 
+// 「试听 / 导出 / 设置」收在折叠区里，点它们之前要先展开（本轮布局调整）
+async function expandAdvancedPanel() {
+  await page.evaluate(() => {
+    for (const id of ["advancedPanel", "markPanel"]) {
+      const panel = document.querySelector("#" + id);
+      if (panel) panel.open = true;
+    }
+  });
+  await page.waitForTimeout(150);
+}
+
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await browser.newPage({ acceptDownloads: true });
 const errors = [];
@@ -135,6 +146,7 @@ try {
 
   // ---- 6) 导出 → 再导入 ----
   const downloadPromise = page.waitForEvent("download", { timeout: 60000 });
+  await expandAdvancedPanel();
   await page.click("#exportMusicXml");
   const download = await downloadPromise;
   const target = join(process.env.TEMP || ".", "v2-roundtrip.musicxml");
@@ -158,6 +170,7 @@ try {
   check("断奏记号在导出/导入后保留", back.staccato);
 
   // ---- 7) 试听 ----
+  await expandAdvancedPanel();
   await page.click("#playAll");
   await page.waitForTimeout(800);
   const playing = await page.evaluate(() => ({

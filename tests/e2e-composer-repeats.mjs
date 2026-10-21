@@ -3,6 +3,17 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_CORE);
+// 「试听 / 导出 / 设置」收在折叠区里，点它们之前要先展开（本轮布局调整）
+async function expandAdvancedPanel() {
+  await page.evaluate(() => {
+    for (const id of ["advancedPanel", "markPanel"]) {
+      const panel = document.querySelector("#" + id);
+      if (panel) panel.open = true;
+    }
+  });
+  await page.waitForTimeout(150);
+}
+
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 const page = await browser.newPage({ acceptDownloads: true });
 const errors = [];
@@ -18,6 +29,7 @@ const check = (name, ok, detail) => {
 try {
   await page.goto("http://127.0.0.1:4492/composer.html?debug=1", { waitUntil: "networkidle" });
   await page.waitForTimeout(900);
+  await expandAdvancedPanel();
 
   // 加 4 个音（4 小节）
   for (const midi of ["60", "62", "64", "65"]) {
