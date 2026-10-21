@@ -122,6 +122,18 @@
                 <label class="inline-field"><span>标题</span><input id="scoreTitle" type="text" value="未命名乐谱" aria-label="乐谱标题" /></label>
                 <label class="inline-field"><span>速度</span><input id="scoreTempo" type="number" min="20" max="320" value="84" aria-label="每分钟拍数" /><small>BPM</small></label>
                 <div class="inline-field tempo-inline">
+                  <span>反复记号</span>
+                  <div class="inline-group">
+                    <input id="repeatBar" type="number" min="1" step="1" value="1" aria-label="第几小节" title="第几小节" />
+                    <span class="tempo-label">小节</span>
+                    <button class="ghost-button small" id="addRepeatStart" type="button" title="从这里开始反复">↺ 起点</button>
+                    <button class="ghost-button small" id="addRepeatEnd" type="button" title="到这里回到起点">↻ 终点</button>
+                    <input id="repeatTimes" type="number" min="2" max="16" step="1" value="2" aria-label="反复几遍" title="反复几遍" />
+                    <span class="tempo-label">遍</span>
+                  </div>
+                  <p class="fine-print" id="repeatInfo">还没有反复记号。先点「↺ 起点」再点「↻ 终点」，中间那段就会反复。</p>
+                </div>
+                <div class="inline-field tempo-inline">
                   <span>中途变速</span>
                   <div class="inline-group">
                     <input id="tempoBeat" type="number" min="1" step="1" value="1" aria-label="从第几小节开始变速" title="从第几小节开始" />

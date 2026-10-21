@@ -33,6 +33,7 @@ import {
   NOTE_VALUES as V2_NOTE_VALUES, DYNAMICS as V2_DYNAMICS,
   ARTICULATIONS as V2_ARTICULATIONS, ORNAMENTS as V2_ORNAMENTS,
 } from "./composer-ui-model.js";
+import { createRepeat, validateRepeats, expandPlaybackOrder } from "./composer-repeats.js";
 import {
   v2ScoreToV1, isV2Part, v2EventsOf, v2VoiceFor, writeBackEvent,
 } from "./composer-v2adapter.js";
@@ -48,6 +49,8 @@ const els = {
   pitchUp: byId("pitchUp"), pitchPlay: byId("pitchPlay"), miniKeyboard: byId("miniKeyboard"),
   valueChips: byId("valueChips"), addNote: byId("addNote"), undo: byId("undo"), redo: byId("redo"),
   scoreTitle: byId("scoreTitle"), scoreTempo: byId("scoreTempo"), scoreTime: byId("scoreTime"),
+  repeatBar: byId("repeatBar"), repeatTimes: byId("repeatTimes"),
+  addRepeatStart: byId("addRepeatStart"), addRepeatEnd: byId("addRepeatEnd"), repeatInfo: byId("repeatInfo"),
   tempoBeat: byId("tempoBeat"), tempoBpm: byId("tempoBpm"), addTempoChange: byId("addTempoChange"),
   scoreKey: byId("scoreKey"), scoreClef: byId("scoreClef"), scoreTimbre: byId("scoreTimbre"),
   measureStatus: byId("measureStatus"),
@@ -423,7 +426,9 @@ function stopPlayback(showMessage = true) {
 function playRange(beatFrom = 0, beatTo = Infinity) {
   stopPlayback(false);
   const context = ensureAudio();
-  const notes = scoreToPlayableNotes(state.scoreView).filter((note) => {
+  // 有反复记号时按反复顺序展开（反复改变的是播放顺序，不是音符本身）
+  const allNotes = expandForRepeats(v2PlayableNotes(state.score));
+  const notes = allNotes.filter((note) => {
     const start = note.startBeat;
     const end = start + note.durationBeats;
     return end > beatFrom + 1e-9 && start < beatTo - 1e-9;
@@ -438,10 +443,12 @@ function playRange(beatFrom = 0, beatTo = Infinity) {
     const offset = Math.max(0, note.startBeat - beatFrom);
     const duration = Math.min(note.durationBeats, beatTo - Math.max(note.startBeat, beatFrom));
     if (duration <= 0) continue;
-    const part = state.score.parts.find((item) => item.id === note.partId);
-    playPitch(part || { timbre: "piano" }, note.midi, startAt + offset * secondsPerBeat, duration * secondsPerBeat);
+    // v1 视图的 partId 对应 v1 的声部；音色从视图里取，取不到退回 piano
+    const viewPart = ((state.scoreView && state.scoreView.parts) || [])
+      .find((item) => item.id === note.partId);
+    playPitch(viewPart || { timbre: "piano" }, note.midi, startAt + offset * secondsPerBeat, duration * secondsPerBeat);
   }
-  const totalSeconds = (Math.min(beatTo, v2TotalBeats(state.score)) - beatFrom) * secondsPerBeat;
+  const totalSeconds = (Math.min(beatTo, Math.max(...allNotes.map((note) => note.startBeat + note.durationBeats))) - beatFrom) * secondsPerBeat;
   state.isPlaying = true;
   els.stopPlay.disabled = false;
   els.playbackState.textContent = `正在播放 ${Math.max(0, totalSeconds).toFixed(1)} 秒`;
@@ -816,6 +823,7 @@ function afterScoreChange(rerender = true) {
   syncPartSelect();
   refreshStaffVoiceSelectors();
   buildMarkGroups();
+  updateRepeatInfo();
   if (rerender) renderScore();
   syncHistoryButtons();
 }
@@ -1174,6 +1182,77 @@ function appendMeasureIfNeeded() {
 }
 
 /**
+ * 加反复记号（起点/终点）。
+ * times 记在终点上，表示「这一段总共唱几遍」。
+ */
+function addRepeatMark(kind) {
+  const score = currentScore();
+  if (!score) return;
+  const bar = Math.max(1, Math.round(Number(els.repeatBar.value) || 1));
+  score.repeats = (score.repeats || []).filter((mark) => mark.bar !== bar);
+  score.repeats.push(kind === "start"
+    ? createRepeat(bar, "repeat-start")
+    : createRepeat(bar, "repeat-end", { times: Number(els.repeatTimes.value) || 2 }));
+  score.repeats.sort((left, right) => left.bar - right.bar);
+  const problems = validateRepeats(score.repeats);
+  pushHistory();
+  afterScoreChange();
+  updateRepeatInfo();
+  if (problems.length) showToast("反复记号没配对：" + problems[0]);
+  else showToast(kind === "start" ? `第 ${bar} 小节起反复。` : `第 ${bar} 小节为终点。`);
+}
+
+/** 刷新反复记号说明。 */
+function updateRepeatInfo() {
+  if (!els.repeatInfo) return;
+  const marks = (currentScore() && currentScore().repeats) || [];
+  if (!marks.length) {
+    els.repeatInfo.textContent = "还没有反复记号。先点「↺ 起点」再点「↻ 终点」，中间那段就会反复。";
+    return;
+  }
+  const parts = marks.map((mark) => mark.type === "repeat-start"
+    ? `第 ${mark.bar} 小节反复起点`
+    : `第 ${mark.bar} 小节终点（共 ${mark.times} 遍）`);
+  els.repeatInfo.textContent = parts.join(" · ");
+}
+
+/**
+ * 按反复记号展开播放顺序。
+ *
+ * 反复记号改变的是「演唱/放映的顺序」而不是音符本身，所以这里把
+ * 「按小节顺序」的音符按 expandPlaybackOrder 的结果重新连起来。
+ */
+function expandForRepeats(notes) {
+  const score = currentScore();
+  const marks = (score && score.repeats) || [];
+  if (!marks.length) return notes;
+  const view = state.scoreView;
+  if (!view) return notes;
+  const per = view.beatsPerMeasure;
+  const totalMeasures = Math.max(1, Math.ceil(v2TotalBeats(score) / per));
+  const order = expandPlaybackOrder(totalMeasures, marks);
+  const base = [...notes].sort((left, right) => left.startBeat - right.startBeat);
+  // 第一遍的时长（不含反复前的引子）
+  const firstPassBeats = totalMeasures * per;
+  const intro = base.filter((note) => note.startBeat < order.indexOf(1) >= 0 ? false : note.startBeat < (Math.min(...marks.map((mark) => mark.bar)) - 1) * per);
+  const repeatFrom = (Math.min(...marks.map((mark) => mark.bar)) - 1) * per;
+  const head = base.filter((note) => note.startBeat < repeatFrom - 1e-6);
+  const sectionNotes = base.filter((note) => note.startBeat >= repeatFrom - 1e-6
+    && note.startBeat < firstPassBeats - 1e-6);
+  const orderStart = Math.min(...marks.map((mark) => mark.bar));
+  const cycleCount = order.filter((bar) => bar === orderStart).length;
+  const out = [...head];
+  let cursor = repeatFrom;
+  for (let cycle = 0; cycle < Math.max(1, cycleCount); cycle += 1) {
+    for (const note of sectionNotes) {
+      out.push({ ...note, startBeat: note.startBeat - repeatFrom + cursor });
+    }
+    cursor += (firstPassBeats - repeatFrom);
+  }
+  return out.sort((left, right) => left.startBeat - right.startBeat);
+}
+
+/**
  * 加一处「中途变速」：从第 N 小节起速度改成 X BPM。
  * v2 模型里是 tempoChanges: [{beat, bpm}]，导出 MusicXML 会写成 <sound tempo>。
  */
@@ -1407,6 +1486,8 @@ function applySettings() {
 function bindEvents() {
   els.addNote.addEventListener("click", addCurrentNote);
   if (els.addTempoChange) els.addTempoChange.addEventListener("click", addTempoChange);
+  if (els.addRepeatStart) els.addRepeatStart.addEventListener("click", () => addRepeatMark("start"));
+  if (els.addRepeatEnd) els.addRepeatEnd.addEventListener("click", () => addRepeatMark("end"));
   els.undo.addEventListener("click", undo);
   for (const [element, handler] of [
     [els.scoreTitle, () => applySettings()],

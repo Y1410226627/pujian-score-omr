@@ -119,6 +119,8 @@ export function musicXmlToV2(source, options = {}) {
   let tempo = 84;
   const tempoChanges = [];
   const systemTexts = [];
+  const repeatMarks = [];
+  const endingMarks = [];
   const seenTime = new Set();
 
   const parts = [];
@@ -189,6 +191,23 @@ export function musicXmlToV2(source, options = {}) {
           const clef = sign === "F" ? "bass" : sign === "C" ? "alto" : "treble";
           ensureStaff(number, clef).staff.clef = clef;
         }
+      }
+
+      // 反复记号（<repeat direction="backward"> / <ending number="1">）
+      for (const repeatNode of children(measureNode, "repeat")) {
+        const direction = repeatNode.getAttribute("direction") || "";
+        const times = Number(repeatNode.getAttribute("times")) || 2;
+        const mark = direction === "forward"
+          ? { bar: measureIndex + 1, type: "repeat-start" }
+          : { bar: measureIndex + 1, type: "repeat-end", times: Math.max(2, times) };
+        repeatMarks.push(mark);
+      }
+      for (const endingNode of children(measureNode, "ending")) {
+        endingMarks.push({
+          bar: measureIndex + 1,
+          type: endingNode.getAttribute("type") === "start" ? "ending-start" : "ending-stop",
+          number: Number((endingNode.getAttribute("number") || "1").split(",")[0]) || 1,
+        });
       }
 
       // 速度与文字
@@ -360,7 +379,7 @@ export function musicXmlToV2(source, options = {}) {
     systemTexts,
   });
   score.measures = Math.max(stats.measures, 1);
-  return { score, stats };
+  return { score, stats, repeats: repeatMarks, endings: endingMarks };
 }
 
 function dedupeTempo(list) {
@@ -485,6 +504,23 @@ export function v2ToMusicXml(score) {
           }
         }
       });
+      // 反复记号：起点写 <repeat direction="forward"/>，终点写 <repeat direction="backward" times="N"/>
+      for (const mark of (score.repeats || [])) {
+        if (mark.bar !== measureIndex + 1) continue;
+        if (mark.type === "repeat-start") {
+          lines.push('      <repeat direction="forward"/>');
+        } else if (mark.type === "repeat-end") {
+          lines.push(`      <repeat direction="backward" times="${Math.max(2, mark.times || 2)}"/>`);
+        }
+      }
+      for (const mark of (score.endings || [])) {
+        if (mark.bar !== measureIndex + 1) continue;
+        if (mark.type === "ending-start") {
+          lines.push(`      <ending number="${mark.number || 1}" type="start"/>`);
+        } else {
+          lines.push(`      <ending number="${mark.number || 1}" type="stop"/>`);
+        }
+      }
       lines.push("    </measure>");
     }
     lines.push("  </part>");
