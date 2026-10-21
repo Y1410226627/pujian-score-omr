@@ -6,11 +6,14 @@ echo ============================================================
 echo   安装真实音色（采样音源：钢琴 / 弦乐 / 合唱 / 民乐 / 打击乐 / 管乐 / 键盘）
 echo ============================================================
 echo.
-echo 全部安装约 140 MB，下载到项目内 .assets\soundfonts 目录（不进 git）。
-echo   . 钢琴：Salamander Grand Piano V3（CC BY 3.0）
+echo 全部安装约 220 MB，下载到项目内 .assets\soundfonts 目录（不进 git）。
+echo   . 钢琴：Meta Open Piano（CC0，4 层力度 x 88 键）
+echo   . 尼龙弦 / 钢弦吉他：Meta Open Guitar（CC0，各 3 层 x 88 键）
 echo   . 合唱：Sonatina Symphonic Orchestra 的女声 / 男声 / 混声合唱（CC Sampling Plus 1.0）
 echo   . 弦乐细分 / 管乐 / 键盘：FluidR3_GM（CC BY 3.0）
 echo   . 民族打击乐近似采样：VCSL（CC0 1.0）
+echo.
+echo 注意：中阮 / 柳琴目前用 Meta 尼龙弦 / 钢弦吉他近似，不是真实中阮 / 柳琴录音。
 echo 许可与署名详见装好的 LICENSES.md。
 echo.
 echo 只装某一类可以带参数（在命令行里运行本文件或下面这行）：
