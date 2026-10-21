@@ -65,6 +65,29 @@ function ownText(node) {
   return out.trim();
 }
 
+/**
+ * 取（或新建）某个谱表的「扩展 voice」，用于容纳同一 voice 内拍位冲突的音。
+ *
+ * 为什么需要：真实乐谱里同一 (staff, voice) 下的音经常会重叠
+ * （内声部借用同一 voice 编号、或制谱软件导出时 voice 号重复）。
+ * MusicXML 允许这样写，但单条 voice 的顺序结构放不下，
+ * 所以分流到独立 voice —— 保证一个音都不丢、拍位也不变。
+ */
+function ensureOverflowVoice(entry, voiceNumber) {
+  const key = `overflow-${voiceNumber}`;
+  if (!entry.overflow) entry.overflow = new Map();
+  if (!entry.overflow.has(key)) {
+    const voice = createVoice({});
+    // 关键：voice 号仍记原谱的号（用户对着谱子看的是「第几条声部线」，
+    // 分流只影响内部容器，不应改变它在谱面上的身份）。
+    voice.number = Number(voiceNumber) || 1;
+    voice.overflowFor = Number(voiceNumber) || 1;
+    entry.staff.voices.push(voice);
+    entry.overflow.set(key, voice);
+  }
+  return entry.overflow.get(key);
+}
+
 /** 从 MusicXML 根节点读取 divisions（每个四分音符的细分格数）。 */
 function readDivisions(root) {
   const divisionsNode = first(root, "divisions");
@@ -143,6 +166,11 @@ export function musicXmlToV2(source, options = {}) {
       if (!staffMap.has(key)) {
         const staff = createStaff({ id: `${partId}-staff${key}`, clef: clef || "treble" });
         staff.number = Number(key);
+        // createStaff 自带一个空 voice：编号必须等于真实第一条 voice（1），
+        // 否则导出时它会占掉 1 号、把真正的 voice 1 挤成 2 号，往返后 voice 号就变了。
+        for (const [voiceIndex, defaultVoice] of staff.voices.entries()) {
+          if (defaultVoice.number === undefined) defaultVoice.number = voiceIndex + 1;
+        }
         staffMap.set(key, { staff, voices: new Map() });
         partStats.staves += 1;
       }
@@ -317,9 +345,28 @@ export function musicXmlToV2(source, options = {}) {
             ...(articulations.includes("fermata") ? { fermata: true } : {}),
           });
           if (!result.ok) {
-            // 同一拍位重复（例如多个 voice 被合并）：跳过但不静默，记进统计
-            stats.skipped = (stats.skipped || 0) + 1;
-            continue;
+            // 同一 voice 内拍位冲突（真实乐谱里很常见：内声部借用同一 voice 编号）。
+            // 不能丢音——分流到该谱表的「扩展 voice」，拍位保持不变。
+            const overflowVoice = ensureOverflowVoice(entry, voiceNumber);
+            const retry = addEvent(overflowVoice, {
+              beat, beats: durationBeats, midi, chordWith,
+              ...(tieStart ? { tie: "start" } : {}),
+              ...(tieStop ? { tieStop: true } : {}),
+              ...(accidental ? { accidental } : {}),
+              ...(articulations.length ? { articulations } : {}),
+              ...(ornaments.length ? { ornaments } : {}),
+              ...(slurStart ? { slur: "start" } : {}),
+              ...(slurStop ? { slurStop: true } : {}),
+              ...(isGrace ? { grace: true } : {}),
+              ...(timeMod ? { tuplet: Number(textOf(timeMod, "actual-notes")) || 3 } : {}),
+              ...(articulations.includes("fermata") ? { fermata: true } : {}),
+            });
+            if (!retry.ok) {
+              // 连扩展 voice 也放不下（极少见）：如实记数，不静默
+              stats.skipped = (stats.skipped || 0) + 1;
+              continue;
+            }
+            stats.rerouted = (stats.rerouted || 0) + 1;
           }
           stats.notes += 1;
           partStats.notes += 1;
@@ -330,8 +377,14 @@ export function musicXmlToV2(source, options = {}) {
           if (ornaments.length) stats.ornaments += 1;
           if (isGrace) result.event.grace = true;
           // 记下 tie 起点，供后面的 tie stop 关联
-          if (tieStart) pendingTies.set(midi, result.event.id);
-          if (tieStop && pendingTies.has(midi)) pendingTies.delete(midi);
+          // 连音线（tie）的语义是「同一个音跨小节延长」，所以导入时要把两端合并成一个跨小节事件，
+          // 否则一个长音会变成两个独立音符（实测 Hall 曲往返后多出 1 个音）。
+          // 连音线（tie）：只把记号记在事件上，**不合并事件**。
+          // 合并会改变音符数，实测在「拍号变化 / 弱起」的谱子上会把不该合并的音也接起来，
+          // 导致往返后音符总数变化（更糟）。保留记号已足够让别的制谱软件正确理解，
+          // 跨小节长音在本模型里本来就存成一个事件，导出时会自动写成 起点tie + 终点tie。
+          if (tieStart) result.event.tie = "start";
+          if (tieStop) result.event.tieStop = true;
         } else {
           const result = addEvent(voice, { beat, beats: durationBeats, midi: 0, rest: true });
           if (result.ok) stats.rests += 1;
@@ -481,11 +534,22 @@ export function v2ToMusicXml(score) {
       // 本小节内每条 (staff, voice) 的事件
       const staves = part.staves || [];
       staves.forEach((staff, staffIndex) => {
-        const staffNumber = staffIndex + 1;
-        for (const voice of staff.voices || []) {
-          // voice 号必须如实写：写死成 1 会让同一谱表的多条 voice 在再导入时
-          // 被合并到一条里，拍位互相覆盖（实测往返后 217 个音只剩 195 个）。
-          const voiceNumber = voice.number || staff.voices.indexOf(voice) + 1;
+        // 用谱表自己的编号（staff.number），不要用数组下标：
+        // 导入时谱表可能是乱序放的（例如先遇到低音谱表），用下标会让上下两行颠倒。
+        const staffNumber = Number(staff.number) || (staffIndex + 1);
+        // voice 号的写法：
+        //   · 空 voice（没有任何事件）不占号，否则会把后面真正的 voice 挤偏（往返后号就变了）；
+        //   · 第一个用这个号的容器 → 写原号；
+        //   · 后续「同号」容器（冲突分流产生的）→ 顺延一个没用过的号，
+        //     否则两批音会挤进同一条 <voice>，再导入时互相冲突丢音。
+        const usedVoiceNumbers = new Set();
+        const voicesToEmit = (staff.voices || []).filter((voice) => (voice.events || []).length > 0);
+        for (const [voiceIndex, voice] of voicesToEmit.entries()) {
+          let voiceNumber = Number(voice.number) || (voiceIndex + 1);
+          if (usedVoiceNumbers.has(voiceNumber)) {
+            voiceNumber = Math.max(0, ...usedVoiceNumbers) + 1;
+          }
+          usedVoiceNumbers.add(voiceNumber);
           const events = (voice.events || [])
             .filter((event) => event.beat < measureEnd - 1e-6 && event.beat + event.beats > measureStart + 1e-6)
             .sort((left, right) => left.beat - right.beat
