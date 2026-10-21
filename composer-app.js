@@ -51,6 +51,7 @@ const els = {
   scoreTitle: byId("scoreTitle"), scoreTempo: byId("scoreTempo"), scoreTime: byId("scoreTime"),
   repeatBar: byId("repeatBar"), repeatTimes: byId("repeatTimes"),
   addRepeatStart: byId("addRepeatStart"), addRepeatEnd: byId("addRepeatEnd"), repeatInfo: byId("repeatInfo"),
+  endingStart: byId("endingStart"), endingEnd: byId("endingEnd"), endingNumber: byId("endingNumber"), addEnding: byId("addEnding"),
   tempoBeat: byId("tempoBeat"), tempoBpm: byId("tempoBpm"), addTempoChange: byId("addTempoChange"),
   scoreKey: byId("scoreKey"), scoreClef: byId("scoreClef"), scoreTimbre: byId("scoreTimbre"),
   measureStatus: byId("measureStatus"),
@@ -1202,6 +1203,26 @@ function addRepeatMark(kind) {
   else showToast(kind === "start" ? `第 ${bar} 小节起反复。` : `第 ${bar} 小节为终点。`);
 }
 
+/**
+ * 加一个「房子」（1. / 2. 段）：同一位置、不同遍数唱不同内容。
+ * 第 1 遍唱 1. 房子，第 2 遍跳过它直接唱 2. 房子。
+ */
+function addEnding() {
+  const score = currentScore();
+  if (!score) return;
+  const from = Math.max(1, Math.round(Number(els.endingStart.value) || 1));
+  const to = Math.max(from, Math.round(Number(els.endingEnd.value) || from));
+  const num = Math.max(1, Math.round(Number(els.endingNumber.value) || 1));
+  score.repeats = (score.repeats || []).filter((mark) => !(String(mark.type).startsWith("ending")
+    && mark.bar >= from && mark.bar <= to));
+  score.repeats.push({ bar: from, type: "ending-start", number: num });
+  score.repeats.push({ bar: to, type: "ending-stop", number: num });
+  score.repeats.sort((left, right) => left.bar - right.bar);
+  pushHistory();
+  afterScoreChange();
+  showToast(`已加：第 ${from}–${to} 小节是第 ${num} 遍才唱的房子。`);
+}
+
 /** 刷新反复记号说明。 */
 function updateRepeatInfo() {
   if (!els.repeatInfo) return;
@@ -1488,6 +1509,7 @@ function bindEvents() {
   if (els.addTempoChange) els.addTempoChange.addEventListener("click", addTempoChange);
   if (els.addRepeatStart) els.addRepeatStart.addEventListener("click", () => addRepeatMark("start"));
   if (els.addRepeatEnd) els.addRepeatEnd.addEventListener("click", () => addRepeatMark("end"));
+  if (els.addEnding) els.addEnding.addEventListener("click", addEnding);
   els.undo.addEventListener("click", undo);
   for (const [element, handler] of [
     [els.scoreTitle, () => applySettings()],

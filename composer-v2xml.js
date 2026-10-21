@@ -426,6 +426,9 @@ export function v2ToMusicXml(score) {
       (staff.voices || []).flatMap((voice) => (voice.events || []).map((event) => event.beat + event.beats)))),
     ...((score.tempoChanges || []).map((change) => change.beat + 1)),
     ...((score.systemTexts || []).map((text) => text.beat + 1)),
+    // 反复记号 / 房子也占用小节：它们在第 N 小节出现，就要导出到第 N 小节，
+    // 否则「只标了记号的空白小节」会被截掉（实测房子丢失）。
+    ...((score.repeats || []).map((mark) => (Number(mark.bar) || 1) * per)),
   ]);
   const totalMeasures = Math.max(1, Math.ceil(coveredBeat(score) / per - 1e-9));
   const lines = [];
@@ -513,11 +516,12 @@ export function v2ToMusicXml(score) {
           lines.push(`      <repeat direction="backward" times="${Math.max(2, mark.times || 2)}"/>`);
         }
       }
-      for (const mark of (score.endings || [])) {
+      // 房子与反复记号存在同一处（score.repeats），一起遍历
+      for (const mark of (score.repeats || [])) {
         if (mark.bar !== measureIndex + 1) continue;
         if (mark.type === "ending-start") {
           lines.push(`      <ending number="${mark.number || 1}" type="start"/>`);
-        } else {
+        } else if (mark.type === "ending-stop") {
           lines.push(`      <ending number="${mark.number || 1}" type="stop"/>`);
         }
       }
