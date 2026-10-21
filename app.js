@@ -36,6 +36,7 @@ const els = {
   partPanel: byId("partPanel"), partList: byId("partList"), partSelectAll: byId("partSelectAll"),
   partSelectNone: byId("partSelectNone"), pianoToggle: byId("pianoToggle"), pianoToggleWrap: byId("pianoToggleWrap"),
   notesEmpty: byId("notesEmpty"), addNoteButton: byId("addNoteButton"), midiButton: byId("midiButton"),
+  measureJumpInput: byId("measureJumpInput"), measureJumpButton: byId("measureJumpButton"),
   audioButton: byId("audioButton"), audioExportLabel: byId("audioExportLabel"), playButton: byId("playButton"),
   playIcon: byId("playIcon"), playLabel: byId("playLabel"), stopButton: byId("stopButton"),
   tempoInput: byId("tempoInput"), toast: byId("toast"), chooseFileButton: byId("chooseFileButton"),
@@ -1085,6 +1086,181 @@ function parsePitch(value) {
 function formatBeatCount(beats) {
   return Number.isInteger(beats) ? String(beats) : String(Number(beats.toFixed(3)));
 }
+/** 把一个音符建成可编辑的一行（音高 / 起拍 / 时值 / 删除）。 */
+function buildNoteRow(note, index) {
+  const row = document.createElement("div");
+  row.className = "note-row";
+  if (isLowConfidence(note)) row.classList.add("is-low-confidence");
+  row.hidden = state.onlyLowConfidence && !isLowConfidence(note);
+  row.dataset.noteId = note.id;
+  row.dataset.eventId = String(note.eventId);
+  const rowParts = [note.partName, note.voice ? `声部 ${note.voice}` : ""].filter(Boolean).join(" · ");
+  const confidenceText = isLowConfidence(note) ? ` · 置信度偏低（${note.confidence.toFixed(2)}），建议校对` : "";
+  row.title = rowParts + confidenceText;
+  const indexLabel = document.createElement("span");
+  indexLabel.className = "note-index";
+  indexLabel.textContent = String(index + 1).padStart(2, "0");
+  indexLabel.tabIndex = 0;
+  indexLabel.setAttribute("role", "button");
+  indexLabel.title = "点击设为选区起点，Shift+点击设为终点";
+  const applySelection = (extend) => {
+    state.selection = extend && state.selection
+      ? { anchorId: state.selection.anchorId, focusId: note.id }
+      : { anchorId: note.id, focusId: note.id };
+    markSelectedRows();
+    updateSelectionUi();
+  };
+  indexLabel.addEventListener("click", (event) => {
+    event.preventDefault();
+    applySelection(event.shiftKey);
+  });
+  indexLabel.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    applySelection(event.shiftKey);
+  });
+  // 点序号太小的目标容易点空：整行（除输入框外）点击都当作设选区，
+  // 这样"演奏任意一段"的操作不需要精确瞄准那个两位数字。
+  row.addEventListener("click", (event) => {
+    if (event.target.closest("input, button, select")) return;
+    applySelection(event.shiftKey);
+  });
+  const input = document.createElement("input");
+  input.className = "note-pitch";
+  input.type = "text";
+  input.value = note.pitch;
+  input.setAttribute("aria-label", "音符音高");
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  const startInput = document.createElement("input");
+  startInput.className = "note-onset";
+  startInput.type = "number";
+  startInput.min = "0";
+  startInput.step = "any";
+  startInput.value = formatBeatCount(Number(note.startBeat) || 0);
+  startInput.setAttribute("aria-label", "音符起拍（以四分音符为一拍）");
+  startInput.title = "从乐曲开始计算的拍数，以四分音符为一拍";
+  const durationSelect = document.createElement("select");
+  durationSelect.className = "note-duration";
+  durationSelect.setAttribute("aria-label", "音符时值");
+  if (note.duration === "custom") {
+    const customOption = document.createElement("option");
+    customOption.value = "custom";
+    customOption.textContent = `原时值 · ${formatBeatCount(beatsForNote(note))} 拍`;
+    durationSelect.append(customOption);
+  }
+  for (const [value, label] of durations) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    durationSelect.append(option);
+  }
+  durationSelect.value = note.duration;
+  const deleteButton = document.createElement("button");
+  deleteButton.className = "delete-note";
+  deleteButton.type = "button";
+  deleteButton.title = "删除音符";
+  deleteButton.setAttribute("aria-label", "删除音符");
+  deleteButton.textContent = "×";
+  row.append(indexLabel, input, startInput, durationSelect, deleteButton);
+  const focusScoreNote = () => drawNoteOverlay(state.notes, note.id);
+  const clearFocusedScoreNote = () => drawNoteOverlay(state.notes);
+  input.addEventListener("focus", focusScoreNote);
+  startInput.addEventListener("focus", focusScoreNote);
+  durationSelect.addEventListener("focus", focusScoreNote);
+  row.addEventListener("mouseenter", focusScoreNote);
+  row.addEventListener("mouseleave", clearFocusedScoreNote);
+  input.addEventListener("change", () => {
+    const parsed = parsePitch(input.value);
+    if (!parsed) {
+      input.setCustomValidity("请输入音名，如 C4、F#4、Bb3 或 C(+0.5)4");
+      input.reportValidity();
+      input.value = note.pitch;
+      input.setCustomValidity("");
+      return;
+    }
+    note.pitch = parsed.label;
+    note.midi = parsed.midi;
+    updatePlaybackReady();
+  });
+  startInput.addEventListener("change", () => {
+    const rawStartBeat = startInput.value.trim();
+    const startBeat = Number(rawStartBeat);
+    if (!rawStartBeat || !Number.isFinite(startBeat) || startBeat < 0) {
+      startInput.setCustomValidity("起拍需要是大于或等于 0 的数字。");
+      startInput.reportValidity();
+      startInput.value = formatBeatCount(Number(note.startBeat) || 0);
+      startInput.setCustomValidity("");
+      return;
+    }
+    note.startBeat = startBeat;
+    updatePlaybackReady();
+  });
+  durationSelect.addEventListener("change", (event) => {
+    note.duration = event.target.value;
+    if (durationBeats[note.duration]) note.durationBeats = durationBeats[note.duration];
+  });
+  deleteButton.addEventListener("click", () => {
+    state.notes = state.notes.filter((item) => item.id !== note.id);
+    renderNotes();
+    updatePartControls();
+    refreshScoreOverlay();
+  });
+  if (state.noteRowById) state.noteRowById.set(note.id, row);
+  return row;
+}
+
+/**
+ * 把音符按「小节 → 声部」分组。
+ *
+ * 用户要的是「左边第几小节，右边这个小节里从上到下的几个声部」，
+ * 而不是一长条按时间排列、找一句要翻半天的平铺列表。
+ */
+function groupNotesByMeasure() {
+  const per = beatsPerMeasureFromSummary(state.scoreInfo && state.scoreInfo.timeSummary);
+  const measures = new Map();
+  state.notes.forEach((note, index) => {
+    // measure（跨页合并时已经按前面各页小节数累加）最可靠；
+    // 直接用 measureIndex 的话，第 2 页的音会和第 1 页撞在同一小节里。
+    const measureNumber = Number(note.measure);
+    const explicit = Number(note.measureIndex);
+    let measureIndex;
+    if (note.measure !== undefined && note.measure !== null && note.measure !== "" && Number.isFinite(measureNumber)) {
+      measureIndex = Math.max(0, Math.floor(measureNumber - 1));
+    } else if (note.measureIndex !== undefined && note.measureIndex !== null && Number.isFinite(explicit)) {
+      measureIndex = Math.max(0, Math.floor(explicit));
+    } else {
+      measureIndex = Math.floor((Number(note.startBeat) || 0) / per + 1e-6);
+    }
+    if (!measures.has(measureIndex)) measures.set(measureIndex, new Map());
+    const voices = measures.get(measureIndex);
+    const key = voiceIdentity(note);
+    if (!voices.has(key)) {
+      voices.set(key, { key, name: partDisplayName(key, note.partName || "旋律"), items: [] });
+    }
+    voices.get(key).items.push({ note, index });
+  });
+  return [...measures.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([measureIndex, voices]) => {
+      const list = [...voices.values()]
+        .sort((left, right) => {
+          const [leftHead, leftNumber] = partSortKey(left.key);
+          const [rightHead, rightNumber] = partSortKey(right.key);
+          return leftHead.localeCompare(rightHead) || leftNumber - rightNumber;
+        })
+        .map((voice) => ({
+          ...voice,
+          items: voice.items.sort((left, right) => (Number(left.note.startBeat) || 0) - (Number(right.note.startBeat) || 0)),
+        }));
+      return {
+        measureIndex,
+        voices: list,
+        count: list.reduce((sum, voice) => sum + voice.items.length, 0),
+      };
+    });
+}
+
 function renderNotes() {
   els.noteList.replaceChildren();
   // 音符行索引：高亮时只碰"正在播的这一批"，不再每次都遍历全部行。
@@ -1095,134 +1271,55 @@ function renderNotes() {
     els.noteList.append(els.notesEmpty);
   } else {
     els.notesEmpty.hidden = true;
-    state.notes.forEach((note, index) => {
-      const row = document.createElement("div");
-      row.className = "note-row";
-      if (isLowConfidence(note)) row.classList.add("is-low-confidence");
-      row.hidden = state.onlyLowConfidence && !isLowConfidence(note);
-      row.dataset.noteId = note.id;
-      row.dataset.eventId = String(note.eventId);
-      const rowParts = [note.partName, note.voice ? `声部 ${note.voice}` : ""].filter(Boolean).join(" · ");
-      const confidenceText = isLowConfidence(note) ? ` · 置信度偏低（${note.confidence.toFixed(2)}），建议校对` : "";
-      row.title = rowParts + confidenceText;
-      const indexLabel = document.createElement("span");
-      indexLabel.className = "note-index";
-      indexLabel.textContent = String(index + 1).padStart(2, "0");
-      indexLabel.tabIndex = 0;
-      indexLabel.setAttribute("role", "button");
-      indexLabel.title = "点击设为选区起点，Shift+点击设为终点";
-      const applySelection = (extend) => {
-        state.selection = extend && state.selection
-          ? { anchorId: state.selection.anchorId, focusId: note.id }
-          : { anchorId: note.id, focusId: note.id };
-        markSelectedRows();
-        updateSelectionUi();
-      };
-      indexLabel.addEventListener("click", (event) => {
-        event.preventDefault();
-        applySelection(event.shiftKey);
-      });
-      indexLabel.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        applySelection(event.shiftKey);
-      });
-      // 点序号太小的目标容易点空：整行（除输入框外）点击都当作设选区，
-      // 这样"演奏任意一段"的操作不需要精确瞄准那个两位数字。
-      row.addEventListener("click", (event) => {
-        if (event.target.closest("input, button, select")) return;
-        applySelection(event.shiftKey);
-      });
-      const input = document.createElement("input");
-      input.className = "note-pitch";
-      input.type = "text";
-      input.value = note.pitch;
-      input.setAttribute("aria-label", "音符音高");
-      input.autocomplete = "off";
-      input.spellcheck = false;
-      const startInput = document.createElement("input");
-      startInput.className = "note-onset";
-      startInput.type = "number";
-      startInput.min = "0";
-      startInput.step = "any";
-      startInput.value = formatBeatCount(Number(note.startBeat) || 0);
-      startInput.setAttribute("aria-label", "音符起拍（以四分音符为一拍）");
-      startInput.title = "从乐曲开始计算的拍数，以四分音符为一拍";
-      const durationSelect = document.createElement("select");
-      durationSelect.className = "note-duration";
-      durationSelect.setAttribute("aria-label", "音符时值");
-      if (note.duration === "custom") {
-        const customOption = document.createElement("option");
-        customOption.value = "custom";
-        customOption.textContent = `原时值 · ${formatBeatCount(beatsForNote(note))} 拍`;
-        durationSelect.append(customOption);
+    const measures = groupNotesByMeasure();
+    for (const measure of measures) {
+      const group = document.createElement("section");
+      group.className = "measure-group";
+      group.dataset.measure = String(measure.measureIndex + 1);
+      const head = document.createElement("div");
+      head.className = "measure-head";
+      const title = document.createElement("strong");
+      title.textContent = `第 ${measure.measureIndex + 1} 小节`;
+      const meta = document.createElement("span");
+      meta.textContent = `${measure.count} 个音`;
+      head.append(title, meta);
+      group.append(head);
+      for (const voice of measure.voices) {
+        const block = document.createElement("div");
+        block.className = "measure-voice";
+        const label = document.createElement("div");
+        label.className = "measure-voice-name";
+        label.textContent = `${voice.name} · ${voice.items.length} 个音`;
+        block.append(label);
+        for (const item of voice.items) block.append(buildNoteRow(item.note, item.index));
+        group.append(block);
       }
-      for (const [value, label] of durations) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = label;
-        durationSelect.append(option);
-      }
-      durationSelect.value = note.duration;
-      const deleteButton = document.createElement("button");
-      deleteButton.className = "delete-note";
-      deleteButton.type = "button";
-      deleteButton.title = "删除音符";
-      deleteButton.setAttribute("aria-label", "删除音符");
-      deleteButton.textContent = "×";
-      row.append(indexLabel, input, startInput, durationSelect, deleteButton);
-      const focusScoreNote = () => drawNoteOverlay(state.notes, note.id);
-      const clearFocusedScoreNote = () => drawNoteOverlay(state.notes);
-      input.addEventListener("focus", focusScoreNote);
-      startInput.addEventListener("focus", focusScoreNote);
-      durationSelect.addEventListener("focus", focusScoreNote);
-      row.addEventListener("mouseenter", focusScoreNote);
-      row.addEventListener("mouseleave", clearFocusedScoreNote);
-      input.addEventListener("change", () => {
-        const parsed = parsePitch(input.value);
-        if (!parsed) {
-          input.setCustomValidity("请输入音名，如 C4、F#4、Bb3 或 C(+0.5)4");
-          input.reportValidity();
-          input.value = note.pitch;
-          input.setCustomValidity("");
-          return;
-        }
-        note.pitch = parsed.label;
-        note.midi = parsed.midi;
-        updatePlaybackReady();
-      });
-      startInput.addEventListener("change", () => {
-        const rawStartBeat = startInput.value.trim();
-        const startBeat = Number(rawStartBeat);
-        if (!rawStartBeat || !Number.isFinite(startBeat) || startBeat < 0) {
-          startInput.setCustomValidity("起拍需要是大于或等于 0 的数字。");
-          startInput.reportValidity();
-          startInput.value = formatBeatCount(Number(note.startBeat) || 0);
-          startInput.setCustomValidity("");
-          return;
-        }
-        note.startBeat = startBeat;
-        updatePlaybackReady();
-      });
-      durationSelect.addEventListener("change", (event) => {
-        note.duration = event.target.value;
-        if (durationBeats[note.duration]) note.durationBeats = durationBeats[note.duration];
-      });
-      deleteButton.addEventListener("click", () => {
-        state.notes = state.notes.filter((item) => item.id !== note.id);
-        renderNotes();
-        updatePartControls();
-        refreshScoreOverlay();
-      });
-      els.noteList.append(row);
-      if (state.noteRowById) state.noteRowById.set(note.id, row);
-    });
+      group.hidden = Boolean(state.onlyLowConfidence) && !group.querySelector(".note-row:not([hidden])");
+      els.noteList.append(group);
+    }
+    if (els.measureJumpInput) els.measureJumpInput.max = String(measures.length ? measures[measures.length - 1].measureIndex + 1 : 1);
   }
   els.lowConfidenceButton.hidden = !hasLowConfidenceNotes();
   // 只有带谱面坐标的结果（图片路径）才有 overlay 圆点；MusicXML 导入没有坐标，别显示误导性的图例。
   els.scoreLegend.hidden = !state.notes.some((note) => Number.isFinite(note.x) && Number.isFinite(note.y));
   markSelectedRows();
   updateSelectionUi();
+}
+
+/** 在音符列表里跳到第 index 小节（1 起），并短暂高亮小节标题。 */
+function jumpToMeasureInList(index) {
+  const target = Math.max(1, Math.floor(Number(index) || 1));
+  const group = els.noteList.querySelector(`.measure-group[data-measure="${target}"]`);
+  if (!group) {
+    showToast(`没有找到第 ${target} 小节。`);
+    return;
+  }
+  const listBox = els.noteList.getBoundingClientRect();
+  const groupBox = group.getBoundingClientRect();
+  els.noteList.scrollTop += groupBox.top - listBox.top - 2;
+  group.classList.add("is-highlight");
+  clearTimeout(state.measureHighlightTimer);
+  state.measureHighlightTimer = setTimeout(() => group.classList.remove("is-highlight"), 1400);
 }
 // 常用声部名预设：零乐理用户不用自己打字，点一下就能把「声部1」改成谱面上的叫法。
 const PART_NAME_PRESETS = [
@@ -3877,22 +3974,37 @@ const BANK_LEVEL = {
   electric_piano_real: 0.94,  // group-peak
   english_horn_real: 1.45,  // group-peak
   erhu_real: 2.0,  // measured-peak
+  zhonghu_real: 1.82,  // browser RMS (近似中提琴)
+  gaohu_real: 1.75,  // browser RMS (近似小提琴)
   flute_real: 1.6,  // group-peak
   french_horn_real: 1.1,  // group-peak
   fretless_bass_real: 1.33,  // group-peak
   glockenspiel_real: 1.45,  // group-peak
   guzheng_real: 1.88,  // group-peak
+  zhongruan_real: 2.113,   // 浏览器实测 RMS 0.104 → 统一到 0.24（近似尼龙弦吉他）
+  daruan_real: 0.86,  // browser RMS (近似原声贝斯)
+  liuqin_real: 1.845,   // 浏览器实测 RMS 0.177 → 统一到 0.24（近似钢弦吉他）
+  guanzi_real: 1.71,  // browser RMS (近似唢呐)
+  xun_real: 1.96,  // browser RMS (近似陶笛)
+  qudi_real: 1.58,  // browser RMS (近似长笛)
+  yunluo_real: 0.86,  // browser RMS (近似管钟)
+  pengling_real: 1.934,  // 浏览器实测 RMS 0.0276
+  muyu_real: 1.151,  // 浏览器实测 RMS 0.0205
+  xiaoluo_real: 0.982,  // 浏览器实测 RMS 0.0183
+  daluo_real: 0.934,  // 浏览器实测 RMS 0.0201
+  bo_real: 1.272,  // 浏览器实测 RMS 0.0548（原 2.6 偏响 3 倍）
+  paigu_real: 1.231,  // 浏览器实测 RMS 0.0196
   harp_real: 1.6,  // group-peak
   harpsichord_real: 0.94,  // group-peak
   kalimba_real: 1.45,  // group-peak
   koto_real: 1.88,  // group-peak
   marimba_real: 1.45,  // group-peak
-  nylon_guitar_real: 1.33,  // group-peak
+  nylon_guitar_real: 2.367,   // 浏览器实测 RMS 0.090 → 统一到 0.24（Meta Nylon 录音较轻）  // group-peak
   oboe_real: 1.45,  // group-peak
   ocarina_real: 1.6,  // group-peak
   pad_real: 1.39,  // group-peak
   pan_flute_real: 1.6,  // group-peak
-  piano_real: 0.64,  // measured-peak
+  piano_real: 0.295,   // 浏览器实测 RMS 0.476 → 统一到 0.24（峰值 0.39，不削波）  // measured-peak
   piccolo_real: 1.6,  // group-peak
   pipa_real: 1.88,  // group-peak
   pizzicato_real: 1.6,  // group-peak
@@ -3903,7 +4015,7 @@ const BANK_LEVEL = {
   sitar_real: 1.33,  // group-peak
   soprano_sax_real: 1.28,  // group-peak
   steel_drums_real: 1.07,  // group-peak
-  steel_guitar_real: 1.33,  // group-peak
+  steel_guitar_real: 2.032,   // 浏览器实测 RMS 0.169 → 统一到 0.24  // group-peak
   strings_real: 1.45,  // measured-peak
   suona_real: 1.6,  // group-peak
   synth_choir_real: 1.23,  // group-peak
@@ -3956,14 +4068,25 @@ function playSampledTone(timbre, bank, midi, startAt, duration, peak, destinatio
   //    （二胡要 2.3 倍才够，那样噪声也被放大），所以按每个 bank 加载时实测的
   //    响度归一到 SAMPLED_TARGET_RMS，再用 BANK_LEVEL 做 final polish。
   const bankLevel = bankLevelFor(bank);
-  const observedRms = Math.max(0.0008, bank.observedRms || layerRms);
+  const observedRms = Math.max(bank.oneShot ? 0.00001 : 0.0008, bank.observedRms || layerRms);
   const bankNorm = SAMPLED_TARGET_RMS / observedRms;
-  const gainValue = Math.max(0.0001,
-    peak * expression * sampleTrim * Math.min(3, bankNorm) * bankLevel
-    * (SAMPLED_TARGET_RMS / layerRms) / SAMPLED_TARGET_RMS * 0.62);
+  const normalizedGain = bank.oneShot
+    // 单次敲击按整段采样的观测 RMS 做一次归一；不再重复套用音区层归一，
+    // 否则长尾锣声会被额外放大。力度层之间保留原录音的相对强弱。
+    ? SAMPLED_TARGET_RMS * peak * expression * sampleTrim * bankLevel / observedRms
+    : peak * expression * sampleTrim * Math.min(3, bankNorm) * bankLevel
+      * (SAMPLED_TARGET_RMS / layerRms) / SAMPLED_TARGET_RMS * 0.62;
+  // 防削波交给 masterChain 的 tanh 软限幅器（见 softClipCurve），这里不再砍增益。
+  // 为什么去掉旧写法 Math.min(normalizedGain, 0.85/peak)：
+  //   Meta Nylon / 中阮的样本录音电平只有钢琴的 1/3.6，砍到上限后输出 RMS 只有 0.067，
+  //   系数从 1.158 调到 3.089 输出几乎不变 —— 响度永远拉不平（实测）。
+  //   软限幅允许给足增益，再把峰值压到安全范围，响度和不削波两件事都能满足。
+  const gainValue = normalizedGain;
   const source = audio.createBufferSource();
   source.buffer = sample.buffer;
-  source.playbackRate.value = playbackRate * (1 + (human.detune / 1200) * 0.5);
+  source.playbackRate.value = bank.oneShot
+    ? playbackRate
+    : playbackRate * (1 + (human.detune / 1200) * 0.5);
   if (bank.continuous && sample.loopStart && sample.loopEnd) {
     source.loop = true;
     source.loopStart = sample.loopStart;
@@ -3974,10 +4097,15 @@ function playSampledTone(timbre, bank, midi, startAt, duration, peak, destinatio
   const envelope = audio.createGain();
   envelope.gain.setValueAtTime(0.0001, at);
   envelope.gain.linearRampToValueAtTime(gainValue, at + 0.004);
-  envelope.gain.setValueAtTime(gainValue, tEnd);
-  envelope.gain.exponentialRampToValueAtTime(0.0001, tEnd + release);
   source.connect(envelope).connect(target);
   source.start(at);
+  if (bank.oneShot) {
+    // 敲击类音色按录音自身的衰减自然结束；短音符也不截断铃、锣、钹的尾音。
+    registerVoice([source], [source, envelope]);
+    return true;
+  }
+  envelope.gain.setValueAtTime(gainValue, tEnd);
+  envelope.gain.exponentialRampToValueAtTime(0.0001, tEnd + release);
   source.stop(tEnd + release + 0.03);
   registerVoice([source], [source, envelope]);
   return true;
@@ -4274,6 +4402,15 @@ els.jianpuButton.addEventListener("click", recognizeJianpuScore);
 els.jianpuAllButton.addEventListener("click", recognizeAllJianpuPages);
 els.recognizeAllButton.addEventListener("click", recognizeAllPages);
 els.addNoteButton.addEventListener("click", addNote);
+if (els.measureJumpButton) els.measureJumpButton.addEventListener("click", () => {
+  jumpToMeasureInList(els.measureJumpInput && els.measureJumpInput.value);
+});
+if (els.measureJumpInput) els.measureJumpInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    jumpToMeasureInList(els.measureJumpInput.value);
+  }
+});
 if (els.addLayerPart) els.addLayerPart.addEventListener("click", addLayerPart);
 if (els.addLayerEcho) els.addLayerEcho.addEventListener("click", () => addLayerOctave(12));
 if (els.addLayerLower) els.addLayerLower.addEventListener("click", () => addLayerOctave(-12));

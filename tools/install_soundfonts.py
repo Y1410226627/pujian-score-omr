@@ -15,12 +15,13 @@
 用法：
   py -3 tools/install_soundfonts.py                 # 安装全部
   py -3 tools/install_soundfonts.py --only voice    # 只装人声（女声/男声/混声合唱）
-  py -3 tools/install_soundfonts.py --only strings winds keys piano
+  py -3 tools/install_soundfonts.py --only china percussion
   py -3 tools/install_soundfonts.py --force         # 已装的也重新下载
   py -3 tools/install_soundfonts.py --list          # 看有哪些类别
 """
 import argparse
 import base64
+import concurrent.futures
 import json
 import re
 import struct
@@ -28,6 +29,7 @@ import sys
 import tarfile
 import time
 import urllib.request
+from urllib.parse import quote
 import wave
 from pathlib import Path
 
@@ -35,7 +37,26 @@ ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / ".assets" / "soundfonts"
 REGISTRY = "https://registry.npmjs.org"
 JSDELIVR = "https://cdn.jsdelivr.net/gh/gleitz/midi-js-soundfonts@gh-pages/FluidR3_GM"
+VCSL_BASE = "https://cdn.jsdelivr.net/gh/sgossner/VCSL@master/"
+VCSL_TARGET_RATE = 24000
 SSO_BASE = "https://cdn.jsdelivr.net/gh/peastman/sso@master/Sonatina%20Symphonic%20Orchestra/"
+META_OPEN_BASE = "https://raw.githubusercontent.com/facebookincubator/Meta-open-sound/main/systems/instruments/"
+META_OPEN_BANKS = {
+    "meta-piano": {"banks": {"piano_real"}, "label": "真实钢琴（Meta Open·4层采样）"},
+    "meta-nylon-guitar": {
+        "banks": {"nylon_guitar_real", "zhongruan_real"},
+        "label": "尼龙弦吉他（Meta Open·3层采样）",
+    },
+    "meta-steel-guitar": {
+        "banks": {"steel_guitar_real", "liuqin_real"},
+        "label": "钢弦吉他（Meta Open·3层采样）",
+    },
+}
+META_OPEN_EXPECTED_SAMPLES = {
+    "meta-piano": 352,
+    "meta-nylon-guitar": 348,
+    "meta-steel-guitar": 375,
+}
 
 NOTE_BASE = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 SHARP_IN_NAME = "s"   # 文件名里的升号统一写 s（# 在 URL 里是片段分隔符，浏览器会 404）
@@ -85,6 +106,55 @@ def download(url, description, retries=3, timeout=180):
             print("    第 {} 次下载失败（{}），换镜像重试…".format(attempt, last_error))
             time.sleep(1.5)
     raise RuntimeError("下载失败：{}（{}）".format(description, last_error))
+
+
+def install_meta_open(selected, force):
+    """按需安装 Meta Open Sound 的 CC0 钢琴与吉他 Web OGG 样本。"""
+    ready = set()
+    for instrument, metadata in META_OPEN_BANKS.items():
+        if selected is not None and not (metadata["banks"] & selected):
+            continue
+        base = META_OPEN_BASE + instrument
+        target_dir = ASSETS / "meta-open" / instrument
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            index = json.loads(download(base + "/manifest.json", instrument + " 清单").decode("utf-8"))
+        except Exception as error:  # noqa: BLE001
+            print("  Meta Open {}：清单读取失败（{}），保留现有音色。".format(instrument, error))
+            continue
+        samples = index.get("samples", [])
+        completed = 0
+        failures = 0
+        pending = []
+        for sample in samples:
+            filename = Path(sample.get("file", "")).name
+            if not filename.endswith(".wav"):
+                continue
+            target = target_dir / (filename[:-4] + ".ogg")
+            if target.is_file() and target.stat().st_size > 1000 and not force:
+                completed += 1
+                continue
+            pending.append((target, base + "/ogg/" + quote(target.name)))
+
+        def fetch_one(item):
+            target, url = item
+            target.write_bytes(download(url, instrument + "/" + target.name, retries=2))
+            return target
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(fetch_one, item): item[0] for item in pending}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                    completed += 1
+                except Exception as error:  # noqa: BLE001
+                    failures += 1
+                    print("    跳过 {}（{}）".format(futures[future].name, error))
+        print("  Meta Open {}：{}/{} 个 OGG 就绪{}".format(
+            instrument, completed, len(samples), "，失败 {} 个".format(failures) if failures else ""))
+        if completed == len(samples) and len(samples) == META_OPEN_EXPECTED_SAMPLES[instrument]:
+            ready.add(instrument)
+    return ready
 
 
 # ============================================================
@@ -178,6 +248,16 @@ FLUIDR3_BANKS = {
     # —— 中国民族乐器：没有专门样本时，用 GM 里音色最接近的乐器（诚实标注「近似」）——
     "guzheng_real": {"instrument": "orchestral_harp", "label": "古筝（采样·近似竖琴）", "continuous": False, "category": "china"},
     "pipa_real": {"instrument": "banjo", "label": "琵琶（采样·近似班卓）", "continuous": False, "category": "china"},
+    # —— 新增民族器乐近似采样（音源名与说明直接标明并非该件乐器实录）——
+    "zhonghu_real": {"instrument": "viola", "label": "中胡（采样·近似中提琴）", "continuous": True, "category": "china"},
+    "gaohu_real": {"instrument": "violin", "label": "高胡（采样·近似小提琴）", "continuous": True, "category": "china"},
+    "zhongruan_real": {"instrument": "acoustic_guitar_nylon", "label": "中阮（采样·近似尼龙弦吉他）", "continuous": False, "category": "china"},
+    "daruan_real": {"instrument": "acoustic_bass", "label": "大阮（采样·近似原声贝斯）", "continuous": False, "category": "china"},
+    "liuqin_real": {"instrument": "banjo", "label": "柳琴（采样·近似班卓琴）", "continuous": False, "category": "china"},
+    "guanzi_real": {"instrument": "shanai", "label": "管子（采样·近似唢呐）", "continuous": True, "category": "china"},
+    "xun_real": {"instrument": "ocarina", "label": "埙（采样·近似陶笛）", "continuous": True, "category": "china"},
+    "qudi_real": {"instrument": "flute", "label": "曲笛（采样·近似长笛）", "continuous": True, "category": "china"},
+    "yunluo_real": {"instrument": "tubular_bells", "label": "云锣（采样·近似管钟）", "continuous": False, "category": "china"},
     "dizi_real": {"instrument": "flute", "label": "笛子（采样·近似长笛）", "continuous": True, "category": "china"},
     "xiao_real": {"instrument": "shakuhachi", "label": "箫（采样·近似尺八）", "continuous": True, "category": "china"},
     "sheng_real": {"instrument": "harmonica", "label": "笙（采样·近似口琴）", "continuous": True, "category": "china"},
@@ -227,6 +307,40 @@ FLUIDR3_BANKS = {
 }
 
 
+# VCSL 单次打击采样。每个音色保留真实敲击录音并在浏览器中播放完整自然衰减；
+# 这些采样是近似音色（例如 VCSL Gong 1 不是中国小锣/大锣的专门录音）。
+VCSL_BANKS = {
+    "pengling_real": {
+        "label": "碰铃（采样·近似指钹）", "category": "percussion",
+        "layers": [(0.8, "Idiophones/Struck Idiophones/Finger Cymbals/Fing_Cymb.wav", "finger_cymbals.wav")],
+    },
+    "muyu_real": {
+        "label": "木鱼（采样·近似木块）", "category": "percussion",
+        "layers": [
+            (0.2, "Idiophones/Struck Idiophones/Woodblock/wood_click_pp_rr1.wav", "soft.wav"),
+            (0.55, "Idiophones/Struck Idiophones/Woodblock/wood_click3_vl1.wav", "medium.wav"),
+            (0.9, "Idiophones/Struck Idiophones/Woodblock/wood_click_ff.wav", "loud.wav"),
+        ],
+    },
+    "xiaoluo_real": {
+        "label": "小锣（采样·近似 VCSL Gong 1）", "category": "percussion",
+        "layers": [(0.8, "Idiophones/Struck Idiophones/Gong 1/gong_2_mp.wav", "gong_soft.wav")],
+    },
+    "daluo_real": {
+        "label": "大锣（采样·近似 VCSL Gong 1）", "category": "percussion",
+        "layers": [(0.8, "Idiophones/Struck Idiophones/Gong 1/gong_fff.wav", "gong_forte.wav")],
+    },
+    "bo_real": {
+        "label": "钹（采样·近似交响钹）", "category": "percussion",
+        "layers": [(0.8, "Idiophones/Struck Idiophones/Clash Cymbals 1/cymbal_crash1_mf1.wav", "cymbal_crash.wav")],
+    },
+    "paigu_real": {
+        "label": "排鼓（采样·近似通鼓）", "category": "percussion",
+        "layers": [(0.8, "Membranophones/Struck Membranophones/Tom 1/Stick/TomH_HitS_v4_rr1_Mid.wav", "tom_hit.wav")],
+    },
+}
+
+
 def install_fluidr3(selected, force):
     for bank, meta in FLUIDR3_BANKS.items():
         if selected and bank not in selected:
@@ -253,6 +367,37 @@ def install_fluidr3(selected, force):
         print("    已拆出 {} 个 mp3".format(count))
 
 
+def install_vcsl(selected, force):
+    """下载并转成 24 kHz 单声道 WAV 的 VCSL CC0 打击乐单次样本。"""
+    for bank, meta in VCSL_BANKS.items():
+        if selected and bank not in selected:
+            continue
+        for _, relative_source, filename in meta["layers"]:
+            target = ASSETS / "vcsl" / bank / filename
+            if target.is_file() and target.stat().st_size > 1000 and not force:
+                continue
+            raw = ASSETS / "vcsl" / "_raw" / bank / filename
+            raw.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if force or not raw.is_file() or raw.stat().st_size < 1000:
+                url = VCSL_BASE + quote(relative_source, safe="/")
+                print("  下载 VCSL {} …".format(bank))
+                try:
+                    payload = download(url, relative_source, retries=3, timeout=180)
+                except RuntimeError:
+                    # GitHub 源站回退：jsDelivr 偶尔会对尚未缓存的大 WAV 返回 503。
+                    github_raw = "https://raw.githubusercontent.com/sgossner/VCSL/master/" + quote(relative_source, safe="/")
+                    payload = download(github_raw, relative_source + "（GitHub 源站）", retries=2, timeout=180)
+                raw.write_bytes(payload)
+            samples = read_wav_mono_any(raw)
+            write_wav_16(target, samples, VCSL_TARGET_RATE)
+            try:
+                raw.unlink()
+            except OSError:
+                pass
+            print("    已转换 {} → {}".format(filename, target.relative_to(ROOT)))
+
+
 # ============================================================
 # 二、B 中国民乐：二胡（aliexpress-erhu，CC0）
 # ============================================================
@@ -273,7 +418,7 @@ def list_erhu_samples():
 
 
 def erhu_sample_midi(name):
-    """erhu_d5_sus_rr1.wav → MIDI 编号（d5 → D5 = 74）。"""
+    """erhu_a5_sus_rr1.wav → 实测录音基频对应的 MIDI 编号。"""
     import re
     matched = re.match(r"erhu_([a-g])([sb]?)(\d)_sus_rr\d\.wav", name)
     if not matched:
@@ -282,7 +427,9 @@ def erhu_sample_midi(name):
     pitch = NOTE_TO_MIDI.get(letter + accidental)
     if pitch is None:
         return None
-    return 12 * (int(octave) + 1) + pitch
+    # aliexpress-erhu filenames use an octave label one octave above the
+    # rendered WAV fundamental (e.g. erhu_a5_sus_rr1.wav measures near A4).
+    return 12 * int(octave) + pitch
 
 
 def install_erhu(force):
@@ -602,6 +749,125 @@ def sso_chorus_banks():
 # ============================================================
 # 四、生成清单
 # ============================================================
+META_OPEN_VELOCITIES = {
+    "piano_real": (0.12, 0.37, 0.65, 0.92),
+    "guitar": (0.18, 0.56, 0.92),
+}
+GUITAR_OPEN_MIDI = {"LowE": 40, "A": 45, "D": 50, "G": 55, "B": 59, "HighE": 64}
+
+
+def meta_open_banks():
+    """Build complete 88-key banks from the installed Meta Open OGG previews."""
+    banks = {}
+    base = ASSETS / "meta-open"
+
+    piano_dir = base / "meta-piano"
+    piano_files = list(piano_dir.glob("*.ogg")) if piano_dir.is_dir() else []
+    if len(piano_files) >= META_OPEN_EXPECTED_SAMPLES["meta-piano"]:
+        piano_layers = []
+        for layer_number, velocity in enumerate(META_OPEN_VELOCITIES["piano_real"], 1):
+            notes = {}
+            for path in piano_files:
+                match = re.fullmatch(r"INSPiano_Vel(\d{2})_([A-G]s?\d)_01\.ogg", path.name)
+                if not match or int(match.group(1)) != layer_number:
+                    continue
+                notes[str(note_to_midi(match.group(2)))] = {"path": path.relative_to(ASSETS).as_posix()}
+            if notes:
+                piano_layers.append({"velocity": velocity, "notes": notes})
+        if len(piano_layers) == 4 and all(len(layer["notes"]) == 88 for layer in piano_layers):
+            banks["piano_real"] = {
+                "label": META_OPEN_BANKS["meta-piano"]["label"], "continuous": False,
+                "decodeRate": 24000, "trimSeconds": 5.5, "category": "piano", "layers": piano_layers,
+            }
+
+    def build_guitar(instrument, bank_ids, label, is_nylon):
+        directory = base / instrument
+        files = list(directory.glob("*.ogg")) if directory.is_dir() else []
+        if len(files) < META_OPEN_EXPECTED_SAMPLES[instrument]:
+            return
+        # MIDI note → candidate captures. Overlapping string zones are resolved by
+        # the lowest playable string, keeping the guitar's body character coherent.
+        by_layer = {1: {}, 2: {}, 3: {}}
+        for path in files:
+            if is_nylon:
+                match = re.fullmatch(
+                    r"INSGuitarNylon_String(LowE|HighE|A|D|G|B)_Vel(\d{2})(?:Finger|Pick)_([A-G]s?\d)_01\.ogg",
+                    path.name,
+                )
+            else:
+                match = re.fullmatch(
+                    r"INSGuitarSteel_String(LowE|HighE|A|D|G|B)_Vel(\d{2})_([A-G]s?\d)_01\.ogg",
+                    path.name,
+                )
+            if not match:
+                continue
+            string_name, layer_text, note_name = match.groups()
+            layer_number = int(layer_text)
+            source_midi = note_to_midi(note_name)
+            by_layer[layer_number].setdefault(source_midi, []).append((
+                GUITAR_OPEN_MIDI[string_name], path, source_midi,
+            ))
+
+        fluid_meta = FLUIDR3_BANKS.get(bank_ids[0])
+        fluid_dir = ASSETS / "fluidr3" / (fluid_meta["instrument"] if fluid_meta else "")
+        fluid_notes = {}
+        for path in fluid_dir.glob("*.mp3") if fluid_dir.is_dir() else []:
+            try:
+                fluid_notes[note_to_midi(path.stem)] = path
+            except ValueError:
+                continue
+
+        result_layers = []
+        for layer_number, velocity in enumerate(META_OPEN_VELOCITIES["guitar"], 1):
+            samples = by_layer[layer_number]
+            notes = {}
+            for target_midi in range(21, 109):
+                candidates = [
+                    item for source_midi, captures in samples.items()
+                    if abs(source_midi - target_midi) <= 2
+                    for item in captures
+                ]
+                if candidates:
+                    exact = [item for item in candidates if item[2] == target_midi]
+                    preferred = exact or candidates
+                    playable_low_strings = [
+                        item for item in preferred
+                        if item[0] <= target_midi and target_midi - item[0] <= 12
+                    ]
+                    pool = playable_low_strings or preferred
+                    string_open, path, source_midi = min(
+                        pool, key=lambda item: (item[0], abs(item[2] - target_midi), item[2]))
+                    entry = {"path": path.relative_to(ASSETS).as_posix()}
+                    if source_midi != target_midi:
+                        entry["tune"] = source_midi - target_midi
+                    notes[str(target_midi)] = entry
+                elif target_midi in fluid_notes:
+                    notes[str(target_midi)] = {"path": fluid_notes[target_midi].relative_to(ASSETS).as_posix()}
+            if notes:
+                result_layers.append({"velocity": velocity, "notes": notes})
+
+        if len(result_layers) == 3 and all(len(layer["notes"]) == 88 for layer in result_layers):
+            spec = {
+                "label": label, "continuous": False, "oneShot": True,
+                "decodeRate": 24000, "trimSeconds": 5.5, "category": "plucked",
+                "layers": result_layers,
+            }
+            for bank_id in bank_ids:
+                banks[bank_id] = dict(spec)
+
+    nylon_label = META_OPEN_BANKS["meta-nylon-guitar"]["label"]
+    steel_label = META_OPEN_BANKS["meta-steel-guitar"]["label"]
+    build_guitar("meta-nylon-guitar", ("nylon_guitar_real", "zhongruan_real"), nylon_label, True)
+    build_guitar("meta-steel-guitar", ("steel_guitar_real", "liuqin_real"), steel_label, False)
+    if "zhongruan_real" in banks:
+        banks["zhongruan_real"]["label"] = "中阮（采样·近似尼龙弦吉他，CC0）"
+        banks["zhongruan_real"]["category"] = "china"
+    if "liuqin_real" in banks:
+        banks["liuqin_real"]["label"] = "柳琴（采样·近似钢弦吉他，CC0）"
+        banks["liuqin_real"]["category"] = "china"
+    return banks
+
+
 def build_manifest():
     banks = {}
 
@@ -645,6 +911,27 @@ def build_manifest():
                 spec["loopSeconds"] = [1.0, 2.5]
             banks[bank] = spec
 
+    # Meta Open Sound replaces the low-layer piano/guitar banks when installed.
+    banks.update(meta_open_banks())
+
+    # VCSL 单次打击乐：一个样本映射到固定 MIDI 音高 60，播放时不移调。
+    for bank, meta in VCSL_BANKS.items():
+        layers = []
+        for velocity, _, filename in meta["layers"]:
+            sample = ASSETS / "vcsl" / bank / filename
+            if sample.is_file():
+                layers.append({
+                    "velocity": velocity,
+                    "notes": {"60": {"path": sample.relative_to(ASSETS).as_posix()}},
+                })
+        if layers:
+            banks[bank] = {
+                "label": meta["label"], "continuous": False, "oneShot": True,
+                "fixedPitch": True, "decodeRate": VCSL_TARGET_RATE,
+                "category": meta["category"], "trimSeconds": 30,
+                "fadeOutSeconds": 0.18, "layers": layers,
+            }
+
     # 二胡
     banks.update(erhu_bank())
 
@@ -666,8 +953,16 @@ def build_manifest():
              "author": "sfzinstruments 社区", "license": "CC0 1.0",
              "url": "https://github.com/sfzinstruments/aliexpress-erhu",
              "changes": "转换为 24 kHz 单声道 WAV，只保留第一轮 round-robin"},
+            {"bank": "piano_real / nylon_guitar_real / steel_guitar_real / zhongruan_real / liuqin_real",
+             "name": "Meta Open Sound", "author": "Meta Creative Audio",
+             "license": "CC0 1.0", "url": "https://github.com/facebookincubator/Meta-open-sound",
+             "changes": "使用官方 OGG Web 采样；吉他按弦区与力度层映射，标注音域外回退至 FluidR3"},
             {"bank": "其他采样乐器", "name": "FluidR3_GM（预渲染 mp3）", "author": "Frank Wen",
              "license": "CC BY 3.0", "url": "https://github.com/gleitz/midi-js-soundfonts"},
+            {"bank": "pengling_real / muyu_real / xiaoluo_real / daluo_real / bo_real / paigu_real",
+             "name": "Versilian Community Sample Library（VCSL）", "author": "Versilian Studios LLC",
+             "license": "CC0 1.0", "url": "https://github.com/sgossner/VCSL",
+             "changes": "转换为 24 kHz 单声道 WAV；完整播放采样自然衰减，木鱼保留力度层"},
         ],
     }
     manifest_path = ASSETS / "manifest.json"
@@ -677,6 +972,11 @@ def build_manifest():
         "# 采样音源许可与署名\n\n"
         "本项目**不重新分发**这些音频样本；它们由 `tools/install_soundfonts.py` 在使用者本机下载并转换。\n"
         "如果你把本项目用于公开场合，请保留下面的署名：\n\n"
+        "## Meta Open Sound（钢琴、尼龙弦吉他、钢弦吉他）\n"
+        "- 作者：Meta Creative Audio\n"
+        "- 许可：CC0 1.0 https://creativecommons.org/publicdomain/zero/1.0/\n"
+        "- 来源：https://github.com/facebookincubator/Meta-open-sound\n"
+        "- **改动**：使用官方 OGG Web 采样；吉他映射至可用弦区与力度层，音域外使用 FluidR3 回退。\n\n"
         "## 钢琴：Salamander Grand Piano V3\n"
         "- 作者：Alexander Holm\n"
         "- 许可：CC BY 3.0 https://creativecommons.org/licenses/by/3.0/\n"
@@ -692,12 +992,21 @@ def build_manifest():
         "- 预渲染 mp3：https://github.com/gleitz/midi-js-soundfonts\n",
         encoding="utf-8",
     )
+    with licenses.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n## 打击乐：Versilian Community Sample Library（VCSL）\n"
+            "- 作者：Versilian Studios LLC\n"
+            "- 许可：CC0 1.0（公共领域奉献）https://creativecommons.org/publicdomain/zero/1.0/\n"
+            "- 来源：https://github.com/sgossner/VCSL\n"
+            "- **改动**：本安装器只下载所需敲击样本，并转换为 24 kHz 单声道 WAV。\n"
+            "- 部分中国乐器（锣、钹、排鼓、碰铃、木鱼）使用相近乐器录音，界面已注明近似音色。\n"
+        )
     print("\n清单已写入：{}".format(manifest_path))
     print("可用音源 {} 个：{}".format(len(banks), "、".join(sorted(banks))))
 
 
 CATEGORY_BANKS = {
-    "all": {bank for bank in FLUIDR3_BANKS} | {"piano_real", "choir_female", "choir_male", "choir_real", "erhu_real"},
+    "all": {bank for bank in FLUIDR3_BANKS} | set(VCSL_BANKS) | {"piano_real", "choir_female", "choir_male", "choir_real", "erhu_real"},
     "china": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "china"} | {"erhu_real"},
     "world": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "world"},
     "piano": {"piano_real"} | {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "piano"},
@@ -709,7 +1018,7 @@ CATEGORY_BANKS = {
     "sax": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "sax"},
     "plucked": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "plucked"},
     "bass": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "bass"},
-    "percussion": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "percussion"},
+    "percussion": {bank for bank, meta in FLUIDR3_BANKS.items() if meta.get("category") == "percussion"} | set(VCSL_BANKS),
 }
 
 
@@ -717,7 +1026,7 @@ def main():
     parser = argparse.ArgumentParser(description="安装谱见的真实音色（采样音源）")
     parser.add_argument("--force", action="store_true", help="已安装也重新下载")
     parser.add_argument("--only", nargs="+", default=None,
-                        help="只装指定类别（piano/voice/strings/winds/keys）或 bank 名")
+                        help="只装指定类别（china/percussion/piano/voice/strings/winds/keys）或 bank 名")
     parser.add_argument("--list", action="store_true", help="列出可用类别与音源名")
     args = parser.parse_args()
 
@@ -737,9 +1046,12 @@ def main():
         print("只安装：", "、".join(sorted(selected)))
 
     ASSETS.mkdir(parents=True, exist_ok=True)
-    if not selected or "piano_real" in selected:
+    meta_ready = install_meta_open(selected, args.force)
+    if (not selected or "piano_real" in selected) and "meta-piano" not in meta_ready:
         install_piano(args.force)
     install_fluidr3(selected, args.force)
+    if not selected or selected & set(VCSL_BANKS):
+        install_vcsl(selected, args.force)
     if not selected or "china" in selected or "erhu_real" in selected:
         install_erhu(args.force)
     install_sso_chorus(selected, args.force)

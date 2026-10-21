@@ -60,13 +60,29 @@ export const SAMPLED_TIMBRES = {
   horn_real: { fallback: "organ", continuous: true },
   trombone_real: { fallback: "organ", continuous: true },
   erhu_real: { fallback: "strings", continuous: true },
+  zhonghu_real: { fallback: "strings", continuous: true },
+  gaohu_real: { fallback: "strings", continuous: true },
   pipa_real: { fallback: "soft", continuous: false },
+  zhongruan_real: { fallback: "soft", continuous: false },
+  daruan_real: { fallback: "strings", continuous: false },
+  liuqin_real: { fallback: "soft", continuous: false },
   guzheng_real: { fallback: "soft", continuous: false },
   dizi_real: { fallback: "organ", continuous: true },
+  qudi_real: { fallback: "organ", continuous: true },
   xiao_real: { fallback: "organ", continuous: true },
+  xun_real: { fallback: "organ", continuous: true },
+  guanzi_real: { fallback: "organ", continuous: true },
   sheng_real: { fallback: "organ", continuous: true },
   suona_real: { fallback: "organ", continuous: true },
   yangqin_real: { fallback: "soft", continuous: false },
+  // 打击乐完整播放采样，不按音符时值截断；pitch 固定，力度由采样层表达。
+  pengling_real: { fallback: "soft", continuous: false, oneShot: true, fixedPitch: true },
+  muyu_real: { fallback: "soft", continuous: false, oneShot: true, fixedPitch: true },
+  xiaoluo_real: { fallback: "soft", continuous: false, oneShot: true, fixedPitch: true },
+  daluo_real: { fallback: "soft", continuous: false, oneShot: true, fixedPitch: true },
+  bo_real: { fallback: "soft", continuous: false, oneShot: true, fixedPitch: true },
+  paigu_real: { fallback: "soft", continuous: false, oneShot: true, fixedPitch: true },
+  yunluo_real: { fallback: "soft", continuous: false },
   accordion_real: { fallback: "organ", continuous: true },
   piccolo_real: { fallback: "organ", continuous: true },
   english_horn_real: { fallback: "organ", continuous: true },
@@ -242,7 +258,10 @@ export async function loadSampleBank(manifest, name, { onProgress = () => {} } =
   const layers = spec.layers || [];
   const total = layers.reduce((sum, layer) => sum + Object.keys(layer.notes || {}).length, 0);
   let done = 0;
-  const bank = { name, label: spec.label || name, continuous: Boolean(spec.continuous), layers: [] };
+  const bank = {
+    name, label: spec.label || name, continuous: Boolean(spec.continuous),
+    oneShot: Boolean(spec.oneShot), fixedPitch: Boolean(spec.fixedPitch), layers: [],
+  };
   for (const layer of layers) {
     const entries = Object.entries(layer.notes || {})
       .map(([midiText, value]) => [Number(midiText), noteEntry(value)])
@@ -260,14 +279,22 @@ export async function loadSampleBank(manifest, name, { onProgress = () => {} } =
         const mono = downmixToMono(decoded);
         const buffer = buildPlayableBuffer(mono, sampleRate, {
           trimSeconds: spec.trimSeconds || 0,
-          fadeOutSeconds: spec.trimSeconds ? 0.3 : 0,
+          fadeOutSeconds: Number.isFinite(spec.fadeOutSeconds)
+            ? spec.fadeOutSeconds
+            : (spec.trimSeconds ? 0.3 : 0),
         });
         // FluidR3 对超出乐器音域的高音会渲染成整段静音：剔除，否则靠近它的音会没声音。
         const data = buffer.getChannelData(0);
         let energy = 0;
-        for (let index = 0; index < data.length; index += 1) energy += data[index] * data[index];
+        let samplePeak = 0;
+        for (let index = 0; index < data.length; index += 1) {
+          energy += data[index] * data[index];
+          samplePeak = Math.max(samplePeak, Math.abs(data[index]));
+        }
         const rms = Math.sqrt(energy / Math.max(1, data.length));
-        if (rms < 0.0005) {
+        // 有些真实敲击录音本身电平很低（碰铃 RMS 约 0.0004）；保留它们，
+        // 后续按 RMS 归一并用峰值限制控制动态，不能按持续音的静音门限剔除。
+        if (rms < (bank.oneShot ? 0.00001 : 0.0005)) {
           done += 1;
           onProgress({ done, total });
           continue;
@@ -278,6 +305,7 @@ export async function loadSampleBank(manifest, name, { onProgress = () => {} } =
           midi,
           buffer,
           rms,
+          peak: samplePeak,
           tune: Number(entry.tune) || 0,   // 样本本身的音准偏差（半音）
           gainDb: Number.isFinite(entry.gainDb) ? Number(entry.gainDb) : null,
         };
@@ -336,7 +364,7 @@ export async function loadSampleBank(manifest, name, { onProgress = () => {} } =
   }
   allRms.sort((left, right) => left - right);
   const observedRms = allRms.length ? allRms[Math.floor(allRms.length / 2)] : 0.01;
-  bank.observedRms = Math.max(0.0008, observedRms);
+  bank.observedRms = Math.max(bank.oneShot ? 0.00001 : 0.0008, observedRms);
   return bank;
 }
 
@@ -349,5 +377,9 @@ export function lookupSample(bank, midi, velocity) {
   if (sampleIndex < 0) return null;
   const sample = layer.samples[sampleIndex];
   // 样本自己的音准偏差（tune，单位半音）也要算进去，否则整体会偏高/偏低几十音分。
-  return { sample, layer, playbackRate: playbackRateFor(midi, sample.midi + (sample.tune || 0)) };
+  return {
+    sample,
+    layer,
+    playbackRate: bank.fixedPitch ? 1 : playbackRateFor(midi, sample.midi + (sample.tune || 0)),
+  };
 }

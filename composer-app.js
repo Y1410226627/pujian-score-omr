@@ -6,7 +6,7 @@
 //   · 写错了永远能撤销，删音就是点旁边的小 ×；
 //   · 试听可以「从头」「从选中的音开始」「只听选中的一段」，避免听一大段找那一句。
 import {
-  NOTE_VALUES, REST_VALUES, midiToName, isBlackKey, isRest,
+  NOTE_VALUES, midiToName, isBlackKey, isRest,
   scoreToPlayableNotes, accidentalFor, cloneScore, remainingBeats, usedBeats,
   appendNote, removeNote, setNoteBeats, transposeNote, buildMeasureSlots,
 } from "./composer.js";
@@ -21,7 +21,7 @@ import {
   scoreTotalBeats as v2TotalBeats, cloneScore as cloneV2Score,
 } from "./composer-model.js";
 import { v2ToMusicXml, musicXmlToV2 } from "./composer-v2xml.js";
-import { recognizePdfToMusicXml } from "./composer-pdf.js";
+import { recognizePdf, jianpuPagesToScore } from "./composer-pdf.js";
 import {
   appendNote as v2AppendNote, appendChordTone as v2AppendChordTone,
   deleteEvent as v2DeleteEvent, changeEventBeats as v2ChangeEventBeats,
@@ -48,6 +48,8 @@ const els = {
   removePart: byId("removePart"),
   pitchLabel: byId("pitchLabel"), pitchHint: byId("pitchHint"), pitchDown: byId("pitchDown"),
   pitchUp: byId("pitchUp"), pitchPlay: byId("pitchPlay"), miniKeyboard: byId("miniKeyboard"),
+  octaveDown: byId("octaveDown"), octaveUp: byId("octaveUp"), restToggle: byId("restToggle"),
+  keyboardRange: byId("keyboardRange"),
   valueChips: byId("valueChips"), addNote: byId("addNote"), undo: byId("undo"), redo: byId("redo"),
   scoreTitle: byId("scoreTitle"), scoreTempo: byId("scoreTempo"), scoreTime: byId("scoreTime"),
   repeatBar: byId("repeatBar"), repeatTimes: byId("repeatTimes"),
@@ -61,18 +63,25 @@ const els = {
   exportMusicXml: byId("exportMusicXml"), exportMidi: byId("exportMidi"),
   exportProject: byId("exportProject"), exportPng: byId("exportPng"), importProject: byId("importProject"),
   importMusicXml: byId("importMusicXml"), musicXmlInput: byId("musicXmlInput"),
+  importEngine: byId("importEngine"), importJianpuKey: byId("importJianpuKey"),
+  importJianpuBeats: byId("importJianpuBeats"),
   projectInput: byId("projectInput"), exportHint: byId("exportHint"),
   staffSelector: byId("staffSelector"), voiceSelector: byId("voiceSelector"),
   addVoice: byId("addVoice"), addStaff: byId("addStaff"),
   chordToneButton: byId("chordToneButton"), markGroups: byId("markGroups"),
   scoreEditor: byId("scoreEditor"), scoreEmpty: byId("scoreEmpty"), editToolbar: byId("editToolbar"),
+  editHint: byId("editHint"),
+  scoreMeasureJump: byId("scoreMeasureJump"), scoreMeasureGo: byId("scoreMeasureGo"), soloPart: byId("soloPart"),
   selectionInfo: byId("selectionInfo"), editActions: byId("editActions"),
   toast: byId("toast"),
 };
 
 const SOLFEGE = ["do", "di", "re", "ri", "mi", "fa", "fi", "sol", "si", "la", "li", "ti"];
-const KEYBOARD_START = 48;   // C3
-const KEYBOARD_END = 84;     // C6
+// 键盘只显示一个八度，找不到更高的音就点「高八度」——
+// 原来一次铺开 3 个八度、37 个小键，零基础用户反馈「找个音要往下翻半天」。
+const KEYBOARD_LOW = 36;    // C2
+const KEYBOARD_HIGH = 84;   // C6
+const KEYBOARD_SPAN = 12;
 
 // 当前编辑的声部位置（v2：声部 / 第几行谱表 / 第几条声部线）
 const DEFAULT_REF = { partIndex: 0, staffIndex: 0, voiceIndex: 0 };
@@ -84,9 +93,11 @@ const state = {
   activeRef: { ...DEFAULT_REF },
   activePartId: null,
   pitch: 60,               // 当前输入音高（C4）
+  keyboardBase: 60,        // 键盘最左边的 C（默认 C4，一个八度）
   beats: 1,                // 当前选中的时值
   restMode: false,          // 当前是在放「音符」还是「休止符」
   selection: null,          // { partId, measureIndex, noteId } 或 { partId, fromMeasure, toMeasure }
+  soloPart: false,          // 只看当前声部（长谱子先降高度，找音更快）
   history: [], future: [],
   audio: null, master: null, sources: new Set(), timers: [],
   isPlaying: false,
@@ -486,64 +497,184 @@ loadScoreFonts();
 /**
  * 在谱面上画出「连音线 / 圆滑线」。
  *
- * 为什么单独一遍：VexFlow 的 StaveTie / Curve 必须在音符已经绘制之后再画，
- * 否则拿不到正确坐标。之前只把 tie 记在数据里、谱面完全看不到——
- * 用户反馈「加了连音线在谱子上看不到」就漏在这里。
+ * 必须等**所有小节都画完**再画：连线可能跨小节、甚至跨行，
+ * 之前只在每个小节内部找相邻音符，跨小节的连线永远画不出来——
+ * 用户反馈「加了连音线在谱子上看不到」正是这个原因。
  *
- * VexFlow 5 的参数是驼峰 firstNote / lastNote（4.x 是 first_note），
- * 传错会抛 "Tie needs to have either firstNote or lastNote set."（实测）。
+ * 数据约定（v2 事件 / v1 拍位）：
+ *   · tie="start" / "continue" 或 slur="start" → 从这里连到下一个音；
+ *   · tieStop / tie="stop" / slurStop       → 从前一个音连到这里；
+ *   · tieFromPrev                            → 同一个长音被小节线切开，必须自动接上。
  */
-function drawConnections(notes, svg) {
+function drawConnections(drawnNotes, svg) {
   try {
-    drawConnectionsInner(notes, svg);
+    drawConnectionsInner(drawnNotes, svg);
   } catch (error) {
-    // 连线是附加内容：画不出来绝不能让整个小节渲染失败（之前就是这样导致谱面空白）
+    // 连线是附加内容：画不出来绝不能让整个谱面渲染失败
     console.warn("[创作室] 画连线失败（不影响谱面）：", error && error.message);
   }
 }
 
-function drawConnectionsInner(notes, svg) {
-  // 只取「真正参与排版、且有 TickContext」的音符：休止符与 BarNote 不画连线，没有 TickContext 的音符硬画会抛 NoTickContext（实测）。
-  const staveNotes = notes.filter((note) => note instanceof VF.StaveNote
-    && !note.__pujianRest
-    && typeof note.getTickContext === "function"
-    && note.getTickContext());
-  // 诊断信息挂到 window（只在 ?debug=1 时有用，不影响正常使用）
-  if (window.__pujianTieDebug !== undefined) {
-    window.__pujianTieDebug = {
-      staveNotes: staveNotes.length,
-      flags: staveNotes.map((note) => ({ tie: Boolean(note.__pujianTie), slur: Boolean(note.__pujianSlur) })),
-      hasTickContext: staveNotes.map((note) => Boolean(note.getTickContext && note.getTickContext())),
-    };
+/** 把每一条声部线的音符按「小节 + 小节内拍位」排好，再成对画曲线。 */
+function drawConnectionsInner(drawnNotes, svg) {
+  const byPart = new Map();
+  for (const note of drawnNotes) {
+    if (!(note instanceof VF.StaveNote) || note.__pujianRest) continue;
+    if (!note.__pujianPart || !note.__pujianSlot) continue;
+    if (!note.getTickContext || !note.getTickContext()) continue;
+    if (!byPart.has(note.__pujianPart)) byPart.set(note.__pujianPart, []);
+    byPart.get(note.__pujianPart).push(note);
   }
-  for (let index = 0; index < staveNotes.length - 1; index += 1) {
-    const from = staveNotes[index];
-    const to = staveNotes[index + 1];
-    const drawTie = from.__pujianTie || to.__pujianTie;
-    const drawSlur = from.__pujianSlur || to.__pujianSlur;
-    if (!drawTie && !drawSlur) continue;
-    try {
-      if (drawTie && VF.StaveTie) {
-        // VexFlow 5 的 StaveTie 需要音符已完成 format（有 TickContext）。
-        // 用 setContext(...).draw() 时它会读音符坐标，拿不到就抛 NoTickContext（实测）。
-        const tie = new VF.StaveTie({
-          firstNote: from, lastNote: to,
-          firstIndexes: [0], lastIndexes: [0],
-        });
-        tie.setContext(svg);
-        tie.draw();
-      }
-      if (drawSlur && VF.Curve) {
-        new VF.Curve(from, to, {
-          cps: [{ x: 0, y: 12 }, { x: 0, y: 12 }],
-          thickness: 2,
-        }).setContext(svg).draw();
-      }
-    } catch (tieError) {
-      // 连线画不出来不影响其它内容，但要能定位原因
-      console.warn("[创作室] 画连线失败：", tieError && tieError.message);
+  let tieCount = 0;
+  let slurCount = 0;
+  for (const list of byPart.values()) {
+    list.sort((left, right) => (left.__pujianMeasure - right.__pujianMeasure)
+      || (left.__pujianSlot.startBeats - right.__pujianSlot.startBeats));
+    const tiePairs = pairMarks(list, (slot) => ({
+      start: slot.tie === "start" || slot.tie === "continue",
+      stop: Boolean(slot.tieStop) || slot.tie === "stop",
+      auto: Boolean(slot.tieFromPrev),
+    }));
+    const slurPairs = pairMarks(list, (slot) => ({
+      start: slot.slur === "start",
+      stop: Boolean(slot.slurStop),
+      auto: false,
+    }));
+    for (const [fromIndex, toIndex] of tiePairs) {
+      if (drawCurve(list[fromIndex], list[toIndex], svg, "tie")) tieCount += 1;
+    }
+    for (const [fromIndex, toIndex] of slurPairs) {
+      if (drawCurve(list[fromIndex], list[toIndex], svg, "slur")) slurCount += 1;
     }
   }
+  if (window.__pujianTieDebug !== undefined) {
+    window.__pujianTieDebug = { ties: tieCount, slurs: slurCount, notes: drawnNotes.length };
+  }
+}
+
+/**
+ * 把「开始 / 结束」标记配对成 [前, 后] 下标。
+ * 规则：结束标记优先找它前面最近的、还没用掉的开始标记；
+ * 只有单独一个开始（或单独一个结束）时，就连到紧挨着的下一个（上一个）音。
+ */
+function pairMarks(list, read) {
+  const marks = list.map((note) => read(note.__pujianSlot));
+  const pairs = [];
+  const usedStarts = new Set();
+  const seen = new Set();
+  const push = (left, right) => {
+    const from = Math.min(left, right);
+    const to = Math.max(left, right);
+    if (from < 0 || to >= list.length || from === to) return;
+    const key = `${from}-${to}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pairs.push([from, to]);
+  };
+  // 跨小节长音：同一个事件被小节线切成两段，必须自动接上
+  marks.forEach((mark, index) => {
+    if (mark.auto) push(index - 1, index);
+  });
+  // 显式标记：先配「开始…结束」，再处理落单的一端
+  marks.forEach((mark, index) => {
+    if (!mark.stop) return;
+    let start = -1;
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (marks[cursor].start && !usedStarts.has(cursor)) { start = cursor; break; }
+    }
+    if (start >= 0) {
+      usedStarts.add(start);
+      push(start, index);
+    } else {
+      push(index - 1, index);
+    }
+  });
+  marks.forEach((mark, index) => {
+    if (mark.start && !usedStarts.has(index)) push(index, index + 1);
+  });
+  return pairs;
+}
+
+/** 画一条连线；成功返回 true。跨行时按标准谱面画「行尾半条 + 下一行行首半条」。 */
+function drawCurve(from, to, svg, kind) {
+  if (!from || !to) return false;
+  const firstYs = from.getYs ? from.getYs() : null;
+  const lastYs = to.getYs ? to.getYs() : null;
+  if (!firstYs || !firstYs.length || !lastYs || !lastYs.length) return false;
+  const wraps = to.getAbsoluteX() <= from.getAbsoluteX();
+  const acrossLines = Math.abs(firstYs[0] - lastYs[0]) > 30;
+  // 圆滑线在同一行内用弧线（比延音线拱得高）
+  if (kind === "slur" && VF.Curve && !wraps && !acrossLines) {
+    new VF.Curve(from, to, {
+      cps: [{ x: 0, y: 12 }, { x: 0, y: 12 }],
+      thickness: 2,
+    }).setContext(svg).draw();
+    return true;
+  }
+  if (!VF.StaveTie) return false;
+  if (wraps || acrossLines) {
+    // 只给 firstNote 或只给 lastNote = 半条连线（VexFlow 的 partial tie）
+    new VF.StaveTie({ firstNote: from, firstIndexes: [0], lastIndexes: [0] }).setContext(svg).draw();
+    new VF.StaveTie({ lastNote: to, firstIndexes: [0], lastIndexes: [0] }).setContext(svg).draw();
+  } else {
+    new VF.StaveTie({
+      firstNote: from, lastNote: to,
+      firstIndexes: [0], lastIndexes: [0],
+    }).setContext(svg).draw();
+  }
+  return true;
+}
+
+/** 谱面宽度 → 每行放几个小节（2–4 个，避免长谱子被拉成很长的竖条）。 */
+function measuresPerLineFor(width) {
+  return Math.max(2, Math.min(4, Math.floor(Number(width) / 260) || 2));
+}
+
+/** 当前要显示在谱面上的声部线（「只看当前声部」时只留当前演奏声部）。 */
+function displayParts(parts) {
+  const list = parts || [];
+  if (!state.soloPart) return list;
+  const score = currentScore();
+  const target = score && (score.parts || [])[state.activeRef.partIndex];
+  if (!target) return list;
+  const filtered = list.filter((part) => part.v2 && part.v2.partId === target.id);
+  return filtered.length ? filtered : list;
+}
+
+/** 把谱面滚动到第 index 小节（1 起）所在的那一行。 */
+function jumpToMeasure(index) {
+  const view = state.scoreView;
+  const wrap = els.scoreEditor.closest(".score-canvas-wrap");
+  if (!view || !wrap) return;
+  const width = Math.max(680, els.scoreEditor.clientWidth || 760);
+  const perLine = measuresPerLineFor(width);
+  const groups = groupPartsByStave(displayParts(view.parts));
+  const systemHeight = 62 * Math.max(1, groups.length) + 34;
+  const line = Math.floor((Math.max(1, Number(index) || 1) - 1) / perLine);
+  wrap.scrollTop = Math.max(0, 20 + line * systemHeight - 12);
+}
+
+/**
+ * 把 v1 视图里的「每条声部线」按 (part, 谱表) 分组。
+ *
+ * v1 视图是「一条声部线 = 一个 part」，但谱面上同一行谱表里的多条声部线
+ * 应当叠在同一行画。这里还原成「一行谱表 + 它下面的几条声部线」。
+ */
+function groupPartsByStave(parts) {
+  const groups = [];
+  const index = new Map();
+  for (const part of parts || []) {
+    // v1 part 上带着 v2 的来源信息（partId / staffIndex）
+    const v2 = part.v2 || {};
+    const key = `${v2.partId || part.id}|#${v2.staffIndex === undefined ? 0 : v2.staffIndex}`;
+    if (!index.has(key)) {
+      const group = { key, clef: part.clef, parts: [] };
+      index.set(key, group);
+      groups.push(group);
+    }
+    index.get(key).parts.push(part);
+  }
+  return groups.length ? groups : [{ key: "default", clef: "treble", parts: [] }];
 }
 
 function renderScore() {
@@ -563,10 +694,15 @@ const view = state.scoreView;
   const measureCount = Math.max(1, Math.ceil(v2TotalBeats(state.score) / view.beatsPerMeasure));
   const width = Math.max(680, els.scoreEditor.clientWidth || 760);
   const staveWidth = width - 40;
-  const partCount = view.parts.length;
+  // 同一行谱表里的多条声部线要**叠在同一行**上画，不能各占一行。
+  // （钢琴谱一行谱表常有 2-3 条声部线；以前每条都画成独立谱表，
+  //   3 页的 PDF 就会变成 6 行谱表，排布全乱——实测踩到。）
+  const staveGroups = groupPartsByStave(displayParts(view.parts));
   const staveHeight = 62;
-  const systemHeight = staveHeight * partCount + 34;
-  const height = Math.max(320, systemHeight * 4 + 40);
+  const systemHeight = staveHeight * Math.max(1, staveGroups.length) + 34;
+  const measuresPerLine = measuresPerLineFor(width);
+  const lineCount = Math.max(1, Math.ceil(measureCount / measuresPerLine));
+  const height = Math.max(240, systemHeight * lineCount + 40);
 
   els.scoreEditor.replaceChildren();
   const renderer = new VF.Renderer(els.scoreEditor, VF.Renderer.Backends.SVG);
@@ -576,19 +712,22 @@ const view = state.scoreView;
   const svgElement = els.scoreEditor.querySelector("svg");
 
   const time = scoreTimeSignature();
-  const measuresPerLine = 2;
-  view.parts.forEach((part, partIndex) => {
-    const clef = part.clef === "bass" ? "bass" : part.clef === "alto" ? "alto" : part.clef === "tenor" ? "tenor" : "treble";
+  // 所有画出来的音符统一收集，等全部小节画完再画连线（连线可以跨小节、跨行）
+  const drawnNotes = [];
+  const scrollWrap = els.scoreEditor.closest(".score-canvas-wrap");
+  const keepScrollTop = scrollWrap ? scrollWrap.scrollTop : 0;
+  staveGroups.forEach((group, groupIndex) => {
+    const clef = group.clef === "bass" ? "bass" : group.clef === "alto" ? "alto" : group.clef === "tenor" ? "tenor" : "treble";
     for (let line = 0; line * measuresPerLine < measureCount; line += 1) {
       for (let slot = 0; slot < measuresPerLine; slot += 1) {
         const measureIndex = line * measuresPerLine + slot;
         if (measureIndex >= measureCount) continue;
         const x = 20 + slot * (staveWidth / measuresPerLine);
-        const y = 20 + line * systemHeight + partIndex * staveHeight;
+        const y = 20 + line * systemHeight + groupIndex * staveHeight;
         const stave = new VF.Stave(x, y, staveWidth / measuresPerLine);
         if (measureIndex === 0) {
           stave.addClef(clef);
-          if (partIndex === 0) {
+          if (groupIndex === 0) {
             const keyName = keySignatureName(view.keyFifths);
             if (keyName) stave.addKeySignature(keyName);
             stave.addTimeSignature(`${time.beats}/${time.beatType}`);
@@ -600,89 +739,94 @@ const view = state.scoreView;
         }
         stave.setContext(svg).draw();
 
-        const measure = part.measures[measureIndex] || { beats: [] };
-        const { slots } = buildMeasureSlots(measure, view.beatsPerMeasure);
-        const notes = [];
-        for (const item of slots) {
-          const length = beatsToVfDuration(item.beats);
-          if (item.rest) {
-            // 休止符：用 VexFlow 的 "r" 后缀画成休止记号（用户看得懂、也符合乐谱规范）
-            const restNote = new VF.StaveNote({
-              clef,
-              keys: [clef === "bass" ? "d/3" : "b/4"],
-              duration: `${length}r`,
-            });
-            restNote.__pujianId = item.id;
-            restNote.__pujianPart = part.id;
-            restNote.__pujianBeats = item.beats;
-            restNote.__pujianRest = true;
-            notes.push(restNote);
-            continue;
+        // 同一行谱表上的每条声部线都要画（叠在同一行上）
+        const partsHere = group.parts;
+        const allNotes = [];
+        for (const part of partsHere) {
+          const measure = part.measures[measureIndex] || { beats: [] };
+          const { slots } = buildMeasureSlots(measure, view.beatsPerMeasure);
+          const notes = [];
+          for (const item of slots) {
+            const length = beatsToVfDuration(item.beats);
+            if (item.rest) {
+              const restNote = new VF.StaveNote({
+                clef,
+                keys: [clef === "bass" ? "d/3" : "b/4"],
+                duration: `${length}r`,
+              });
+              restNote.__pujianId = item.id;
+              restNote.__pujianPart = part.id;
+              restNote.__pujianBeats = item.beats;
+              restNote.__pujianRest = true;
+              restNote.__pujianSlot = item;
+              restNote.__pujianMeasure = measureIndex;
+              notes.push(restNote);
+              continue;
+            }
+            // 和弦：同一个拍位上的多个音高一起放进 keys（VexFlow 就是这么画和弦的）
+            const chordKeys = [vfKeyFor(item.midi)];
+            for (const extra of item.chordMidis || []) {
+              const extraKey = vfKeyFor(extra);
+              if (!chordKeys.includes(extraKey)) chordKeys.push(extraKey);
+            }
+            const note = new VF.StaveNote({ clef, keys: chordKeys, duration: length, auto_stem: true });
+            note.__pujianId = item.id;
+            note.__pujianPart = part.id;
+            note.__pujianBeats = item.beats;
+            note.__pujianKey = chordKeys[0];
+            note.__pujianSlot = item;
+            note.__pujianMeasure = measureIndex;
+            notes.push(note);
           }
-          const key = vfKeyFor(item.midi);
-          const note = new VF.StaveNote({ clef, keys: [key], duration: length, auto_stem: true });
-          // 临时升降号不在这里手动加：VexFlow 5 要用 Accidental.applyAccidentals(voices, key)
-          // 统一算一遍（见下面 voice 建好之后的调用），手动 modifier 在 5.0 里不会绘制。
-          note.__pujianId = item.id;
-          note.__pujianPart = part.id;
-          note.__pujianBeats = item.beats;
-          note.__pujianKey = key;
-          // 记号：连音线 / 圆滑线（渲染时在音符画完之后再画线，见 drawConnections）
-          note.__pujianTie = Boolean(item.tie || item.tieFromPrev);
-          note.__pujianSlur = Boolean(item.slur || item.slurStop);
-          notes.push(note);
+          // 和弦音：同一拍位上的其它音高，要在**建音符时**一起给到 keys 里。
+          // （之前用 addModifier 加装饰音是错的：那不是和弦，画出来是一堆空心方块。）
+          // v1 把和弦音存在 anchor 的 chordMidis 里，这里在建 note 之后补进去。
+          const remaining = remainingBeats(measure, view.beatsPerMeasure);
+          if (remaining > 1e-9) {
+            notes.push(new VF.StaveNote({
+              clef, keys: [clef === "bass" ? "d/3" : "b/4"],
+              duration: beatsToVfDuration(remaining) + "r",
+            }));
+          }
+          if (!notes.length) {
+            notes.push(new VF.StaveNote({ clef, keys: [clef === "bass" ? "d/3" : "b/4"], duration: "1r" }));
+          }
+          allNotes.push(notes);
         }
-        const remaining = remainingBeats(measure, view.beatsPerMeasure);
-        if (remaining > 1e-9) {
-          const rest = new VF.StaveNote({ clef, keys: [clef === "bass" ? "d/3" : "b/4"], duration: beatsToVfDuration(remaining) + "r" });
-          notes.push(rest);
-        }
-        if (!notes.length) {
-          notes.push(new VF.StaveNote({ clef, keys: [clef === "bass" ? "d/3" : "b/4"], duration: "1r" }));
-        }
-        // 行尾的小节线
-        if (slot === measuresPerLine - 1 || measureIndex === measureCount - 1) {
-          const endBar = new VF.BarNote(VF.Barline.type.END);
-          endBar.setStave(stave);
-          notes.push(endBar);
-        }
+
         try {
-          // 注意：v2 谱没有 beatsPerMeasure 字段（那是 v1 的），要用拍号换算值，
-          // 否则 Voice 的 num_beats 是 undefined，format 会失败、音符拿不到 TickContext，
-          // 连音线也会跟着报 NoTickContext（实测）。
-          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("voice-start");
-          const voice = new VF.Voice({ num_beats: view.beatsPerMeasure, beat_value: view.beatType || 4 })
-            .setMode(VF.Voice.Mode.SOFT);
-          voice.addTickables(notes.filter((note) => note instanceof VF.StaveNote));
-          // 临时升降号：按调号与同小节/前后音自动判断该标 # / b / n（VexFlow 5 的官方做法）
-          try {
-            VF.Accidental.applyAccidentals([voice], keySignatureName(view.keyFifths) || "C");
-          } catch {
-            // 算不出就退化成「只画音高」，不影响其它功能
+          const vfVoices = [];
+          for (const notes of allNotes) {
+            const voice = new VF.Voice({ num_beats: view.beatsPerMeasure, beat_value: view.beatType || 4 })
+              .setMode(VF.Voice.Mode.SOFT);
+            voice.addTickables(notes.filter((note) => note instanceof VF.StaveNote));
+            vfVoices.push({ voice, notes });
           }
+          // 临时升降号：按调号自动判断（VexFlow 5 的官方做法）
+          for (const { voice } of vfVoices) {
+            try {
+              VF.Accidental.applyAccidentals([voice], keySignatureName(view.keyFifths) || "C");
+            } catch { /* 算不出就只画音高 */ }
+          }
+          // 多条声部线一起排版：同一个谱表里的音符共用横向空间
           const formatter = new VF.Formatter();
-          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("before-format:" + notes.length);
-          formatter.joinVoices([voice]).format([voice], staveWidth / measuresPerLine - 30);
-          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("after-format");
-          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("before-draw");
-          voice.draw(svg, stave);
-          if (window.__pujianRenderSteps !== undefined) window.__pujianRenderSteps.push("after-draw");
-          for (const note of notes) {
-            // 小节线用 Stave.setEndBarType 画（VexFlow 5 的 BarNote.draw 需要 TickContext，
-            // 拿不到会抛 NoTickContext 并让整个 try 中断，连音线就永远画不出来——实测踩到）。
-            void note;
+          formatter.joinVoices(vfVoices.map((item) => item.voice));
+          formatter.format(vfVoices.map((item) => item.voice), staveWidth / measuresPerLine - 30);
+          for (const { voice, notes } of vfVoices) {
+            voice.draw(svg, stave);
+            for (const note of notes) if (note instanceof VF.StaveNote) drawnNotes.push(note);
           }
-          // 连音线 / 圆滑线：必须在音符绘制之后再画，才拿得到坐标
-          drawConnections(notes, svg);
-          // 热区在 renderScore() 末尾统一绘制（见 drawNoteHitAreas）
         } catch (renderError) {
-          // 谱面渲染失败时不阻塞输入（数据模型本身是对的），但要能看到原因
           console.warn("[创作室] 谱面渲染出错：", renderError && renderError.message);
         }
       }
     }
   });
+  drawConnections(drawnNotes, svg);
   els.scoreEmpty.hidden = hasAnyNote();
+  if (scrollWrap) scrollWrap.scrollTop = keepScrollTop;
+  if (els.scoreMeasureJump) els.scoreMeasureJump.max = String(measureCount);
+  if (els.editHint) els.editHint.textContent = `点音符选中 · 共 ${measureCount} 小节（每行 ${measuresPerLine} 个）`;
   drawNoteHitAreas();
   attachNoteClicks();
 }
@@ -698,15 +842,24 @@ function drawNoteHitAreas() {
   const view = state.scoreView;
   if (!view) return;
   const measureCount = Math.max(1, Math.ceil(v2TotalBeats(state.score) / view.beatsPerMeasure));
-  const measuresPerLine = 2;
   const width = Math.max(680, els.scoreEditor.clientWidth || 760);
   const staveWidth = width - 40;
+  // 每行放几个小节：谱面越宽放得越多，避免整份乐谱拉成一条很长的竖条
+  const measuresPerLine = measuresPerLineFor(width);
   const staveHeight = 62;
-  const systemHeight = staveHeight * view.parts.length + 34;
+  // 与 renderScore 用同一套「一行谱表 = 一组」的排布，否则点按热区会整体错位
+  const staveGroups = groupPartsByStave(displayParts(view.parts));
+  const groupIndexOf = new Map();
+  staveGroups.forEach((group, groupIndex) => {
+    for (const part of group.parts) groupIndexOf.set(part.id, groupIndex);
+  });
+  const systemHeight = staveHeight * Math.max(1, staveGroups.length) + 34;
   let added = 0;
   // 遍历 v1 视图（v2 → v1 转换保证了每个拍位都带 v2Event 引用）
-  view.parts.forEach((part, partIndex) => {
+  view.parts.forEach((part) => {
+    if (!groupIndexOf.has(part.id)) return;   // 「只看当前声部」时跳过没画出来的声部
     const clef = part.clef === "bass" ? "bass" : "treble";
+    const groupIndex = groupIndexOf.get(part.id);
     for (let line = 0; line * measuresPerLine < measureCount; line += 1) {
       for (let slot = 0; slot < measuresPerLine; slot += 1) {
         const measureIndex = line * measuresPerLine + slot;
@@ -714,7 +867,7 @@ function drawNoteHitAreas() {
         const measure = part.measures[measureIndex];
         if (!measure) continue;
         const x = 20 + slot * (staveWidth / measuresPerLine);
-        const y = 20 + line * systemHeight + partIndex * staveHeight;
+        const y = 20 + line * systemHeight + groupIndex * staveHeight;
         const { slots } = buildMeasureSlots(measure, view.beatsPerMeasure);
         const totalBeats = Math.max(1, view.beatsPerMeasure);
         for (const item of slots) {
@@ -864,6 +1017,8 @@ function updateSelectionBar() {
     ["↓ 低半音", () => applySelectionEvent((target) => changeSelectedMidi(target.midi - 1))],
     ["更长（+半拍）", () => applySelectionEvent((target) => changeSelectedBeats(target.beats + 0.5))],
     ["更短（−半拍）", () => applySelectionEvent((target) => changeSelectedBeats(Math.max(0.25, target.beats - 0.5)))],
+    ["⌒ 连到下一个音（连音线）", () => connectSelectedToNext("tie")],
+    ["⌒ 圆滑线（一口气连过去）", () => connectSelectedToNext("slur")],
     ["删除这个音", () => deleteSelectedNote()],
     ["取消选中", () => { state.selection = null; updateSelectionBar(); renderScore(); }],
   ];
@@ -975,15 +1130,18 @@ function syncPartSelect() {
 
 function buildKeyboard() {
   els.miniKeyboard.replaceChildren();
-  for (let midi = KEYBOARD_START; midi <= KEYBOARD_END; midi += 1) {
+  for (let midi = state.keyboardBase; midi < state.keyboardBase + KEYBOARD_SPAN; midi += 1) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "key" + (isBlackKey(midi) ? " is-black" : "");
     button.dataset.midi = String(midi);
     const name = midiToName(midi);
-    const showName = midi % 12 === 0;  // 只在 C 上显示音名，键盘不至于太挤
-    button.innerHTML = showName ? `${name}<small>${SOLFEGE[0]}</small>` : "<small>·</small>";
-    button.title = `${name}（${SOLFEGE[(midi % 12)]}）`;
+    const solfege = SOLFEGE[((midi % 12) + 12) % 12];
+    // 白键标音名 + 唱名，黑键只标一个 ♯：一眼能找到 do/re/mi
+    button.innerHTML = isBlackKey(midi)
+      ? "<small>♯</small>"
+      : `${name}<small>${solfege}</small>`;
+    button.title = `${name}（唱名 ${solfege}）`;
     if (midi % 12 === 0) button.classList.add("is-octave-mark");
     button.addEventListener("click", () => {
       state.pitch = midi;
@@ -993,7 +1151,19 @@ function buildKeyboard() {
     });
     els.miniKeyboard.append(button);
   }
+  if (els.keyboardRange) {
+    els.keyboardRange.textContent = `${midiToName(state.keyboardBase)} – ${midiToName(state.keyboardBase + KEYBOARD_SPAN - 1)}`;
+  }
   markActiveKey();
+}
+
+/** 整个键盘上下移一个八度（C2–C6 之间）。 */
+function shiftKeyboard(delta) {
+  const next = Math.max(KEYBOARD_LOW, Math.min(KEYBOARD_HIGH - KEYBOARD_SPAN, state.keyboardBase + delta));
+  if (next === state.keyboardBase) return;
+  state.keyboardBase = next;
+  buildKeyboard();
+  showToast(`键盘现在是 ${midiToName(next)} 到 ${midiToName(next + KEYBOARD_SPAN - 1)}。`);
 }
 
 function markActiveKey() {
@@ -1018,7 +1188,7 @@ function updatePitchReadout() {
  */
 function buildValueChips() {
   els.valueChips.replaceChildren();
-  // 第一行：音符（会发出声音）
+  // 只列 9 种音符；「写休止」由上方的开关切换，避免 18 张卡片把面板撑成两屏。
   for (const item of NOTE_VALUES) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1033,29 +1203,8 @@ function buildValueChips() {
       <small class="chip-term">${item.label}</small>`;
     button.addEventListener("click", () => {
       state.beats = item.beats;
-      state.restMode = false;
       markActiveChip();
-      previewValue(item.beats, false);
-    });
-    els.valueChips.append(button);
-  }
-  // 第二行：休止符（占拍数、不发声）——画的是休止符本身
-  for (const item of REST_VALUES) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "chip chip-value is-rest";
-    button.dataset.beats = String(item.beats);
-    button.dataset.rest = "true";
-    button.title = `停顿（休止符）：占 ${beatsToHuman(item.beats)}，不发声`;
-    button.innerHTML = `
-      <span class="chip-glyph">${valueGlyphSvg(item.beats, { rest: true, size: 40, title: item.label + "休止" })}</span>
-      <span class="chip-bar">${beatsBarMarkup(item.beats)}</span>
-      <span class="chip-human">停顿 ${beatsToHuman(item.beats)}</span>
-      <small class="chip-term">${item.label}休止</small>`;
-    button.addEventListener("click", () => {
-      state.beats = item.beats;
-      state.restMode = true;
-      markActiveChip();
+      previewValue(item.beats, state.restMode);
     });
     els.valueChips.append(button);
   }
@@ -1078,8 +1227,8 @@ function previewValue(beats, rest) {
 function markActiveChip() {
   for (const button of els.valueChips.querySelectorAll(".chip")) {
     const sameBeats = Math.abs(Number(button.dataset.beats) - state.beats) < 1e-9;
-    const sameKind = (button.dataset.rest === "true") === state.restMode;
-    button.classList.toggle("is-active", sameBeats && sameKind);
+    // 卡片只表示「几拍」；写音符还是写休止由上方开关决定
+    button.classList.toggle("is-active", sameBeats);
   }
 }
 
@@ -1231,6 +1380,65 @@ function toggleMarkOnSelection(key, value) {
   pushHistory();
   afterScoreChange();
   return result;
+}
+
+/**
+ * 把选中的音和**同一条声部线的下一个音**连起来，一次点击就能在谱面上看到弧线。
+ *
+ * 之前要分别点「开始连音线」「结束连音线」，而且连线跨小节时根本画不出来；
+ * 现在默认连到下一个音，再点一次取消。两个音高不同时按「圆滑线」处理（乐理上才成立）。
+ */
+function connectSelectedToNext(kind) {
+  const score = currentScore();
+  const selected = selectedEvent(score);
+  if (!selected) {
+    showToast("先在谱面上点一个音，再点这里。");
+    return;
+  }
+  const viewPart = ((state.scoreView && state.scoreView.parts) || [])
+    .find((item) => item.id === state.selection.partId);
+  const voice = viewPart ? v2VoiceFor(viewPart) : null;
+  if (!voice) return;
+  const events = [...(voice.events || [])]
+    .filter((event) => !event.chordWith && !event.rest)
+    .sort((left, right) => left.beat - right.beat);
+  const index = events.findIndex((event) => event.id === selected.id);
+  const next = index >= 0 ? events[index + 1] : null;
+  if (!next) {
+    showToast("这是这条声部线的最后一个音，后面没有可以连的音。");
+    return;
+  }
+
+  const isTie = kind === "tie";
+  const already = isTie ? selected.tie === "start" : selected.slur === "start";
+  pushHistory();
+  if (already) {
+    delete selected.tie;
+    delete selected.slur;
+    delete next.tieStop;
+    delete next.slurStop;
+    afterScoreChange();
+    showToast("已取消这条连线。");
+    return;
+  }
+
+  // 连音线只用于相同音高；不同音高用圆滑线（谱面同样画一条弧线）
+  const asSlur = !isTie || Math.round(selected.midi) !== Math.round(next.midi);
+  delete selected.tie;
+  delete selected.slur;
+  delete next.tieStop;
+  delete next.slurStop;
+  if (asSlur) {
+    selected.slur = "start";
+    next.slurStop = true;
+  } else {
+    selected.tie = "start";
+    next.tieStop = true;
+  }
+  afterScoreChange();
+  showToast(asSlur && isTie
+    ? "两个音高不同，已按「圆滑线」连起来，谱面上能看到弧线。"
+    : "已连到下一个音，谱面上能看到弧线。");
 }
 
 /** 加一条声部线（同一行谱表里并行写第二条，例如钢琴左手伴奏）。 */
@@ -1553,18 +1761,48 @@ async function importMusicXmlFile(file) {
   }
 }
 
-/** PDF 导入：渲染 → 识别 → 合并成一份乐谱。 */
+/** PDF 导入：渲染 → 识别（五线谱/简谱自动回退）→ 合并成一份乐谱。 */
 async function importPdfFile(file) {
-  const label = document.querySelector("#importPdfLabel");
   setImportBusy(true, "准备识别…");
   try {
-    const result = await recognizePdfToMusicXml({
+    const result = await recognizePdf({
       file,
+      engine: (els.importEngine && els.importEngine.value) || "auto",
+      jianpuDo: Number(els.importJianpuKey && els.importJianpuKey.value) || 65,
+      jianpuBeats: Number(els.importJianpuBeats && els.importJianpuBeats.value) || 4,
       onProgress: ({ label: text }) => setImportBusy(true, text),
     });
+    const title = file.name.replace(/\.[^.]+$/, "") || "PDF 导入结果";
+
+    // 简谱：直接建成创作室乐谱（音符模型里有准确的起拍/时值/音高）
+    if (result.engine === "jianpu") {
+      const valid = result.pages.filter((item) => item.payload && !item.payload.error);
+      const converted = jianpuPagesToScore(valid, {
+        beats: Number(els.importJianpuBeats && els.importJianpuBeats.value) || 4,
+        title,
+        tempo: Number(currentScore() && currentScore().tempo) || 84,
+      });
+      if (!converted.noteCount) {
+        const reason = valid.length ? "" : "（可能扫描太淡，或这不是简谱）";
+        showToast(`这份 PDF 没读出简谱音符${reason}。`);
+        return;
+      }
+      pushHistory();
+      state.score = converted.score;
+      state.activeRef = { ...DEFAULT_REF };
+      syncSettingsInputs();
+      afterScoreChange();
+      const voiceText = `${converted.partCount} 个声部`;
+      showToast(`已按简谱导入 ${converted.pageCount} / ${result.pageCount} 页：${converted.noteCount} 个音、${voiceText}。`);
+      if (converted.warnings.length) {
+        console.info("[创作室] 简谱识别的核对提示：", converted.warnings);
+      }
+      return;
+    }
+
     const xmlPages = result.pages.filter((item) => item.musicxml);
     if (!xmlPages.length) {
-      showToast(`识别没读到音符（共 ${result.pageCount} 页）。可能是扫描太淡，或这些页是简谱——简谱请到工作台用「按简谱识别」。`);
+      showToast(`识别没读到音符（共 ${result.pageCount} 页）。可以换成更清楚的扫描图再试。`);
       return;
     }
     // 多页合并：第一页的骨架 + 后面页的小节接上
@@ -1573,6 +1811,7 @@ async function importPdfFile(file) {
       showToast("识别结果拼不起来，请先用工作台逐页识别。");
       return;
     }
+    merged.score.title = title;
     pushHistory();
     state.score = merged.score;
     state.activeRef = { ...DEFAULT_REF };
@@ -1779,11 +2018,38 @@ function bindEvents() {
   els.pitchDown.addEventListener("click", () => { state.pitch = Math.max(0, state.pitch - 1); updatePitchReadout(); markActiveKey(); playPitch(activePart(), state.pitch, ensureAudio().currentTime + 0.01, 0.35); });
   els.pitchUp.addEventListener("click", () => { state.pitch = Math.min(127, state.pitch + 1); updatePitchReadout(); markActiveKey(); playPitch(activePart(), state.pitch, ensureAudio().currentTime + 0.01, 0.35); });
   els.pitchPlay.addEventListener("click", () => playPitch(activePart(), state.pitch, ensureAudio().currentTime + 0.01, 0.55));
+  if (els.octaveDown) els.octaveDown.addEventListener("click", () => shiftKeyboard(-12));
+  if (els.octaveUp) els.octaveUp.addEventListener("click", () => shiftKeyboard(12));
+  if (els.scoreMeasureGo) els.scoreMeasureGo.addEventListener("click", () => {
+    jumpToMeasure(els.scoreMeasureJump && Number(els.scoreMeasureJump.value));
+  });
+  if (els.scoreMeasureJump) els.scoreMeasureJump.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      jumpToMeasure(Number(els.scoreMeasureJump.value));
+    }
+  });
+  if (els.soloPart) els.soloPart.addEventListener("change", () => {
+    state.soloPart = els.soloPart.checked;
+    afterScoreChange();
+  });
+  if (els.restToggle) {
+    for (const button of els.restToggle.querySelectorAll("button")) {
+      button.addEventListener("click", () => {
+        state.restMode = button.dataset.rest === "true";
+        for (const item of els.restToggle.querySelectorAll("button")) {
+          item.classList.toggle("is-active", item === button);
+        }
+        showToast(state.restMode ? "现在写的是休止：占拍数，不发声。" : "现在写的是音符。");
+      });
+    }
+  }
 
   els.partSelect.addEventListener("change", () => {
     state.activePartId = els.partSelect.value;
     syncPartSelect();
     updateMeasureStatus();
+    if (state.soloPart) renderScore();   // 只看当前声部时，换声部要立刻换成那一行
   });
 
   els.addPart.addEventListener("click", () => {
@@ -1839,13 +2105,20 @@ function bindEvents() {
     }
   });
   els.scoreTimbre.addEventListener("change", async () => {
-    const part = activePart();
-    if (!part) return;
+    const viewPart = activePart();
+    if (!viewPart) return;
+    // 音色必须写回 v2 谱的「源声部」，不能只改界面临时生成的 v1 视图：
+    // 之前只改视图，切完音色试听是新的，但整曲播放读的是重新生成的旧视图 → 又变回原音色。
+    const sourcePart = (currentScore().parts || [])
+      .find((item) => viewPart.v2 && item.id === viewPart.v2.partId)
+      || currentScore().parts[state.activeRef.partIndex];
+    if (!sourcePart) return;
     pushHistory();
-    part.timbre = els.scoreTimbre.value;
-    await ensureSampleBank(part.timbre);
-    showToast(`「${part.name}」的音色换成「${TIMBRE_LABELS[part.timbre] || part.timbre}」。`);
-    playPitch(part, state.pitch, ensureAudio().currentTime + 0.01, 0.6);
+    sourcePart.timbre = els.scoreTimbre.value;
+    await ensureSampleBank(sourcePart.timbre);
+    syncScoreView();   // 立刻同步，保证下一次播放读到的是新音色
+    showToast(`「${sourcePart.name}」的音色换成「${TIMBRE_LABELS[sourcePart.timbre] || sourcePart.timbre}」。`);
+    playPitch({ timbre: sourcePart.timbre }, state.pitch, ensureAudio().currentTime + 0.01, 0.6);
   });
 
   els.playAll.addEventListener("click", () => playRange(0, Infinity));

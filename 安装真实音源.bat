@@ -3,18 +3,20 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================================
-echo   安装真实音色（采样音源：钢琴 / 弦乐细分 / 合唱人声 / 管乐 / 键盘）
+echo   安装真实音色（采样音源：钢琴 / 弦乐 / 合唱 / 民乐 / 打击乐 / 管乐 / 键盘）
 echo ============================================================
 echo.
-echo 全部安装约 70 MB，下载到项目内 .assets\soundfonts 目录（不进 git）。
+echo 全部安装约 140 MB，下载到项目内 .assets\soundfonts 目录（不进 git）。
 echo   . 钢琴：Salamander Grand Piano V3（CC BY 3.0）
 echo   . 合唱：Sonatina Symphonic Orchestra 的女声 / 男声 / 混声合唱（CC Sampling Plus 1.0）
 echo   . 弦乐细分 / 管乐 / 键盘：FluidR3_GM（CC BY 3.0）
+echo   . 民族打击乐近似采样：VCSL（CC0 1.0）
 echo 许可与署名详见装好的 LICENSES.md。
 echo.
 echo 只装某一类可以带参数（在命令行里运行本文件或下面这行）：
 echo   py -3 tools\install_soundfonts.py --only voice
 echo   py -3 tools\install_soundfonts.py --only strings winds keys
+echo   py -3 tools\install_soundfonts.py --only china percussion
 echo   py -3 tools\install_soundfonts.py --list
 echo.
 

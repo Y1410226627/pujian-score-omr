@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20261021b" />
   </head>
   <body>
     <div class="app-shell">
@@ -219,6 +219,10 @@
             <p class="fine-print part-hint">「声部」就是乐谱上每一行的演唱者。勾上要听的声部（例如只听女高就把别的去掉），全勾就是听合唱；不想听钢琴伴奏就把「包含钢琴伴奏」去掉。<strong>每条右边的小滑条就是这个声部的音量</strong>——觉得钢伴太吵就把它拖小，播放中拖也立刻生效、不会中断。声部名可点下拉改成谱面上的叫法（女高 / 女中 / 男中），改名后整份乐谱一起更新。</p>
             </div>
             <div class="note-columns" aria-hidden="true"><span></span><span>音高</span><span title="以四分音符为一拍">起拍</span><span>时值</span><span></span></div>
+            <div class="measure-jump">
+              <label class="inline-field" for="measureJumpInput"><span>跳到第</span><input id="measureJumpInput" type="number" min="1" value="1" aria-label="跳到第几小节" /><span>小节</span></label>
+              <button class="ghost-button small" id="measureJumpButton" type="button">定位</button>
+            </div>
             <div class="note-list" id="noteList">
               <div class="notes-empty" id="notesEmpty"><span aria-hidden="true">♫</span><strong>等乐谱准备好</strong><small>识别结果会出现在这里</small></div>
             </div>

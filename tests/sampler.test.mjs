@@ -34,6 +34,18 @@ test("采样音色名单：覆盖钢琴/弦乐细分/人声/管乐，都有合�
   assert.equal(isSampledTimbre("nope"), false);
 });
 
+test("新增民族乐器均可选；打击乐声明完整播放与固定音高", () => {
+  for (const name of ["zhonghu_real", "zhongruan_real", "daruan_real", "gaohu_real", "liuqin_real",
+    "guanzi_real", "xun_real", "qudi_real", "yunluo_real", "pengling_real", "muyu_real",
+    "xiaoluo_real", "daluo_real", "bo_real", "paigu_real"]) {
+    assert.ok(SAMPLED_TIMBRES[name], "缺少新增采样音色：" + name);
+  }
+  for (const name of ["pengling_real", "muyu_real", "xiaoluo_real", "daluo_real", "bo_real", "paigu_real"]) {
+    assert.equal(SAMPLED_TIMBRES[name].oneShot, true, name + " 应自然播放完整打击采样");
+    assert.equal(SAMPLED_TIMBRES[name].fixedPitch, true, name + " 不应随音符变调");
+  }
+});
+
 test("清单/样本路径：都在 .assets/soundfonts/ 下（与 serve.py 的放行规则一致）", () => {
   assert.equal(SAMPLE_MANIFEST_URL, ".assets/soundfonts/manifest.json");
   assert.equal(SAMPLE_ROOT, ".assets/soundfonts/");
@@ -84,6 +96,16 @@ test("样本音准偏差（tune）：查表时要把样本自身的音分偏差�
   const exact = lookupSample(bank, 70, 0.8);
   assert.equal(exact.playbackRate, 1, "无偏差的样本同音播放比应为 1");
   assert.equal(lookupSample({ continuous: false, layers: [] }, 60, 0.5), null);
+});
+
+test("固定音高的敲击采样不会跟着谱面音符变调", () => {
+  const bank = {
+    fixedPitch: true,
+    continuous: false,
+    layers: [{ velocity: 0.8, samples: [{ midi: 60, buffer: null, tune: 0 }] }],
+  };
+  assert.equal(lookupSample(bank, 48, 0.8).playbackRate, 1);
+  assert.equal(lookupSample(bank, 72, 0.8).playbackRate, 1);
 });
 
 test("循环点吸附：在目标时间附近找到向上过零点", () => {

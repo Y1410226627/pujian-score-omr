@@ -155,10 +155,32 @@ h1 span { color: var(--green); }
 .score-legend { display: inline-flex; align-items: center; gap: 7px; }
 .score-legend[hidden] { display: none; }
 
-/* 音符序号可点击设选区 */
-.note-index { cursor: pointer; border-radius: 4px; }
-.note-index:hover { background: #eef3ee; color: var(--green-dark); }
-.note-index:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+/* 音符列表：改成「小节为行、声部为列」的分组，找某一句不用翻整张长列表 */
+.measure-jump { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+.measure-jump .inline-field { gap: 4px; }
+.measure-jump input[type="number"] { width: 56px; padding: 3px 6px; }
+.measure-group { border-bottom: 1px solid #edf1ec; padding: 2px 0 6px; }
+.measure-group[hidden] { display: none; }
+.measure-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  margin: 2px 0 3px;
+  border-radius: 5px;
+  background: #f4f8f4;
+  color: #4f6657;
+}
+.measure-head strong { font-size: 9.5px; font-weight: 600; }
+.measure-head span { font-size: 8.5px; color: #97a29a; }
+.measure-group.is-highlight .measure-head { background: #e2efe4; box-shadow: inset 0 0 0 1px #cfe1d3; }
+.measure-voice { border-left: 2px solid #eef3ee; margin: 0 0 0 4px; padding: 0 0 0 3px; }
+.measure-voice-name { padding: 2px 4px 1px; color: #7c8a81; font-size: 8.5px; }
+
 
 /* 选区工具条 */
 .selection-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0 0; padding: 8px 10px; border: 1px dashed #dfe6df; border-radius: 7px; background: #fbfcfa; font-size: 10px; color: #5f6d64; }

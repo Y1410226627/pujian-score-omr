@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { DOMParser } from "@xmldom/xmldom";
 
 import { musicXmlToV2, v2ToMusicXml } from "../composer-v2xml.js";
-import { scoreToPlayableNotes, beatsPerMeasure } from "../composer-model.js";
+import { scoreToPlayableNotes, beatsPerMeasure, createScore, createEvent } from "../composer-model.js";
 
 // 真实乐谱：用户提供的《进击的巨人 Call of Silence》第 1 页，由项目自己的识别引擎产出
 const REAL_XML = readFileSync(new URL("./fixtures/call-of-silence-p1.musicxml", import.meta.url), "utf8");
@@ -81,6 +81,27 @@ test("真实乐谱：拍号/调号/速度/小节数都对", () => {
   assert.ok(score.tempo > 0, "应读到速度");
   const totalBeats = Math.max(...scoreToPlayableNotes(score).map((note) => note.startBeat + note.durationBeats));
   assert.ok(totalBeats > 100, `总长度应覆盖整页，实际 ${totalBeats} 拍`);
+});
+
+test("手动加的连音线会写进 MusicXML，并且往返后还认得出", () => {
+  const score = createScore({ parts: [] });
+  const first = createEvent({ beat: 0, beats: 1, midi: 60, tie: "start" });
+  const second = createEvent({ beat: 1, beats: 1, midi: 60 });
+  second.tieStop = true;   // 界面「连到下一个音」就是这么标的
+  score.parts.push({
+    id: "p1", name: "旋律", timbre: "piano", octave: 0, volume: 1,
+    staves: [{ id: "s1", clef: "treble", voices: [{ id: "v1", events: [first, second] }] }],
+  });
+  const xml = v2ToMusicXml(score);
+  assert.match(xml, /<tie type="start"\/>/, "必须写出起点 tie");
+  assert.match(xml, /<tie type="stop"\/>/, "必须写出终点 tie");
+  assert.match(xml, /<tied type="start"\/>/, "notations 里也要有起点");
+  assert.match(xml, /<tied type="stop"\/>/, "notations 里也要有终点");
+  const { score: back } = musicXmlToV2(xml, { DOMParser });
+  const voice = back.parts[0].staves[0].voices.find((item) => item.events.length);
+  const events = voice.events;
+  assert.equal(events[0].tie, "start");
+  assert.equal(events[1].tieStop, true);
 });
 
 /**

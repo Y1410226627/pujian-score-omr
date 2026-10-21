@@ -562,9 +562,14 @@ export function v2ToMusicXml(score) {
             if (length <= 1e-6) continue;
             const continues = event.beat < measureStart - 1e-6;   // 从前面小节延续过来
             const willContinue = event.beat + event.beats > measureEnd + 1e-6;
+            // 用户手动加的连音线（两个独立的同音高音符）也要写出去；
+            // 之前只写了「跨小节长音自动产生的 tie」，手动连音线一回导出就丢了。
+            const explicitTieStart = event.tie === "start" || event.tie === "continue";
+            const explicitTieStop = Boolean(event.tieStop) || event.tie === "stop";
             lines.push(noteXml(event, {
               divisions: DIVISIONS, beats: length, staffNumber, per,
-              tieStart: willContinue, tieStop: continues,
+              tieStart: willContinue || explicitTieStart,
+              tieStop: continues || explicitTieStop,
               voiceNumber,
               isChord: Boolean(event.chordWith),
             }));

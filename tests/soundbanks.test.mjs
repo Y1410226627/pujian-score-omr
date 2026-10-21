@@ -25,6 +25,18 @@ test("每种音源都有合法的兜底合成音色与分类", () => {
   }
 });
 
+test("本次新增的 15 种音色已纳入乐器库并标记打击乐特性", () => {
+  for (const bank of ["zhonghu_real", "zhongruan_real", "daruan_real", "pengling_real", "muyu_real",
+    "xiaoluo_real", "bo_real", "paigu_real", "daluo_real", "gaohu_real", "liuqin_real",
+    "guanzi_real", "xun_real", "qudi_real", "yunluo_real"]) {
+    assert.ok(SAMPLED_TIMBRES[bank], `乐器库缺少 ${bank}`);
+  }
+  for (const bank of ["pengling_real", "muyu_real", "xiaoluo_real", "bo_real", "paigu_real", "daluo_real"]) {
+    assert.equal(SAMPLED_TIMBRES[bank].oneShot, true, `${bank} 应按采样完整播放`);
+    assert.equal(SAMPLED_TIMBRES[bank].fixedPitch, true, `${bank} 应保持采样原音高`);
+  }
+});
+
 test("分类表里每一类都有对应的显示名，且顺序稳定", () => {
   assert.ok(SAMPLE_CATEGORIES.length >= 10);
   for (const item of SAMPLE_CATEGORIES) {

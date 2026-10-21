@@ -15,13 +15,29 @@ ROOT = Path(__file__).resolve().parent.parent
 CATALOG = [
     # ——— 中国民族乐器 ———
     ("erhu_real", "中国民族乐器", "二胡", True, "strings", "弓弦，循环撑长音；CC0 样本（sfzinstruments/aliexpress-erhu）"),
+    ("zhonghu_real", "中国民族乐器", "中胡", True, "strings", "近似中提琴采样；不是中胡实录"),
+    ("gaohu_real", "中国民族乐器", "高胡", True, "strings", "近似小提琴采样；不是高胡实录"),
     ("pipa_real", "中国民族乐器", "琵琶", False, "soft", "弹拨，点一次响一下；FluidR3 弹拨音色（GM 太鼓/拨弦近似）"),
+    ("zhongruan_real", "中国民族乐器", "中阮", False, "soft", "近似尼龙弦吉他采样；不是中阮实录"),
+    ("daruan_real", "中国民族乐器", "大阮", False, "strings", "近似原声贝斯采样；不是大阮实录"),
+    ("liuqin_real", "中国民族乐器", "柳琴", False, "soft", "近似班卓琴采样；不是柳琴实录"),
     ("guzheng_real", "中国民族乐器", "古筝", False, "soft", "弹拨，FluidR3 竖琴/齐特近似"),
     ("dizi_real", "中国民族乐器", "笛子", True, "organ", "吹管，FluidR3 长笛/管风琴近似"),
+    ("qudi_real", "中国民族乐器", "曲笛", True, "organ", "近似长笛采样；不是曲笛实录"),
     ("xiao_real", "中国民族乐器", "箫", True, "organ", "吹管，FluidR3 长笛近似"),
+    ("xun_real", "中国民族乐器", "埙", True, "organ", "近似陶笛采样；不是埙实录"),
+    ("guanzi_real", "中国民族乐器", "管子", True, "organ", "近似唢呐采样；不是管子实录"),
     ("sheng_real", "中国民族乐器", "笙", True, "organ", "簧管，FluidR3 簧风琴近似"),
     ("suona_real", "中国民族乐器", "唢呐", True, "organ", "簧管，FluidR3 唢呐近似（GM 112 对应）"),
     ("yangqin_real", "中国民族乐器", "扬琴", False, "soft", "击弦，FluidR3 洋琴音色"),
+    ("yunluo_real", "中国民族乐器", "云锣", False, "soft", "近似管钟采样；有音高，不是云锣实录"),
+    # ——— 民族打击乐（VCSL CC0 近似采样，均按完整采样自然衰减播放）———
+    ("pengling_real", "中国打击乐", "碰铃", False, "soft", "VCSL 指钹单次采样近似；CC0"),
+    ("muyu_real", "中国打击乐", "木鱼", False, "soft", "VCSL 木块单次采样近似，三层力度；CC0"),
+    ("xiaoluo_real", "中国打击乐", "小锣", False, "soft", "VCSL Gong 1 弱奏采样近似；CC0"),
+    ("daluo_real", "中国打击乐", "大锣", False, "soft", "VCSL Gong 1 强奏采样近似；CC0"),
+    ("bo_real", "中国打击乐", "钹", False, "soft", "VCSL 交响钹单次采样近似；CC0"),
+    ("paigu_real", "中国打击乐", "排鼓", False, "soft", "VCSL 通鼓单次采样近似；CC0"),
     # ——— 钢琴 / 键盘 ———
     ("piano_real", "钢琴 / 键盘", "真实钢琴", False, "piano", "Salamander Grand Piano V3（两层力度）"),
     ("electric_piano_real", "钢琴 / 键盘", "电钢琴", False, "soft", "FluidR3"),
@@ -117,7 +133,7 @@ def main():
              f"本机可用的采样音源共 **{len(CATALOG)} 种**（另有 {len(SYNTH_ONLY)} 种不用装即可用的合成音色）。",
              "",
              "安装方式：双击 `安装真实音源.bat`，或运行 `py -3 tools/install_soundfonts.py`。"
-             "只想装某几类时用 `--only china strings winds`；先看清单用 `--list`。",
+             "只想装某几类时用 `--only china percussion strings winds`；先看清单用 `--list`。",
              "",
              "没装某一类时也能用：选中该音色会自动退回「同类合成音色」，不会没有声音。", ""]
     total = 0

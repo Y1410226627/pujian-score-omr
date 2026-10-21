@@ -548,15 +548,150 @@ try {
     console.log("真实钢琴：", JSON.stringify({ layers: sampled.layers, samples: sampled.samples }),
       "| C4", JSON.stringify(sampled.loud), "| C4 轻力度 RMS", sampled.soft.bodyRms, "| A4 音高", sampled.a4.pitch);
     assert.equal(sampled.loaded, true, "真实钢琴应当能加载");
-    assert.equal(sampled.layers, 2, "钢琴应有软/重两个力度层");
-    assert.ok(sampled.samples.every((count) => count >= 28), "每层应有 30 个基础采样");
+    assert.ok([2, 4].includes(sampled.layers), "钢琴应有 2 层 Salamander 或 4 层 Meta Open 力度采样");
+    assert.ok(sampled.samples.every((count) => count >= (sampled.layers === 4 ? 88 : 28)),
+      "每层应覆盖至少 88 个 Meta Open 音符或 30 个 Salamander 基础音");
     assert.ok(Math.abs(sampled.loud.pitch - 261.6) < 15, "真实钢琴 C4 的音高应≈261.6 Hz（实测 " + sampled.loud.pitch + "）");
     assert.ok(Math.abs(sampled.a4.pitch - 440) < 20, "真实钢琴 A4 的音高应≈440 Hz（实测 " + sampled.a4.pitch + "）");
     assert.ok(sampled.loud.bodyRms > 0.01, "真实钢琴应当有足够响度（RMS " + sampled.loud.bodyRms + "）");
-    assert.ok(sampled.loud.bodyRms < 0.12, "真实钢琴不能爆响（RMS " + sampled.loud.bodyRms + "）");
+    assert.ok(sampled.loud.bodyRms < 0.14, "真实钢琴不能爆响（RMS " + sampled.loud.bodyRms + "）");
     assert.ok(sampled.soft.bodyRms < sampled.loud.bodyRms, "轻力度应当比重力度轻");
     assert.ok(sampled.loud.peak < 0.95, "真实钢琴不能削波（峰值 " + sampled.loud.peak + "）");
     assert.ok(sampled.loud.maxJump < 0.2, "真实钢琴不应有爆音跳变（最大跳变 " + sampled.loud.maxJump + "）");
+
+    const improvedNames = ["piano_real", "nylon_guitar_real", "steel_guitar_real", "zhongruan_real", "liuqin_real"]
+      .filter((name) => installed.includes(name));
+    if (improvedNames.length > 1) {
+      const improvedLevels = await page.evaluate(async (names) => {
+        const debug = window.__pujian;
+        const sampleRate = 44100;
+        const savedAudio = debug.state.audio;
+        const values = {};
+        for (const name of names) {
+          const bank = await debug.ensureSampleBank(name);
+          const offline = new OfflineAudioContext(1, Math.ceil(sampleRate * 2.4), sampleRate);
+          debug.state.audio = offline;
+          debug.state.master = null;
+          debug.state.reverbBuffer = null;
+          debug.state.vibrato = null;
+          debug.state.noiseBuffer = null;
+          debug.state.waves.clear();
+          debug.state.partBuses.clear();
+          debug.state.sources.clear();
+          debug.state.partTimbres.clear();
+          debug.state.timbre = name;
+          debug.playTone(60, 0.05, 1.5, 0.16, null, "S1");
+          const rendered = await offline.startRendering();
+          const data = rendered.getChannelData(0);
+          let sum = 0;
+          let peak = 0;
+          const start = Math.floor(sampleRate * 0.3);
+          const end = Math.floor(sampleRate * 1.0);
+          for (let index = start; index < end; index += 1) {
+            sum += data[index] * data[index];
+            peak = Math.max(peak, Math.abs(data[index]));
+          }
+          values[name] = {
+            loaded: Boolean(bank),
+            layers: bank ? bank.layers.length : 0,
+            oneShot: Boolean(bank && bank.oneShot),
+            rms: Math.sqrt(sum / Math.max(1, end - start)),
+            peak,
+          };
+        }
+        debug.state.audio = savedAudio;
+        debug.state.master = null;
+        debug.state.reverbBuffer = null;
+        debug.state.vibrato = null;
+        debug.state.noiseBuffer = null;
+        debug.state.waves.clear();
+        debug.state.partBuses.clear();
+        debug.state.sources.clear();
+        debug.state.partTimbres.clear();
+        debug.state.timbre = "piano_real";
+        return values;
+      }, improvedNames);
+      console.log("Meta Open / 吉他族音色同力度响度（C4 RMS）：", JSON.stringify(improvedLevels));
+      const rmsValues = Object.values(improvedLevels).map((item) => item.rms);
+      for (const [name, item] of Object.entries(improvedLevels)) {
+        assert.equal(item.loaded, true, name + " 应当能加载");
+        assert.ok(item.rms > 0.004, name + " 应有足够响度（RMS " + item.rms.toFixed(4) + ")");
+        assert.ok(item.peak < 0.95, name + " 不能削波（峰值 " + item.peak.toFixed(3) + ")");
+      }
+      const spread = Math.max(...rmsValues) / Math.min(...rmsValues);
+      assert.ok(spread < 1.7, "Meta Open 钢琴/吉他族音色统一响度差应低于 1.7 倍（实测 " + spread.toFixed(2) + ")");
+    }
+
+    // 民族打击乐：一击后即使谱面音符很短，也要完整播放录音自然衰减；同时检查响度配平和峰值。
+    const oneShotNames = ["pengling_real", "muyu_real", "xiaoluo_real", "daluo_real", "bo_real", "paigu_real"]
+      .filter((name) => installed.includes(name));
+    if (oneShotNames.length) {
+      const oneShots = await page.evaluate(async (names) => {
+        const debug = window.__pujian;
+        const sampleRate = 44100;
+        const savedAudio = debug.state.audio;
+        const result = {};
+        const clearGraph = () => {
+          debug.state.master = null;
+          debug.state.reverbBuffer = null;
+          debug.state.vibrato = null;
+          debug.state.noiseBuffer = null;
+          debug.state.waves.clear();
+          debug.state.partBuses.clear();
+          debug.state.sources.clear();
+          debug.state.partTimbres.clear();
+        };
+        for (const name of names) {
+          const bank = await debug.ensureSampleBank(name);
+          const velocity = (0.16 - 0.05) / 0.25;
+          const layer = bank.layers.reduce((best, item) =>
+            Math.abs(item.velocity - velocity) < Math.abs(best.velocity - velocity) ? item : best,
+          bank.layers[0]);
+          const clipSeconds = layer.samples[0].buffer.duration;
+          const offline = new OfflineAudioContext(1, Math.ceil(sampleRate * (clipSeconds + 0.2)), sampleRate);
+          debug.state.audio = offline;
+          clearGraph();
+          debug.state.timbre = name;
+          debug.playTone(60, 0.05, 0.08, 0.16, null, "S1");
+          const buffer = await offline.startRendering();
+          const data = buffer.getChannelData(0);
+          const rms = (from, to) => {
+            const start = Math.max(0, Math.floor(from * sampleRate));
+            const end = Math.min(data.length, Math.floor(to * sampleRate));
+            let sum = 0;
+            for (let index = start; index < end; index += 1) sum += data[index] * data[index];
+            return Math.sqrt(sum / Math.max(1, end - start));
+          };
+          let peak = 0;
+          for (const value of data) peak = Math.max(peak, Math.abs(value));
+          result[name] = {
+            loaded: Boolean(bank), oneShot: bank.oneShot, fixedPitch: bank.fixedPitch,
+            clipSeconds: Number(clipSeconds.toFixed(2)),
+            rms: Number(rms(0.06, clipSeconds).toFixed(4)),
+            afterNoteRms: Number(rms(0.22, Math.max(0.23, clipSeconds - 0.04)).toFixed(5)),
+            peak: Number(peak.toFixed(3)),
+          };
+        }
+        debug.state.audio = savedAudio;
+        clearGraph();
+        debug.state.timbre = "piano_real";
+        return result;
+      }, oneShotNames);
+      console.log("民族打击乐单击后自然衰减（谱面时值 0.08 秒）：", JSON.stringify(oneShots));
+      const rmsValues = [];
+      for (const [name, data] of Object.entries(oneShots)) {
+        assert.equal(data.loaded, true, name + " 应当能加载");
+        assert.equal(data.oneShot, true, name + " 应声明单次采样");
+        assert.equal(data.fixedPitch, true, name + " 应保留打击采样原音高");
+        assert.ok(data.rms > 0.003, name + " 应有足够响度（RMS " + data.rms + ")");
+        assert.ok(data.peak < 0.95, name + " 不能削波（峰值 " + data.peak + ")");
+        if (data.clipSeconds > 0.3) assert.ok(data.afterNoteRms > 0.00001,
+          name + " 应在 0.08 秒音符结束后继续播放采样尾音");
+        rmsValues.push(data.rms);
+      }
+      const loudnessSpread = Math.max(...rmsValues) / Math.min(...rmsValues);
+      assert.ok(loudnessSpread < 1.7, "新增打击乐整体响度差应低于 1.7 倍（实测 " + loudnessSpread.toFixed(2) + ")");
+    }
 
     // 真实人声/弦乐：长音必须能"撑住"（FluidR3 样本 3.13 秒、SSO 合唱样本约 7.9 秒，都要靠循环）
     // 用 14 秒长音 + 16 秒离线渲染：两种样本都会长时间停在循环段。

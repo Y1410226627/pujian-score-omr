@@ -9,8 +9,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css" />
-    <link rel="stylesheet" href="composer.css" />
+    <link rel="stylesheet" href="styles.css?v=20261021b" />
+    <link rel="stylesheet" href="composer.css?v=20261021b" />
   </head>
   <body class="composer-page">
     <div class="app-shell">
@@ -42,7 +42,7 @@
               <div><span class="step-label">01 / 输入</span><h2>选音高、选拍数</h2></div>
             </div>
 
-            <div class="composer-row">
+            <div class="composer-row is-tight">
               <label class="field-label" for="composerPart">正在写的声部</label>
               <div class="inline-group">
                 <select id="composerPart" aria-label="选择声部"></select>
@@ -63,34 +63,24 @@
                   <button class="ghost-button small" id="pitchPlay" type="button" title="只听这个音">▷ 听一下</button>
                 </span>
               </div>
+              <div class="keyboard-controls">
+                <button class="ghost-button small" id="octaveDown" type="button" title="整个键盘往下移一个八度">◀ 低八度</button>
+                <span class="keyboard-range" id="keyboardRange">C4 – B4</span>
+                <button class="ghost-button small" id="octaveUp" type="button" title="整个键盘往上移一个八度">高八度 ▶</button>
+              </div>
               <div class="mini-keyboard" id="miniKeyboard" role="group" aria-label="钢琴键盘"></div>
             </div>
 
             <div class="composer-row">
-              <span class="field-label">写到哪一行（同一小节里可以同时写好几行）</span>
-              <div class="inline-group">
-                <select id="staffSelector" aria-label="第几行谱表"></select>
-                <select id="voiceSelector" aria-label="这一行的第几条声部线"></select>
-                <button class="ghost-button small" id="addVoice" type="button" title="在同一行谱表里再开一条声部线（比如钢琴左手的伴奏）">＋ 声部线</button>
-                <button class="ghost-button small" id="addStaff" type="button" title="再加一行谱表（比如钢琴的低音谱表）">＋ 谱表</button>
+              <div class="row-head">
+                <span class="field-label">这个音唱几拍？</span>
+                <div class="rest-toggle" id="restToggle" role="group" aria-label="写音符还是写休止">
+                  <button class="ghost-button small is-active" type="button" data-rest="false">♪ 写音符</button>
+                  <button class="ghost-button small" type="button" data-rest="true">停顿（休止）</button>
+                </div>
               </div>
-              <p class="fine-print">谱面上同时进行的旋律（例如钢琴「左手弹低音、右手弹和弦」）要分开写，才不会互相挤掉。</p>
-            </div>
-
-            <div class="composer-row">
-              <span class="field-label">和弦（同一个拍子上一起按下的好几个音）</span>
-              <div class="composer-actions wrap">
-                <button class="ghost-button" id="chordToneButton" type="button" title="把当前选中的音高叠加到「谱面上选中的那个音」上">⎄ 叠到选中的音上</button>
-              </div>
-              <p class="fine-print">先在下方谱面里<strong>点一个音</strong>，再选好要叠加的音高，点「叠到选中的音上」。</p>
-            </div>
-
-
-
-            <div class="composer-row">
-              <span class="field-label">这个音唱几拍？（方块越多越长）</span>
               <div class="value-chips" id="valueChips"></div>
-              <p class="fine-print">不知道选哪个？先用「1 拍」。点一下还能听出「这么长」。</p>
+              <p class="fine-print">点一下还能听出「这么长」；不知道选哪个就先用「1 拍」。</p>
             </div>
             <div class="composer-actions">
               <button class="primary-button" id="addNote" type="button">
@@ -100,12 +90,31 @@
               <button class="ghost-button" id="redo" type="button" title="重做（Ctrl+Shift+Z）">↷ 重做</button>
             </div>
 
+            <div class="composer-row is-tight">
+              <span class="field-label">写到哪一行（同一小节里可以同时写好几行）</span>
+              <div class="inline-group">
+                <select id="staffSelector" aria-label="第几行谱表"></select>
+                <select id="voiceSelector" aria-label="这一行的第几条声部线"></select>
+                <button class="ghost-button small" id="addVoice" type="button" title="在同一行谱表里再开一条声部线（比如钢琴左手的伴奏）">＋ 声部线</button>
+                <button class="ghost-button small" id="addStaff" type="button" title="再加一行谱表（比如钢琴的低音谱表）">＋ 谱表</button>
+              </div>
+              <p class="fine-print">钢琴「左手低音、右手和弦」这类同时进行的旋律，要分开写在不同的行里。</p>
+            </div>
+
+            <div class="composer-row is-tight">
+              <div class="row-head">
+                <span class="field-label">和弦（一拍上同时按下的几个音）</span>
+                <button class="ghost-button small" id="chordToneButton" type="button" title="把当前选中的音高叠加到「谱面上选中的那个音」上">⎄ 叠到选中的音上</button>
+              </div>
+              <p class="fine-print">先在谱面里<strong>点一个音</strong>，再选好要叠加的音高，点「叠到选中的音上」。</p>
+            </div>
+
             <details class="advanced-panel" id="markPanel">
               <summary>✎ 给选中的音加记号（强弱 / 断奏 / 连音线）</summary>
               <div class="advanced-body">
                 <div class="composer-row">
                   <span class="field-label">给选中的音加记号</span>
-                  <p class="fine-print">先在谱面上点一个音，再点下面的记号；再点一次取消。</p>
+                  <p class="fine-print">先在谱面上点一个音，再点下面的记号；再点一次取消。连线也可以直接在谱面下方点「连到下一个音」。</p>
                   <div class="mark-groups" id="markGroups"></div>
                 </div>
     
@@ -229,10 +238,40 @@
                     <button class="ghost-button" id="exportPng" type="button" title="图片：可直接打印或发给人看">↓ 图片（PNG）</button>
                     <button class="ghost-button" id="exportProject" type="button" title="工程文件：下次导入可以继续改">↓ 工程文件</button>
                     <button class="ghost-button" id="importProject" type="button" title="导入之前保存的工程文件">↑ 导入工程</button>
-                    <button class="ghost-button" id="importMusicXml" type="button" title="导入 PDF 或 MusicXML：PDF 会先在浏览器里识别成乐谱再打开编辑">↑ 导入 PDF / 乐谱</button>
+                    <button class="ghost-button" id="importMusicXml" type="button" title="导入 PDF 或 MusicXML：PDF 会先在浏览器里识别成乐谱再打开编辑"><span id="importPdfLabel">↑ 导入 PDF / 乐谱</span></button>
                     <input id="projectInput" type="file" accept=".json,application/json" hidden />
                     <input id="musicXmlInput" type="file" accept=".musicxml,.xml,.mxl,application/pdf,.pdf" hidden />
                   </div>
+                  <div class="inline-group import-options">
+                    <label class="inline-field"><span>PDF 是哪一种谱</span>
+                      <select id="importEngine" aria-label="PDF 识别方式（自动 / 简谱 / 五线谱）">
+                        <option value="auto" selected>自动判断（推荐）</option>
+                        <option value="jianpu">简谱</option>
+                        <option value="staff">五线谱</option>
+                      </select>
+                    </label>
+                    <label class="inline-field"><span>简谱 1 =</span>
+                      <select id="importJianpuKey" aria-label="简谱的 1 等于哪个音（调号）">
+                        <option value="65" selected>F（最常见）</option>
+                        <option value="60">C</option>
+                        <option value="67">G</option>
+                        <option value="62">D</option>
+                        <option value="70">降 B</option>
+                        <option value="63">降 E</option>
+                      </select>
+                    </label>
+                    <label class="inline-field"><span>简谱拍号</span>
+                      <select id="importJianpuBeats" aria-label="简谱每小节拍数">
+                        <option value="4" selected>4 / 4</option>
+                        <option value="3">3 / 4</option>
+                        <option value="2">2 / 4</option>
+                        <option value="1.5">3 / 8</option>
+                        <option value="4.5">9 / 8</option>
+                        <option value="6">12 / 8</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p class="fine-print">导入 PDF 时会先试五线谱识别；读不到音符就自动改用简谱识别。简谱请按谱面左上角选「1 = ?」，不确定就保持 F。</p>
                   <p class="fine-print" id="exportHint">导出的 MusicXML 每个小节都补齐了拍数，用别的软件打开不会报错。</p>
                 </div>
               </div>
@@ -245,6 +284,14 @@
               <div><span class="step-label">02 / 乐谱</span><h2>你的五线谱</h2></div>
               <div class="score-toolbar" id="scoreToolbar">
                 <span class="zoom-label" id="editHint">点音符可以选中 / 删除</span>
+                <div class="score-nav">
+                  <label class="inline-field"><span>跳到第</span>
+                    <input id="scoreMeasureJump" type="number" min="1" value="1" aria-label="跳到第几小节" />
+                    <span>小节</span>
+                  </label>
+                  <button class="ghost-button small" id="scoreMeasureGo" type="button">定位</button>
+                  <label class="solo-toggle"><input type="checkbox" id="soloPart" /><span>只看当前声部</span></label>
+                </div>
               </div>
             </div>
             <div class="score-canvas-wrap">

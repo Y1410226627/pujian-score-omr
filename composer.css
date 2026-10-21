@@ -358,6 +358,55 @@
 
 /* 左侧栏不要留白条：内容顶格 */
 .composer-layout { align-items: start; }
+
+/* ===== 2026-10 输入区重排：一屏内完成「选音高 → 选拍数 → 加进乐谱」 ===== */
+/* 键盘收成一个八度、12 个键一行，白键直接标音名和唱名；高低八度用按钮切换 */
+.mini-keyboard {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 2px;
+  max-height: none;
+}
+.key { padding: 6px 0 5px; font-size: 10px; border-radius: 5px; }
+.key small { font-size: 8.5px; }
+.pitch-actions { flex-wrap: wrap; margin-left: 0; gap: 4px; }
+.keyboard-controls { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 2px 0 5px; }
+.keyboard-range { font-size: 10px; color: #8b978f; }
+
+.composer-row.is-tight { margin-top: 8px; }
+.input-panel .value-chips {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin: 6px 0 2px;
+}
+.input-panel .chip-value {
+  grid-template-rows: 26px auto auto;
+  padding: 4px 3px;
+  border-radius: 8px;
+}
+.input-panel .chip-glyph { height: 26px; }
+.input-panel .chip-glyph svg { width: 24px; height: 24px; }
+.input-panel .chip-human { font-size: 9px; }
+
+/* 「写音符 / 写休止」开关 */
+.rest-toggle { display: flex; gap: 4px; flex-wrap: wrap; }
+.rest-toggle .ghost-button.is-active {
+  background: var(--green);
+  border-color: var(--green-dark);
+  color: #fff;
+}
+
+/* PDF 导入选项：紧凑一行，不和导入按钮抢空间 */
+.import-options { margin-top: 8px; gap: 10px; }
+.import-options .inline-field { gap: 4px; }
+.import-options select { padding: 4px 6px; font-size: 11px; }
+
+/* 长谱子：谱面区域内部滚动，页面本身不被撑成几屏高 */
+.score-canvas-wrap { max-height: max(420px, calc(100vh - 200px)); }
+.score-toolbar { flex-direction: column; align-items: flex-end; gap: 4px; }
+.score-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.score-nav .inline-field { gap: 4px; }
+.score-nav input[type="number"] { width: 58px; padding: 4px 6px; }
+.solo-toggle { display: flex; align-items: center; gap: 4px; font-size: 10px; color: #5f6d64; white-space: nowrap; }
 .input-panel { display: block; }
 
 /* 说明性小字缩短行宽，读起来不累 */

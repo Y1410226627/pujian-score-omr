@@ -51,7 +51,7 @@ def read_musicxml_from_mxl(mxl_path):
 # 只允许直接暴露给浏览器的静态资源后缀。.py/.bat/.exe/.pth 等一律不可下载。
 ALLOWED_SUFFIXES = {
     ".html", ".htm", ".css", ".js", ".mjs", ".json", ".md",
-    ".svg", ".ico", ".png", ".webmanifest", ".mp3", ".wav",
+    ".svg", ".ico", ".png", ".webmanifest", ".mp3", ".wav", ".ogg",
     # 乐谱字形字体（VexFlow 的 Bravura 等）。缺了这些，符头会退化成黑色方块。
     ".woff2", ".woff", ".ttf", ".otf",
 }
