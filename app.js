@@ -3990,7 +3990,7 @@ const BANK_LEVEL = {
   qudi_real: 1.458,    // browser RMS (近似长笛)
   yunluo_real: 0.957,    // browser RMS (近似管钟)
   pengling_real: 3.869,    // 浏览器实测 RMS 0.0276
-  muyu_real: 4.5,    // 浏览器实测 RMS 0.0205
+  muyu_real: 4.5,    // 已换成 VCSL Cajon hit3 三层（原 Woodblock 电平过低）；实测 RMS 0.1248，与其它打击乐齐平
   xiaoluo_real: 1.206,    // 浏览器实测 RMS 0.0183
   daluo_real: 0.89,    // 浏览器实测 RMS 0.0201
   bo_real: 1.553,    // 浏览器实测 RMS 0.0548（原 2.6 偏响 3 倍）

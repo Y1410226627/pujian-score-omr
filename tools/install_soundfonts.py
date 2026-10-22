@@ -317,12 +317,17 @@ VCSL_BANKS = {
         "label": "碰铃（采样·近似指钹）", "category": "percussion",
         "layers": [(0.8, "Idiophones/Struck Idiophones/Finger Cymbals/Fing_Cymb.wav", "finger_cymbals.wav")],
     },
+    # 木鱼原先用 VCSL Woodblock，但实测三层 RMS 只有 0.0017 / 0.0054 / 0.0163，
+    # 全系最响的样本也不到 0.017 —— 播放时系数给到上限仍比其它打击乐轻一半。
+    # VCSL 里木类音色都轻（Claves 0.0039、Slapstick 0.0183、Slit Drum 0.0140、
+    # Cowbells 0.0237），Cajon 是唯一达到可用电平的（最高 0.070），
+    # 且力度分层完整（pp / p / mp / f / fff）。改用它的 hit3 系列。
     "muyu_real": {
-        "label": "木鱼（采样·近似木块）", "category": "percussion",
+        "label": "木鱼（采样·近似箱鼓 Cajon）", "category": "percussion",
         "layers": [
-            (0.2, "Idiophones/Struck Idiophones/Woodblock/wood_click_pp_rr1.wav", "soft.wav"),
-            (0.55, "Idiophones/Struck Idiophones/Woodblock/wood_click3_vl1.wav", "medium.wav"),
-            (0.9, "Idiophones/Struck Idiophones/Woodblock/wood_click_ff.wav", "loud.wav"),
+            (0.2, "Idiophones/Struck Idiophones/Cajon/Cajon_hit3_p_rr1.wav", "soft.wav"),
+            (0.55, "Idiophones/Struck Idiophones/Cajon/Cajon_hit3_mp_rr1.wav", "medium.wav"),
+            (0.9, "Idiophones/Struck Idiophones/Cajon/Cajon_hit3_f_rr1.wav", "loud.wav"),
         ],
     },
     "xiaoluo_real": {
