@@ -3953,88 +3953,89 @@ function ensureSampleBank(name) {
  * 表里没列到的音源用 1（不配平）；用户仍可用「声部音量滑条」再微调。
  */
 const BANK_LEVEL = {
-  accordion_real: 0.94,  // group-peak
-  acoustic_bass_real: 1.33,  // group-peak
-  alto_sax_real: 1.28,  // group-peak
-  banjo_real: 1.33,  // group-peak
-  baritone_sax_real: 1.28,  // group-peak
-  bassoon_real: 1.23,  // group-peak
-  brass_section_real: 1.1,  // group-peak
-  celesta_real: 1.45,  // group-peak
-  cello_real: 1.45,  // group-peak
-  choir_female: 1.23,  // group-peak
-  choir_male: 1.23,  // group-peak
-  choir_real: 1.23,  // measured-peak
-  church_organ_real: 0.94,  // group-peak
-  clarinet_real: 1.45,  // group-peak
-  contrabass_real: 1.45,  // group-peak
-  dizi_real: 1.6,  // group-peak
-  electric_bass_real: 1.33,  // group-peak
-  electric_guitar_real: 1.33,  // group-peak
-  electric_piano_real: 0.94,  // group-peak
-  english_horn_real: 1.45,  // group-peak
-  erhu_real: 2.0,  // measured-peak
-  zhonghu_real: 1.82,  // browser RMS (近似中提琴)
-  gaohu_real: 1.75,  // browser RMS (近似小提琴)
-  flute_real: 1.6,  // group-peak
-  french_horn_real: 1.1,  // group-peak
-  fretless_bass_real: 1.33,  // group-peak
-  glockenspiel_real: 1.45,  // group-peak
-  guzheng_real: 1.88,  // group-peak
-  zhongruan_real: 2.113,   // 浏览器实测 RMS 0.104 → 统一到 0.24（近似尼龙弦吉他）
-  daruan_real: 0.86,  // browser RMS (近似原声贝斯)
-  liuqin_real: 1.845,   // 浏览器实测 RMS 0.177 → 统一到 0.24（近似钢弦吉他）
-  guanzi_real: 1.71,  // browser RMS (近似唢呐)
-  xun_real: 1.96,  // browser RMS (近似陶笛)
-  qudi_real: 1.58,  // browser RMS (近似长笛)
-  yunluo_real: 0.86,  // browser RMS (近似管钟)
-  pengling_real: 1.934,  // 浏览器实测 RMS 0.0276
-  muyu_real: 1.151,  // 浏览器实测 RMS 0.0205
-  xiaoluo_real: 0.982,  // 浏览器实测 RMS 0.0183
-  daluo_real: 0.934,  // 浏览器实测 RMS 0.0201
-  bo_real: 1.272,  // 浏览器实测 RMS 0.0548（原 2.6 偏响 3 倍）
-  paigu_real: 1.231,  // 浏览器实测 RMS 0.0196
-  harp_real: 1.6,  // group-peak
-  harpsichord_real: 0.94,  // group-peak
-  kalimba_real: 1.45,  // group-peak
-  koto_real: 1.88,  // group-peak
+  accordion_real: 1.068,    // group-peak
+  acoustic_bass_real: 1.271,    // group-peak
+  alto_sax_real: 1.343,    // group-peak
+  banjo_real: 1.466,    // group-peak
+  baritone_sax_real: 1.314,    // group-peak
+  bassoon_real: 1.255,    // group-peak
+  brass_section_real: 1.29,    // group-peak
+  celesta_real: 1.241,    // group-peak
+  cello_real: 1.489,    // group-peak
+  choir_female: 1.444,    // group-peak
+  choir_male: 1.142,    // group-peak
+  choir_real: 1.406,    // measured-peak
+  church_organ_real: 1.408,    // group-peak
+  clarinet_real: 1.364,    // group-peak
+  contrabass_real: 1.704,    // group-peak
+  dizi_real: 1.445,    // group-peak
+  electric_bass_real: 1.129,    // group-peak
+  electric_guitar_real: 1.288,    // group-peak
+  electric_piano_real: 0.916,    // group-peak
+  english_horn_real: 1.378,    // group-peak
+  erhu_real: 1.424,    // measured-peak
+  zhonghu_real: 1.526,    // browser RMS (近似中提琴)
+  gaohu_real: 1.47,    // browser RMS (近似小提琴)
+  flute_real: 1.475,    // group-peak
+  french_horn_real: 1.221,    // group-peak
+  horn_real: 1.11,  // 与 french_horn_real 同用 french_horn 样本（manifest 有登记，SAMPLED_TIMBRES 未注册）
+  fretless_bass_real: 1.182,    // group-peak
+  glockenspiel_real: 1.457,    // group-peak
+  guzheng_real: 1.397,    // group-peak
+  zhongruan_real: 2.505,     // 浏览器实测 RMS 0.104 → 统一到 0.24（近似尼龙弦吉他）
+  daruan_real: 0.96,    // browser RMS (近似原声贝斯)
+  liuqin_real: 2.52,     // 浏览器实测 RMS 0.177 → 统一到 0.24（近似钢弦吉他）
+  guanzi_real: 1.618,    // browser RMS (近似唢呐)
+  xun_real: 1.468,    // browser RMS (近似陶笛)
+  qudi_real: 1.458,    // browser RMS (近似长笛)
+  yunluo_real: 0.957,    // browser RMS (近似管钟)
+  pengling_real: 3.869,    // 浏览器实测 RMS 0.0276
+  muyu_real: 4.5,    // 浏览器实测 RMS 0.0205
+  xiaoluo_real: 1.206,    // 浏览器实测 RMS 0.0183
+  daluo_real: 0.89,    // 浏览器实测 RMS 0.0201
+  bo_real: 1.553,    // 浏览器实测 RMS 0.0548（原 2.6 偏响 3 倍）
+  paigu_real: 3.043,    // 浏览器实测 RMS 0.0196
+  harp_real: 1.239,    // group-peak
+  harpsichord_real: 1.032,    // group-peak
+  kalimba_real: 1.616,    // group-peak
+  koto_real: 2.069,    // group-peak
   marimba_real: 1.45,  // group-peak
-  nylon_guitar_real: 2.367,   // 浏览器实测 RMS 0.090 → 统一到 0.24（Meta Nylon 录音较轻）  // group-peak
-  oboe_real: 1.45,  // group-peak
-  ocarina_real: 1.6,  // group-peak
-  pad_real: 1.39,  // group-peak
-  pan_flute_real: 1.6,  // group-peak
-  piano_real: 0.295,   // 浏览器实测 RMS 0.476 → 统一到 0.24（峰值 0.39，不削波）  // measured-peak
-  piccolo_real: 1.6,  // group-peak
-  pipa_real: 1.88,  // group-peak
-  pizzicato_real: 1.6,  // group-peak
-  recorder_real: 1.6,  // group-peak
-  shakuhachi_real: 1.6,  // group-peak
-  shamisen_real: 1.88,  // group-peak
-  sheng_real: 1.6,  // group-peak
-  sitar_real: 1.33,  // group-peak
-  soprano_sax_real: 1.28,  // group-peak
-  steel_drums_real: 1.07,  // group-peak
-  steel_guitar_real: 2.032,   // 浏览器实测 RMS 0.169 → 统一到 0.24  // group-peak
-  strings_real: 1.45,  // measured-peak
-  suona_real: 1.6,  // group-peak
-  synth_choir_real: 1.23,  // group-peak
-  synth_lead_real: 1.33,  // group-peak
-  tenor_sax_real: 1.28,  // group-peak
-  timpani_real: 1.07,  // group-peak
-  tremolo_real: 1.39,  // group-peak
-  trombone_real: 1.1,  // group-peak
-  trumpet_real: 1.1,  // group-peak
-  tuba_real: 1.1,  // group-peak
-  tubular_bells_real: 1.45,  // group-peak
-  vibraphone_real: 1.45,  // group-peak
-  viola_real: 1.45,  // group-peak
-  violin_real: 1.39,  // group-peak
-  voice_oohs_real: 1.23,  // group-peak
-  whistle_real: 1.6,  // group-peak
-  xiao_real: 1.6,  // group-peak
-  xylophone_real: 1.45,  // group-peak
-  yangqin_real: 1.88,  // group-peak
+  nylon_guitar_real: 2.912,     // 浏览器实测 RMS 0.090 → 统一到 0.24（Meta Nylon 录音较轻）  // group-peak
+  oboe_real: 1.501,    // group-peak
+  ocarina_real: 1.439,    // group-peak
+  pad_real: 1.449,    // group-peak
+  pan_flute_real: 1.363,    // group-peak
+  piano_real: 0.335,     // 浏览器实测 RMS 0.476 → 统一到 0.24（峰值 0.39，不削波）  // measured-peak
+  piccolo_real: 1.418,    // group-peak
+  pipa_real: 1.702,    // group-peak
+  pizzicato_real: 1.716,    // group-peak
+  recorder_real: 1.396,    // group-peak
+  shakuhachi_real: 1.368,    // group-peak
+  shamisen_real: 1.508,    // group-peak
+  sheng_real: 1.51,    // group-peak
+  sitar_real: 1.348,    // group-peak
+  soprano_sax_real: 1.427,    // group-peak
+  steel_drums_real: 1.189,    // group-peak
+  steel_guitar_real: 2.437,     // 浏览器实测 RMS 0.169 → 统一到 0.24  // group-peak
+  strings_real: 1.428,    // measured-peak
+  suona_real: 1.605,    // group-peak
+  synth_choir_real: 1.362,    // group-peak
+  synth_lead_real: 1.335,    // group-peak
+  tenor_sax_real: 1.278,    // group-peak
+  timpani_real: 1.191,    // group-peak
+  tremolo_real: 1.329,    // group-peak
+  trombone_real: 1.227,    // group-peak
+  trumpet_real: 1.219,    // group-peak
+  tuba_real: 1.188,    // group-peak
+  tubular_bells_real: 1.304,    // group-peak
+  vibraphone_real: 1.039,    // group-peak
+  viola_real: 1.403,    // group-peak
+  violin_real: 1.395,    // group-peak
+  voice_oohs_real: 1.321,    // group-peak
+  whistle_real: 1.276,    // group-peak
+  xiao_real: 1.338,    // group-peak
+  xylophone_real: 1.609,    // group-peak
+  yangqin_real: 1.827,    // group-peak
 };
 
 /** 某个 bank 的响度配平系数（没标定的用 1）。 */

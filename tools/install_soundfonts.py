@@ -236,6 +236,9 @@ FLUIDR3_BANKS = {
     "bassoon_real": {"instrument": "bassoon", "label": "大管（采样）", "continuous": True, "category": "winds"},
     "trumpet_real": {"instrument": "trumpet", "label": "小号（采样）", "continuous": True, "category": "winds"},
     "horn_real": {"instrument": "french_horn", "label": "圆号（采样）", "continuous": True, "category": "winds"},
+    # soundbanks.js 的 SAMPLED_TIMBRES 里注册了 synth_choir_real（合成合唱音色），
+    # 之前安装脚本没登记这一项，导致选它时 manifest 里找不到、加载不到样本。
+    "synth_choir_real": {"instrument": "synth_choir", "label": "合成合唱（采样）", "continuous": True, "category": "synth"},
     "trombone_real": {"instrument": "trombone", "label": "长号（采样）", "continuous": True, "category": "winds"},
     # 键盘 / 音色
     "church_organ_real": {"instrument": "church_organ", "label": "教堂管风琴（采样）", "continuous": True, "category": "piano"},

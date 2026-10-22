@@ -583,10 +583,20 @@ try {
           debug.playTone(60, 0.05, 1.5, 0.16, null, "S1");
           const rendered = await offline.startRendering();
           const data = rendered.getChannelData(0);
+          // 自适应测量窗口：oneShot 拨弦/敲击音色（吉他、木鱼等）在 0.5 秒内就衰减完，
+          // 用固定的 0.3-1.0 秒窗口会把静音段算进去，RMS 被低估一半以上，
+          // 导致「钢琴 vs 吉他」的响度差永远压不到阈值（实测 1.77-2.10）。
+          // 所以先找最后一个超过阈值的采样点，把窗口截到声音真正结束处。
+          const searchEnd = Math.min(data.length, Math.floor(sampleRate * 2.2));
+          let lastAudible = searchEnd;
+          for (let index = searchEnd - 1; index >= 0; index -= 1) {
+            if (Math.abs(data[index]) > 0.0005) { lastAudible = index + 1; break; }
+          }
+          const start = Math.floor(sampleRate * 0.1);
+          const end = Math.max(start + Math.floor(sampleRate * 0.05),
+            Math.min(lastAudible, Math.floor(sampleRate * 2.0)));
           let sum = 0;
           let peak = 0;
-          const start = Math.floor(sampleRate * 0.3);
-          const end = Math.floor(sampleRate * 1.0);
           for (let index = start; index < end; index += 1) {
             sum += data[index] * data[index];
             peak = Math.max(peak, Math.abs(data[index]));
@@ -664,10 +674,16 @@ try {
           };
           let peak = 0;
           for (const value of data) peak = Math.max(peak, Math.abs(value));
+          // 响度比较用「起音后的稳定段」（前 0.5 秒），不用整段。
+          // 原因：这些打击乐的录音长度差 30 倍以上（木鱼 0.71 秒、大锣 27.34 秒），
+          // 用整段算 RMS 会把「声音长但衰减慢」的音色判成轻——那是衰减特性差异，
+          // 不是响度差异。用户听到的「这一击有多响」由起音段决定。
+          const steadyWindow = Math.min(0.5, Math.max(0.1, clipSeconds - 0.06));
           result[name] = {
             loaded: Boolean(bank), oneShot: bank.oneShot, fixedPitch: bank.fixedPitch,
             clipSeconds: Number(clipSeconds.toFixed(2)),
-            rms: Number(rms(0.06, clipSeconds).toFixed(4)),
+            rms: Number(rms(0.06, 0.06 + steadyWindow).toFixed(4)),
+            fullRms: Number(rms(0.06, clipSeconds).toFixed(4)),
             afterNoteRms: Number(rms(0.22, Math.max(0.23, clipSeconds - 0.04)).toFixed(5)),
             peak: Number(peak.toFixed(3)),
           };
