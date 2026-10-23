@@ -3089,8 +3089,8 @@ const AUDIO_EXPORT_KBPS = 128;
  *   · 每块前后多渲一段 overlap，用来让混响尾音和压限器进入稳定状态。
  */
 const EXPORT_RENDER = {
-  minSecondsPerChunk: 8,    // 每块至少这么长；太碎反而更慢（每块都有固定开销）
-  maxChunks: 6,
+  minSecondsPerChunk: 15,   // 每块至少这么长；太碎反而更慢（每块都有固定开销）
+  maxChunks: 8,             // 实测 8 块以内继续变快，再多收益趋零（179 秒长曲实测）
   overlapSeconds: 2.4,      // 前后多渲：混响 1.9 秒 + 压限器 release 0.24 秒，留余量
   maxLookback: 10,          // 往前看超过这么远就不值得分块了（长音太多）
 };
