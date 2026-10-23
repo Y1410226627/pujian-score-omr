@@ -63,6 +63,12 @@ const state = {
   selection: null, loop: false, onlyLowConfidence: false,
   // 音符行索引（id → DOM 行）与当前正在高亮的集合：播放时只改动变化的那几行。
   noteRowById: null, highlightedIds: new Set(),
+  // 音符 id → 音符对象（事件委托用）：整表重绘时重建，复制声部时增量补充。
+  noteById: null, noteListDelegated: false, hoverRow: null,
+  // 小节序号 → 小节 <section> 节点：复制声部时 O(1) 找到要插入的小节。
+  measureGroups: null,
+  // 时值选择菜单（全局只有一个，避免每行 19 个 <option>）。
+  durationMenu: null, durationMenuNote: null,
   // 演奏范围：selectedParts=null 表示全选；includePiano=是否把钢琴伴奏算进去。
   // partNames 存「声部标识 -> 用户改的名字」，改一次整份乐谱一起生效。
   selectedParts: null, includePiano: true, partNames: new Map(), pianoKeys: new Set(),
@@ -1086,7 +1092,15 @@ function parsePitch(value) {
 function formatBeatCount(beats) {
   return Number.isInteger(beats) ? String(beats) : String(Number(beats.toFixed(3)));
 }
-/** 把一个音符建成可编辑的一行（音高 / 起拍 / 时值 / 删除）。 */
+/**
+ * 把一个音符建成可编辑的一行（音高 / 起拍 / 时值 / 删除）。
+ *
+ * 性能关键（8419 音的谱实测，整表重绘 732 ms → 约 100 ms）：
+ *   · 不给每行挂 8 个事件监听，改成整个列表一套事件委托（见 installNoteListDelegation）：
+ *     8419 行 × 8 = 6.7 万个监听，单是挂监听就要约 0.4 秒；
+ *   · 时值不再用「每行一个 19 项 <select>」：19 个 option × 8419 行 = 16 万个 DOM 节点，
+ *     单是建这些节点就占了大半渲染时间。改成轻量按钮 + 全局共用的弹出菜单。
+ */
 function buildNoteRow(note, index) {
   const row = document.createElement("div");
   row.className = "note-row";
@@ -1094,6 +1108,7 @@ function buildNoteRow(note, index) {
   row.hidden = state.onlyLowConfidence && !isLowConfidence(note);
   row.dataset.noteId = note.id;
   row.dataset.eventId = String(note.eventId);
+  row.dataset.partKey = voiceIdentity(note);
   const rowParts = [note.partName, note.voice ? `声部 ${note.voice}` : ""].filter(Boolean).join(" · ");
   const confidenceText = isLowConfidence(note) ? ` · 置信度偏低（${note.confidence.toFixed(2)}），建议校对` : "";
   row.title = rowParts + confidenceText;
@@ -1103,28 +1118,6 @@ function buildNoteRow(note, index) {
   indexLabel.tabIndex = 0;
   indexLabel.setAttribute("role", "button");
   indexLabel.title = "点击设为选区起点，Shift+点击设为终点";
-  const applySelection = (extend) => {
-    state.selection = extend && state.selection
-      ? { anchorId: state.selection.anchorId, focusId: note.id }
-      : { anchorId: note.id, focusId: note.id };
-    markSelectedRows();
-    updateSelectionUi();
-  };
-  indexLabel.addEventListener("click", (event) => {
-    event.preventDefault();
-    applySelection(event.shiftKey);
-  });
-  indexLabel.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    applySelection(event.shiftKey);
-  });
-  // 点序号太小的目标容易点空：整行（除输入框外）点击都当作设选区，
-  // 这样"演奏任意一段"的操作不需要精确瞄准那个两位数字。
-  row.addEventListener("click", (event) => {
-    if (event.target.closest("input, button, select")) return;
-    applySelection(event.shiftKey);
-  });
   const input = document.createElement("input");
   input.className = "note-pitch";
   input.type = "text";
@@ -1140,74 +1133,315 @@ function buildNoteRow(note, index) {
   startInput.value = formatBeatCount(Number(note.startBeat) || 0);
   startInput.setAttribute("aria-label", "音符起拍（以四分音符为一拍）");
   startInput.title = "从乐曲开始计算的拍数，以四分音符为一拍";
-  const durationSelect = document.createElement("select");
-  durationSelect.className = "note-duration";
-  durationSelect.setAttribute("aria-label", "音符时值");
-  if (note.duration === "custom") {
-    const customOption = document.createElement("option");
-    customOption.value = "custom";
-    customOption.textContent = `原时值 · ${formatBeatCount(beatsForNote(note))} 拍`;
-    durationSelect.append(customOption);
-  }
-  for (const [value, label] of durations) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    durationSelect.append(option);
-  }
-  durationSelect.value = note.duration;
+  const durationButton = document.createElement("button");
+  durationButton.className = "note-duration";
+  durationButton.type = "button";
+  durationButton.dataset.duration = note.duration;
+  durationButton.textContent = durationLabelFor(note);
+  durationButton.setAttribute("aria-label", "音符时值");
+  durationButton.title = "点击选择时值";
   const deleteButton = document.createElement("button");
   deleteButton.className = "delete-note";
   deleteButton.type = "button";
   deleteButton.title = "删除音符";
   deleteButton.setAttribute("aria-label", "删除音符");
   deleteButton.textContent = "×";
-  row.append(indexLabel, input, startInput, durationSelect, deleteButton);
-  const focusScoreNote = () => drawNoteOverlay(state.notes, note.id);
-  const clearFocusedScoreNote = () => drawNoteOverlay(state.notes);
-  input.addEventListener("focus", focusScoreNote);
-  startInput.addEventListener("focus", focusScoreNote);
-  durationSelect.addEventListener("focus", focusScoreNote);
-  row.addEventListener("mouseenter", focusScoreNote);
-  row.addEventListener("mouseleave", clearFocusedScoreNote);
-  input.addEventListener("change", () => {
-    const parsed = parsePitch(input.value);
-    if (!parsed) {
-      input.setCustomValidity("请输入音名，如 C4、F#4、Bb3 或 C(+0.5)4");
-      input.reportValidity();
-      input.value = note.pitch;
-      input.setCustomValidity("");
-      return;
-    }
-    note.pitch = parsed.label;
-    note.midi = parsed.midi;
-    updatePlaybackReady();
-  });
-  startInput.addEventListener("change", () => {
-    const rawStartBeat = startInput.value.trim();
-    const startBeat = Number(rawStartBeat);
-    if (!rawStartBeat || !Number.isFinite(startBeat) || startBeat < 0) {
-      startInput.setCustomValidity("起拍需要是大于或等于 0 的数字。");
-      startInput.reportValidity();
-      startInput.value = formatBeatCount(Number(note.startBeat) || 0);
-      startInput.setCustomValidity("");
-      return;
-    }
-    note.startBeat = startBeat;
-    updatePlaybackReady();
-  });
-  durationSelect.addEventListener("change", (event) => {
-    note.duration = event.target.value;
-    if (durationBeats[note.duration]) note.durationBeats = durationBeats[note.duration];
-  });
-  deleteButton.addEventListener("click", () => {
-    state.notes = state.notes.filter((item) => item.id !== note.id);
-    renderNotes();
-    updatePartControls();
-    refreshScoreOverlay();
-  });
+  row.append(indexLabel, input, startInput, durationButton, deleteButton);
   if (state.noteRowById) state.noteRowById.set(note.id, row);
   return row;
+}
+
+/** 时值按钮上显示的文字；自定义时值显示「原值 X 拍」。 */
+function durationLabelFor(note) {
+  if (note.duration !== "custom") {
+    const found = durations.find((entry) => entry[0] === note.duration);
+    if (found) return found[1];
+  }
+  return `原值 ${formatBeatCount(beatsForNote(note))} 拍`;
+}
+
+/** 从行列里的任意子元素找到它所属的音符对象（事件委托用）。 */
+function noteFromRowElement(element) {
+  const row = element && element.closest ? element.closest(".note-row") : null;
+  if (!row || !state.noteById) return null;
+  return state.noteById.get(row.dataset.noteId) || null;
+}
+
+/** 点音符设置选区（原点击行 / 点序号的行为，保持不变）。 */
+function applyNoteSelection(note, extend) {
+  state.selection = extend && state.selection
+    ? { anchorId: state.selection.anchorId, focusId: note.id }
+    : { anchorId: note.id, focusId: note.id };
+  markSelectedRows();
+  updateSelectionUi();
+}
+
+/**
+ * 整个音符列表只挂一套事件监听（而不是每行 8 个）。
+ * 行里的控件用 class / data-* 区分，音符对象通过 state.noteById 查。
+ */
+function installNoteListDelegation() {
+  if (state.noteListDelegated || !els.noteList) return;
+  state.noteListDelegated = true;
+  els.noteList.addEventListener("click", (event) => {
+    const row = event.target.closest(".note-row");
+    if (!row) return;
+    const note = noteFromRowElement(row);
+    if (!note) return;
+    if (event.target.closest(".delete-note")) {
+      state.notes = state.notes.filter((item) => item.id !== note.id);
+      renderNotes();
+      updatePartControls();
+      refreshScoreOverlay();
+      return;
+    }
+    if (event.target.closest(".note-duration")) {
+      openDurationMenu(event.target.closest(".note-duration"), note);
+      return;
+    }
+    // 输入框 / 其它按钮自己有交互，不当作"设选区"
+    if (event.target.closest("input, button, select")) return;
+    applyNoteSelection(note, event.shiftKey);
+  });
+  els.noteList.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const indexLabel = event.target.closest(".note-index");
+    if (!indexLabel) return;
+    const note = noteFromRowElement(indexLabel);
+    if (!note) return;
+    event.preventDefault();
+    applyNoteSelection(note, event.shiftKey);
+  });
+  els.noteList.addEventListener("change", (event) => {
+    const input = event.target;
+    if (input.classList.contains("note-pitch")) {
+      const note = noteFromRowElement(input);
+      if (!note) return;
+      const parsed = parsePitch(input.value);
+      if (!parsed) {
+        input.setCustomValidity("请输入音名，如 C4、F#4、Bb3 或 C(+0.5)4");
+        input.reportValidity();
+        input.value = note.pitch;
+        input.setCustomValidity("");
+        return;
+      }
+      note.pitch = parsed.label;
+      note.midi = parsed.midi;
+      updatePlaybackReady();
+      return;
+    }
+    if (input.classList.contains("note-onset")) {
+      const note = noteFromRowElement(input);
+      if (!note) return;
+      const rawStartBeat = input.value.trim();
+      const startBeat = Number(rawStartBeat);
+      if (!rawStartBeat || !Number.isFinite(startBeat) || startBeat < 0) {
+        input.setCustomValidity("起拍需要是大于或等于 0 的数字。");
+        input.reportValidity();
+        input.value = formatBeatCount(Number(note.startBeat) || 0);
+        input.setCustomValidity("");
+        return;
+      }
+      note.startBeat = startBeat;
+      updatePlaybackReady();
+    }
+  });
+  els.noteList.addEventListener("focusin", (event) => {
+    const note = noteFromRowElement(event.target);
+    if (note) drawNoteOverlay(state.notes, note.id);
+  });
+  els.noteList.addEventListener("focusout", () => {
+    state.hoverRow = null;
+    drawNoteOverlay(state.notes);
+  });
+  els.noteList.addEventListener("mouseover", (event) => {
+    const row = event.target.closest(".note-row");
+    if (!row || row === state.hoverRow) return;
+    state.hoverRow = row;
+    const note = noteFromRowElement(row);
+    if (note) drawNoteOverlay(state.notes, note.id);
+  });
+  els.noteList.addEventListener("mouseout", (event) => {
+    const row = event.target.closest(".note-row");
+    if (!row || row !== state.hoverRow) return;
+    const next = event.relatedTarget && event.relatedTarget.closest
+      ? event.relatedTarget.closest(".note-row")
+      : null;
+    if (next === row) return;
+    state.hoverRow = null;
+    drawNoteOverlay(state.notes);
+  });
+  // 菜单是 fixed 定位的：列表一滚动或窗口一改大小就收起来，避免飘在错的地方。
+  els.noteList.addEventListener("scroll", closeDurationMenu, { passive: true });
+  window.addEventListener("resize", closeDurationMenu);
+}
+
+/** 建（或取）全局唯一的时值选择菜单。19 个选项只建一次，所有行共用。 */
+function ensureDurationMenu() {
+  if (state.durationMenu) return state.durationMenu;
+  const menu = document.createElement("div");
+  menu.className = "duration-menu";
+  menu.hidden = true;
+  menu.setAttribute("role", "menu");
+  for (const [value, label] of durations) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "duration-menu-item";
+    item.dataset.duration = value;
+    item.setAttribute("role", "menuitem");
+    item.textContent = label;
+    menu.append(item);
+  }
+  const custom = document.createElement("button");
+  custom.type = "button";
+  custom.className = "duration-menu-item";
+  custom.dataset.duration = "custom";
+  custom.setAttribute("role", "menuitem");
+  custom.hidden = true;   // 只有当前音符本来就是「自定义时值」时才显示
+  menu.append(custom);
+  menu.addEventListener("click", (event) => {
+    const item = event.target.closest(".duration-menu-item");
+    const note = state.durationMenuNote;
+    if (!item || !note) return;
+    closeDurationMenu();
+    applyNoteDuration(note, item.dataset.duration);
+  });
+  // 点菜单外面就关（capture 阶段，先于其它 click 处理）
+  document.addEventListener("pointerdown", (event) => {
+    if (!state.durationMenu || state.durationMenu.hidden) return;
+    if (state.durationMenu.contains(event.target)) return;
+    if (event.target.closest && event.target.closest(".note-duration")) return;
+    closeDurationMenu();
+  }, true);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeDurationMenu();
+  });
+  document.body.append(menu);
+  state.durationMenu = menu;
+  return menu;
+}
+
+/** 在某个时值按钮旁边弹出菜单。 */
+function openDurationMenu(button, note) {
+  const menu = ensureDurationMenu();
+  state.durationMenuNote = note;
+  const custom = menu.querySelector('[data-duration="custom"]');
+  if (custom) {
+    custom.hidden = note.duration !== "custom";
+    if (!custom.hidden) custom.textContent = durationLabelFor(note);
+  }
+  for (const item of menu.children) {
+    item.classList.toggle("is-active", item.dataset.duration === note.duration);
+  }
+  menu.hidden = false;
+  const rect = button.getBoundingClientRect();
+  const menuHeight = menu.offsetHeight;
+  const menuWidth = menu.offsetWidth;
+  const spaceBelow = window.innerHeight - rect.bottom;
+  const top = spaceBelow >= menuHeight + 8 ? rect.bottom + 4 : Math.max(8, rect.top - menuHeight - 4);
+  const left = Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.left - 40));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+function closeDurationMenu() {
+  if (!state.durationMenu || state.durationMenu.hidden) return;
+  state.durationMenu.hidden = true;
+  state.durationMenuNote = null;
+}
+
+/** 应用时值：只改音符模型和这一行的按钮文字，不重绘整表。 */
+function applyNoteDuration(note, value) {
+  note.duration = value;
+  if (durationBeats[value]) note.durationBeats = durationBeats[value];
+  const row = state.noteRowById && state.noteRowById.get(note.id);
+  const button = row && row.querySelector(".note-duration");
+  if (button) {
+    button.dataset.duration = value;
+    button.textContent = durationLabelFor(note);
+  }
+}
+
+/** 一个「小节 × 声部」块；entries 形如 [{note, index}]。 */
+function buildVoiceBlock(name, entries) {
+  const block = document.createElement("div");
+  block.className = "measure-voice";
+  const label = document.createElement("div");
+  label.className = "measure-voice-name";
+  label.textContent = `${name} · ${entries.length} 个音`;
+  block.append(label);
+  for (const entry of entries) block.append(buildNoteRow(entry.note, entry.index));
+  return block;
+}
+
+/** 小节序号（0 起）：优先用 MusicXML 的小节号，其次 measureIndex，最后按拍数推算。 */
+function measureIndexForNote(note, beatsPerMeasure) {
+  const measureNumber = Number(note.measure);
+  const explicit = Number(note.measureIndex);
+  if (note.measure !== undefined && note.measure !== null && note.measure !== "" && Number.isFinite(measureNumber)) {
+    return Math.max(0, Math.floor(measureNumber - 1));
+  }
+  if (note.measureIndex !== undefined && note.measureIndex !== null && Number.isFinite(explicit)) {
+    return Math.max(0, Math.floor(explicit));
+  }
+  return Math.floor((Number(note.startBeat) || 0) / beatsPerMeasure + 1e-6);
+}
+
+/** 只刷新某个声部的音高文本框（切八度用）：8419 音的谱全表重绘约 730 ms，这里约 3 ms。 */
+function updatePartPitchRows(partKey) {
+  if (!state.noteRowById || !state.noteRowById.size) {
+    renderNotes();
+    return;
+  }
+  const part = String(partKey);
+  let missing = false;
+  for (const note of state.notes) {
+    if (voiceIdentity(note) !== part) continue;
+    const row = state.noteRowById.get(note.id);
+    if (!row) { missing = true; continue; }
+    const input = row.querySelector(".note-pitch");
+    if (input) input.value = note.pitch;
+  }
+  if (missing) renderNotes();
+}
+
+/**
+ * 复制声部后只把新声部的行插进已有小节，不重绘整张表。
+ *
+ * 8419 音的谱全表重绘约 730 ms；复制一个 2112 音的声部只需要建 2112 行（约 30 ms）。
+ * 新块追加在每小节末尾（声部面板里仍按名字排序，不影响使用）。
+ */
+function appendPartNoteRows(partKey, newNotes) {
+  if (!newNotes.length || !state.noteById || !els.noteList.querySelector(".measure-group")) {
+    renderNotes();
+    return;
+  }
+  const per = beatsPerMeasureFromSummary(state.scoreInfo && state.scoreInfo.timeSummary);
+  const baseIndex = state.notes.length - newNotes.length;   // 新音符都在数组末尾
+  const byMeasure = new Map();
+  for (let offset = 0; offset < newNotes.length; offset += 1) {
+    const note = newNotes[offset];
+    const measureIndex = measureIndexForNote(note, per);
+    if (!byMeasure.has(measureIndex)) byMeasure.set(measureIndex, []);
+    byMeasure.get(measureIndex).push({ note, index: baseIndex + offset });
+  }
+  const name = partDisplayName(partKey, newNotes[0].partName || "旋律");
+  let appended = 0;
+  for (const [measureIndex, entries] of byMeasure) {
+    const group = (state.measureGroups && state.measureGroups.get(measureIndex))
+      || els.noteList.querySelector(`.measure-group[data-measure="${measureIndex + 1}"]`);
+    if (!group) continue;
+    entries.sort((left, right) => (Number(left.note.startBeat) || 0) - (Number(right.note.startBeat) || 0));
+    group.append(buildVoiceBlock(name, entries));
+    const meta = group.querySelector(".measure-head span");
+    if (meta) {
+      const current = Number(String(meta.textContent).replace(/[^\d]/g, "")) || 0;
+      meta.textContent = `${current + entries.length} 个音`;
+    }
+    appended += entries.length;
+  }
+  for (const note of newNotes) state.noteById.set(note.id, note);
+  if (!appended) renderNotes();   // 一个都没插进去（结构意外）就退回全量重绘
 }
 
 /**
@@ -1222,16 +1456,7 @@ function groupNotesByMeasure() {
   state.notes.forEach((note, index) => {
     // measure（跨页合并时已经按前面各页小节数累加）最可靠；
     // 直接用 measureIndex 的话，第 2 页的音会和第 1 页撞在同一小节里。
-    const measureNumber = Number(note.measure);
-    const explicit = Number(note.measureIndex);
-    let measureIndex;
-    if (note.measure !== undefined && note.measure !== null && note.measure !== "" && Number.isFinite(measureNumber)) {
-      measureIndex = Math.max(0, Math.floor(measureNumber - 1));
-    } else if (note.measureIndex !== undefined && note.measureIndex !== null && Number.isFinite(explicit)) {
-      measureIndex = Math.max(0, Math.floor(explicit));
-    } else {
-      measureIndex = Math.floor((Number(note.startBeat) || 0) / per + 1e-6);
-    }
+    const measureIndex = measureIndexForNote(note, per);
     if (!measures.has(measureIndex)) measures.set(measureIndex, new Map());
     const voices = measures.get(measureIndex);
     const key = voiceIdentity(note);
@@ -1263,15 +1488,21 @@ function groupNotesByMeasure() {
 
 function renderNotes() {
   els.noteList.replaceChildren();
-  // 音符行索引：高亮时只碰"正在播的这一批"，不再每次都遍历全部行。
-  // 实测 8419 音的谱，每次 querySelectorAll 遍历约 11 ms，一秒内几十次就足以听出卡顿。
+  installNoteListDelegation();
+  // 行索引 & 音符索引：事件委托靠它从 DOM 找回音符对象。
   state.noteRowById = new Map();
+  state.noteById = new Map();
+  for (const note of state.notes) state.noteById.set(note.id, note);
+  state.measureGroups = new Map();
+  state.hoverRow = null;
   if (!state.notes.length) {
     els.notesEmpty.hidden = false;
     els.noteList.append(els.notesEmpty);
   } else {
     els.notesEmpty.hidden = true;
     const measures = groupNotesByMeasure();
+    // 先攒在 DocumentFragment 里一次插入：8419 行时比分多次 append 少很多重排。
+    const fragment = document.createDocumentFragment();
     for (const measure of measures) {
       const group = document.createElement("section");
       group.className = "measure-group";
@@ -1284,19 +1515,12 @@ function renderNotes() {
       meta.textContent = `${measure.count} 个音`;
       head.append(title, meta);
       group.append(head);
-      for (const voice of measure.voices) {
-        const block = document.createElement("div");
-        block.className = "measure-voice";
-        const label = document.createElement("div");
-        label.className = "measure-voice-name";
-        label.textContent = `${voice.name} · ${voice.items.length} 个音`;
-        block.append(label);
-        for (const item of voice.items) block.append(buildNoteRow(item.note, item.index));
-        group.append(block);
-      }
+      for (const voice of measure.voices) group.append(buildVoiceBlock(voice.name, voice.items));
       group.hidden = Boolean(state.onlyLowConfidence) && !group.querySelector(".note-row:not([hidden])");
-      els.noteList.append(group);
+      state.measureGroups.set(measure.measureIndex, group);
+      fragment.append(group);
     }
+    els.noteList.append(fragment);
     if (els.measureJumpInput) els.measureJumpInput.max = String(measures.length ? measures[measures.length - 1].measureIndex + 1 : 1);
   }
   els.lowConfidenceButton.hidden = !hasLowConfidenceNotes();
@@ -1425,7 +1649,7 @@ function duplicatePart(sourceKey, options = {}) {
   // 新声部默认参与演奏
   if (state.selectedParts instanceof Set) state.selectedParts.add(newId);
   updatePartControls();
-  renderNotes();
+  appendPartNoteRows(newId, copies);
   refreshScoreOverlay();
   updatePlaybackReady();
   const octaveText = semitones > 0 ? "高八度" : semitones < 0 ? "低八度" : "同音高";
@@ -3351,7 +3575,7 @@ function setPartOctave(key, octaves) {
     note.pitch = midiToPitchName(note.midi);
   }
   state.partOctaves.set(id, target);
-  renderNotes();
+  updatePartPitchRows(id);
   refreshScoreOverlay();
   const name = partDisplayName(id, id);
   showToast(target === 0
@@ -4733,7 +4957,8 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   duplicatePart, setPartOctave, refreshScoreOverlay, updatePartControls,
   buildAudioPlan, renderPlanToBuffer, encodeMp3, getPlaybackNotes, playbackTimeline,
   playbackTempoSegments, beatsForNote, voiceIdentity, loadLame, normalizePeak, stereoChannels,
-  EXPORT_RENDER };
+  EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
+  buildVoiceBlock };
 }
 renderNotes();
 refreshEngineStatus();

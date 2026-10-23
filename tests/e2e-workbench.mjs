@@ -82,7 +82,9 @@ try {
   const firstRow = page.locator("#noteList .note-row").first();
   await firstRow.locator(".note-pitch").fill("F#5");
   await firstRow.locator(".note-pitch").dispatchEvent("change");
-  await firstRow.locator(".note-duration").selectOption("half");
+  // 时值改为「按钮 + 共享弹出菜单」（性能优化：不再每行一个 19 项 select）
+  await firstRow.locator(".note-duration").click();
+  await page.locator('.duration-menu .duration-menu-item[data-duration="half"]').click();
   const editAfter = await page.evaluate(() => ({
     notes: window.__pujian.state.notes.length,
     firstPitch: window.__pujian.state.notes[0].pitch,
