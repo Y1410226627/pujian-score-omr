@@ -130,6 +130,32 @@ const result = await page.evaluate(async () => {
   out.single.chunkedReproducible = compare(chunkedA.buffer, chunkedB.buffer);
   out.single.speedup = Number((whole.ms / Math.max(1, chunkedA.ms)).toFixed(2));
 
+  // 导出两次的 MP3 是否逐字节一致（用户重复导出应得到同一个文件）
+  await debug.loadLame();
+  const encodePair = () => {
+    const left = chunkedA.buffer.getChannelData(0);
+    const right = chunkedA.buffer.getChannelData(1);
+    return debug.encodeMp3(left, right);
+  };
+  const encodePairB = () => {
+    const left = chunkedB.buffer.getChannelData(0);
+    const right = chunkedB.buffer.getChannelData(1);
+    return debug.encodeMp3(left, right);
+  };
+  const blobA = encodePair();
+  const blobB = encodePairB();
+  const [bytesA, bytesB] = await Promise.all([blobA.arrayBuffer(), blobB.arrayBuffer()]);
+  const viewA = new Uint8Array(bytesA);
+  const viewB = new Uint8Array(bytesB);
+  let byteDiff = Math.abs(viewA.length - viewB.length);
+  const common = Math.min(viewA.length, viewB.length);
+  for (let i = 0; i < common; i += 1) if (viewA[i] !== viewB[i]) byteDiff += 1;
+  out.single.mp3Reproducible = {
+    bytes: viewA.length,
+    byteDiff,
+    identical: byteDiff === 0,
+  };
+
   // ---- 2) 多声部（复制成 4 个声部）：整块 vs 分块 ----
   if (debug.state.notes.length) {
     const sourceKey = debug.voiceIdentity(state.notes[0]);
