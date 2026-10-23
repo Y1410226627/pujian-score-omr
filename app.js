@@ -2850,18 +2850,53 @@ const AUDIO_EXPORT_RATE = 44100;
 const AUDIO_EXPORT_KBPS = 128;
 
 /**
- * 离线渲染整曲（或选中片段）为 AudioBuffer。
+ * 导出渲染的分块策略。
  *
- * 复用实时播放用的同一套发声函数（playTone / partBus / masterChain），
- * 所以导出听到的声音 = 试听到的声音（含分段变速、逐声部音色与音量、混响压限）。
+ * 为什么分块并行：实测 89.6 秒的谱，整块渲染要 12.7 秒——其中 88% 花在主链
+ * （混响卷积器）。切成 4 块并行渲染只要 1.2 秒，原因是：
+ *   1) 多核真正并行：每块各用一个 OfflineAudioContext，浏览器在不同线程上算；
+ *   2) Chrome 对「超长离线渲染」有一次性额外开销（实测同一段音频第一次 12.6 秒、
+ *      之后 4.2 秒），块变小后这部分几乎消失。
+ *
+ * 保真的四条约束（缺一条拼出来就是坏的）：
+ *   · 所有块共用同一份混响脉冲（见 sharedImpulse），否则边界处音色会跳；
+ *   · 每个音的人性化参数在 plan 里预先算好（audio-export.js），不依赖调度顺序；
+ *   · 每块向前多看「最长音时长 + 混响长度」，避免长音被块边界截断；
+ *   · 每块前后多渲一段 overlap，用来让混响尾音和压限器进入稳定状态。
  */
-async function renderPlanToBuffer(plan, { onProgress } = {}) {
-  const total = Math.max(1, Math.ceil(plan.totalSeconds * AUDIO_EXPORT_RATE));
-  const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  if (!OfflineContext) throw new Error("当前浏览器不支持离线音频渲染。");
-  const offline = new OfflineContext(2, total, AUDIO_EXPORT_RATE);
-  // 保存实时上下文状态，渲染结束后原样恢复
-  const backup = {
+const EXPORT_RENDER = {
+  minSecondsPerChunk: 8,    // 每块至少这么长；太碎反而更慢（每块都有固定开销）
+  maxChunks: 6,
+  overlapSeconds: 2.4,      // 前后多渲：混响 1.9 秒 + 压限器 release 0.24 秒，留余量
+  maxLookback: 10,          // 往前看超过这么远就不值得分块了（长音太多）
+};
+
+/** 一份计划里最长的音符时长（秒）。 */
+function longestNoteSeconds(plan) {
+  let longest = 0;
+  for (const note of plan.notes) {
+    if (note.durationSeconds > longest) longest = note.durationSeconds;
+  }
+  return longest;
+}
+
+/** 决定分几块；返回 1 表示整块渲染。 */
+function decideExportChunks(plan) {
+  const totalSeconds = Math.max(0.1, Number(plan.totalSeconds) || 0.1);
+  const longest = longestNoteSeconds(plan);
+  const lookback = longest + REVERB.seconds + 0.5;
+  // 有超长音时，每块都要多渲很久，分块收益被吃掉，直接整块
+  if (lookback > EXPORT_RENDER.maxLookback) return 1;
+  const cores = Math.max(1, Number(navigator.hardwareConcurrency) || 4);
+  let count = Math.min(EXPORT_RENDER.maxChunks, Math.max(2, cores - 1));
+  while (count > 2 && totalSeconds / count < EXPORT_RENDER.minSecondsPerChunk) count -= 1;
+  if (count < 2 || totalSeconds < EXPORT_RENDER.minSecondsPerChunk * 2) return 1;
+  return count;
+}
+
+/** 保存渲染期间会被改写的全局音频状态。 */
+function snapshotAudioState() {
+  return {
     audio: state.audio,
     master: state.master,
     reverbBuffer: state.reverbBuffer,
@@ -2872,44 +2907,153 @@ async function renderPlanToBuffer(plan, { onProgress } = {}) {
     partPanners: new Map(state.partPanners),
     sources: new Set(state.sources),
   };
-  try {
-    state.audio = offline;
-    state.master = null;
-    state.reverbBuffer = null;
-    state.vibrato = null;
-    state.noiseBuffer = null;
-    state.waves = new Map();
-    state.partBuses = new Map();
-    state.partPanners = new Map();
-    state.sources = new Set();
-    // 按开始时间顺序调度（同一时刻的和弦也逐个建节点，不影响结果）
-    for (let index = 0; index < plan.notes.length; index += 1) {
-      const note = plan.notes[index];
-      const destination = partBus(note.partKey);
-      // 导出时把声部音量乘进峰值：playTone 的 peak 参数已经包含力度，这里再叠音量
-      // 声部音量由 partBus 的总线增益负责（与试听完全一致），这里不要再乘一次。
-      // 若这里再乘 note.volume，实际听到的是「音量²」，滑到 50% 就只剩 25% 响度。
-      playTone(note.midi, note.startSeconds + 0.02, note.durationSeconds * 0.99,
-        note.peak, destination, note.partKey);
-      if (onProgress && index % 200 === 0) {
-        onProgress(index / Math.max(1, plan.notes.length), `正在安排音符 ${index + 1} / ${plan.notes.length}`);
-      }
+}
+
+/** 恢复全局音频状态（渲染结束后必须原样还原，否则试听会串）。 */
+function restoreAudioState(saved) {
+  state.audio = saved.audio;
+  state.master = saved.master;
+  state.reverbBuffer = saved.reverbBuffer;
+  state.vibrato = saved.vibrato;
+  state.noiseBuffer = saved.noiseBuffer;
+  state.waves = saved.waves;
+  state.partBuses = saved.partBuses;
+  state.partPanners = saved.partPanners;
+  state.sources = saved.sources;
+}
+
+/**
+ * 在某个离线上下文里，把计划中「落在 [windowFrom, windowTo) 且会响到这段」的音符接上。
+ *
+ * @param {OfflineAudioContext} offline
+ * @param {object} plan buildAudioPlan 的结果
+ * @param {number} windowFrom 窗口起点（秒，计划时间轴）
+ * @param {number} windowTo 窗口终点（秒）
+ * @param {{sharedImpulse: AudioBuffer, shiftSeconds: number}} options
+ *        sharedImpulse：所有块共用的混响脉冲；shiftSeconds：窗口起点在上下文里的时间偏移
+ */
+function schedulePlanWindow(offline, plan, windowFrom, windowTo, options) {
+  state.audio = offline;
+  state.master = null;
+  // 直接塞入共用脉冲：masterChain 建链时会用它，保证每块混响完全一致
+  state.reverbBuffer = options.sharedImpulse || null;
+  state.vibrato = null;
+  state.noiseBuffer = null;
+  state.waves = new Map();
+  state.partBuses = new Map();
+  state.partPanners = new Map();
+  state.sources = new Set();
+  const shift = Number(options.shiftSeconds) || 0;
+  const tail = REVERB.seconds + 0.05;
+  let scheduled = 0;
+  for (const note of plan.notes) {
+    const start = note.startSeconds;
+    if (start >= windowTo) break;                       // 计划按时间升序，后面都不用排
+    if (start + note.durationSeconds + tail <= windowFrom) continue;   // 含混响尾也早结束
+    const at = start + shift + 0.02;
+    if (at < 0) continue;                               // 理论上不会发生（见 lookback）
+    const destination = partBus(note.partKey);
+    humanOverride = note.human || null;
+    try {
+      playTone(note.midi, at, note.durationSeconds * 0.99, note.peak, destination, note.partKey);
+    } finally {
+      humanOverride = null;
     }
-    if (onProgress) onProgress(0.85, "正在渲染音频…");
-    const buffer = await offline.startRendering();
-    return buffer;
+    scheduled += 1;
+  }
+  return scheduled;
+}
+
+/**
+ * 离线渲染整曲（或选中片段）为 AudioBuffer。
+ *
+ * 复用实时播放用的同一套发声函数（playTone / partBus / masterChain），
+ * 所以导出听到的声音 = 试听到的声音（含分段变速、逐声部音色与音量、混响压限）。
+ * 渲染分块并行，见 EXPORT_RENDER 的说明。
+ */
+async function renderPlanToBuffer(plan, { onProgress } = {}) {
+  const rate = AUDIO_EXPORT_RATE;
+  const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!OfflineContext) throw new Error("当前浏览器不支持离线音频渲染。");
+  const totalFrames = Math.max(1, Math.ceil(plan.totalSeconds * rate));
+  const chunkCount = decideExportChunks(plan);
+  const saved = snapshotAudioState();
+  const previousSeed = state.exportReverbSeed;
+  // 导出用固定种子生成混响脉冲：同一份谱每次导出结果一致，分块之间也完全一致。
+  state.exportReverbSeed = 0x9e3779b9;
+  try {
+    // 共用混响脉冲：在一个 1 帧的上下文里生成即可（AudioBuffer 可跨上下文使用）
+    const ruler = new OfflineContext(1, 1, rate);
+    const sharedImpulse = makeReverbImpulse(ruler, REVERB.seconds, REVERB.decay, state.exportReverbSeed, false);
+    const longest = longestNoteSeconds(plan);
+
+    if (chunkCount <= 1) {
+      const offline = new OfflineContext(2, totalFrames, rate);
+      schedulePlanWindow(offline, plan, 0, plan.totalSeconds, { sharedImpulse, shiftSeconds: 0 });
+      if (onProgress) onProgress(0.35, "正在渲染音频…");
+      return await offline.startRendering();
+    }
+
+    // 每块的帧范围按比例切，保证各块帧数之和精确等于 totalFrames
+    const ranges = [];
+    for (let index = 0; index < chunkCount; index += 1) {
+      const fromFrame = Math.round((totalFrames * index) / chunkCount);
+      const toFrame = Math.round((totalFrames * (index + 1)) / chunkCount);
+      ranges.push({
+        fromSeconds: fromFrame / rate,
+        toSeconds: toFrame / rate,
+        frames: toFrame - fromFrame,
+      });
+    }
+    const lookback = longest + REVERB.seconds + 0.5;
+    const overlap = EXPORT_RENDER.overlapSeconds;
+
+    // 阶段一：把所有块的音频图建好（同步）。必须建完再渲染——
+    // 建图会改写全局音频状态，边建边渲染会互相踩。
+    const built = ranges.map((range, index) => {
+      const windowFrom = Math.max(0, range.fromSeconds - Math.max(lookback, overlap));
+      const windowTo = Math.min(plan.totalSeconds, range.toSeconds + overlap);
+      const windowFrames = Math.max(range.frames + 2, Math.ceil((windowTo - windowFrom) * rate) + 2);
+      const offline = new OfflineContext(2, windowFrames, rate);
+      schedulePlanWindow(offline, plan, windowFrom, windowTo, {
+        sharedImpulse,
+        shiftSeconds: -windowFrom,
+      });
+      return {
+        offline,
+        index,
+        takeStart: Math.max(0, Math.round((range.fromSeconds - windowFrom) * rate)),
+        frames: range.frames,
+      };
+    });
+
+    if (onProgress) onProgress(0.25, `已排好 ${chunkCount} 段，正在并行渲染…`);
+    // 阶段二：并行渲染（每个 startRendering 在不同线程上跑）
+    const rendered = await Promise.all(built.map((job) => job.offline.startRendering()));
+
+    // 阶段三：拼接
+    if (onProgress) onProgress(0.85, "正在拼接音频…");
+    const output = ruler.createBuffer(2, totalFrames, rate);
+    const left = output.getChannelData(0);
+    const right = output.getChannelData(1);
+    let writeAt = 0;
+    for (let index = 0; index < built.length; index += 1) {
+      const job = built[index];
+      const buffer = rendered[index];
+      const available = Math.max(0, Math.min(job.frames, buffer.length - job.takeStart));
+      if (available > 0) {
+        left.set(buffer.getChannelData(0).subarray(job.takeStart, job.takeStart + available), writeAt);
+        right.set(buffer.getChannelData(1).subarray(job.takeStart, job.takeStart + available), writeAt);
+      }
+      writeAt += job.frames;
+    }
+    return output;
   } finally {
-    state.audio = backup.audio;
-    state.master = backup.master;
-    state.reverbBuffer = backup.reverbBuffer;
-    state.vibrato = backup.vibrato;
-    state.noiseBuffer = backup.noiseBuffer;
-    state.waves = backup.waves;
-    state.partBuses = backup.partBuses;
-    state.partPanners = backup.partPanners;
-    state.sources = backup.sources;
+    restoreAudioState(saved);
+    state.exportReverbSeed = previousSeed;
   }
 }
+
 
 /** 懒加载本地 MP3 编码器（vendor/lamejs，不联网）。 */
 let lameLoading = null;
@@ -3411,25 +3555,56 @@ function prepareAudio() {
   prewarmReverb();
 }
 /** 程序生成混响脉冲响应：指数衰减的低通噪声 + 20 ms 预延迟，听起来像小音乐厅。 */
-function reverbImpulse(audio, seconds = REVERB.seconds, decay = REVERB.decay) {
-  if (state.reverbBuffer) return state.reverbBuffer;
+/**
+ * 确定性伪随机（mulberry32 的变体）。
+ *
+ * 为什么需要：混响 IR 用 Math.random 生成，会让同一份谱每次导出的混响略有不同，
+ * 也让「分块渲染」与「整块渲染」无法逐样本比对。导出时改用固定种子，结果可复现。
+ */
+function seededRandom(seed) {
+  let state32 = seed >>> 0;
+  return function next() {
+    state32 = (state32 + 0x6d2b79f5) >>> 0;
+    let t = state32;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * 生成混响脉冲。seed 非空时用确定性随机（导出用），否则用 Math.random（试听用）。
+ *
+ * @param {BaseAudioContext} audio 任意上下文（AudioBuffer 可跨上下文使用）
+ * @param {number} seconds 混响长度
+ * @param {number} decay 衰减指数
+ * @param {number|null} seed 固定种子；null 表示随机
+ * @param {boolean} cache 是否写回 state.reverbBuffer（导出时应传 false，因为要跨块共享同一份）
+ */
+function makeReverbImpulse(audio, seconds, decay, seed, cache) {
   const rate = audio.sampleRate;
   const length = Math.max(1, Math.floor(rate * seconds));
   const impulse = audio.createBuffer(2, length, rate);
   const preDelay = Math.floor(rate * REVERB.preDelay);
+  const random = seed === null || seed === undefined ? Math.random : seededRandom(seed);
   for (let channel = 0; channel < 2; channel += 1) {
     const data = impulse.getChannelData(channel);
     let smoothed = 0;
     for (let index = 0; index < length; index += 1) {
-      const noise = Math.random() * 2 - 1;
+      const noise = random() * 2 - 1;
       // 一阶低通：高频先被空气吸收，余音因此偏暖而不是"嘶嘶"声。
       smoothed = smoothed * 0.55 + noise * 0.45;
       const progress = index / length;
       data[index] = index < preDelay ? 0 : smoothed * ((1 - progress) ** decay);
     }
   }
-  state.reverbBuffer = impulse;
+  if (cache !== false) state.reverbBuffer = impulse;
   return impulse;
+}
+
+function reverbImpulse(audio, seconds = REVERB.seconds, decay = REVERB.decay) {
+  if (state.reverbBuffer) return state.reverbBuffer;
+  return makeReverbImpulse(audio, seconds, decay, state.exportReverbSeed ?? null, true);
 }
 
 /**
@@ -3480,7 +3655,12 @@ function noiseSampleBuffer(audio) {
   const length = Math.max(1, Math.floor(audio.sampleRate * 0.35));
   const buffer = audio.createBuffer(1, length, audio.sampleRate);
   const data = buffer.getChannelData(0);
-  for (let index = 0; index < length; index += 1) data[index] = Math.random() * 2 - 1;
+  // 导出时用固定种子：分块并行渲染时每块各自建噪声 buffer，
+  // 若用 Math.random 各块噪声不同，拼起来会有细微不一致，也无法复现。
+  const random = state.exportReverbSeed == null
+    ? Math.random
+    : seededRandom(state.exportReverbSeed ^ 0x1f2e3d4c);
+  for (let index = 0; index < length; index += 1) data[index] = random() * 2 - 1;
   state.noiseBuffer = buffer;
   return buffer;
 }
@@ -3513,8 +3693,31 @@ function vibratoDepth() {
   state.vibrato = depth;
   return depth;
 }
-/** 演奏人性化：真实演奏者不会每个音都严丝合缝，加一点点时点/力度/音高偏差。 */
+/**
+ * 演奏人性化：真实演奏者不会每个音都严丝合缝，加一点点时点/力度/音高偏差。
+ *
+ * humanOverride：导出时由 plan 预先算好每个音的人性化值（见 audio-export.js）。
+ * 为什么需要：导出要「同一份谱导出结果完全一致」，而且分块并行渲染时
+ * 每个音的人性化值不能依赖「第几个被调度」——否则分块与整块渲染对不上。
+ * playTone 一次只调一次 humanize，所以这个模块级变量只在同步的那一次调用里有效。
+ */
+let humanOverride = null;
+
 function humanize(peak) {
+
+  if (humanOverride) {
+
+    return {
+
+      offset: humanOverride.offset,
+
+      peak: Math.max(0.02, peak * humanOverride.peakFactor),
+
+      detune: humanOverride.detune,
+
+    };
+
+  }
   return {
     offset: (Math.random() - 0.5) * HUMANIZE.offset,
     peak: Math.max(0.02, peak * (1 - HUMANIZE.peak / 2 + Math.random() * HUMANIZE.peak)),
@@ -4524,7 +4727,13 @@ document.addEventListener("keydown", (event) => {
 if (new URLSearchParams(window.location.search).has("debug")) {
   window.__pujian = { state, playTone, setTimbre, masterChain, midiFrequency, timbreForPart, playMelody,
   stopPlayback, prepareAudio, ensureSampleBank, fetchSampleManifest, omrPageBlob,
-  renderNotes, highlightEvent, updatePlaybackReady, commitScore, tempoPageBlob, omrPageBlob };
+  renderNotes, highlightEvent, updatePlaybackReady, commitScore, tempoPageBlob, omrPageBlob,
+  // 性能基准用：暴露内部函数，测试才能分别量「复制声部 / 切八度 / 导出渲染」各花多久。
+  // EXPORT_RENDER 可改（例如 maxChunks = 1 强制整块渲染），用来做分块/整块的逐样本保真比对。
+  duplicatePart, setPartOctave, refreshScoreOverlay, updatePartControls,
+  buildAudioPlan, renderPlanToBuffer, encodeMp3, getPlaybackNotes, playbackTimeline,
+  playbackTempoSegments, beatsForNote, voiceIdentity, loadLame, normalizePeak, stereoChannels,
+  EXPORT_RENDER };
 }
 renderNotes();
 refreshEngineStatus();

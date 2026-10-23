@@ -1,8 +1,28 @@
+/**
+ * 确定性伪随机（mulberry32）。同一个种子永远给出同一串数。
+ *
+ * 为什么导出要用它：人性化（时点/力度/音高微抖）如果用 Math.random，
+ * 同一份谱每次导出的音频都会有细微差异，既无法复现、也没法把
+ * 「分块并行渲染」与「整块渲染」逐样本对齐做保真验证。
+ */
+function mulberry32(seed) {
+  let value = seed >>> 0;
+  return function next() {
+    value = (value + 0x6d2b79f5) >>> 0;
+    let t = value;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // 「导出音频」的纯逻辑：把「识别结果 + 声部设置 + 选区」变成一份可渲染的音频计划。
 //
 // 为什么单独一个文件：导出音频最容易出错的地方不是编码，而是「计划算错」——
 // 拍位该按分段速度换算成秒、移调该改 MIDI、声部该按勾选/音量/音色取参数。
 // 这些全是纯函数，可以脱离浏览器单测（见 tests/audio-export.test.mjs）。
+
+import { HUMANIZE } from "./timbre.js";
 
 /**
  * 一个音符在导出时的目标参数。
@@ -72,6 +92,9 @@ export function buildAudioPlan(options) {
   const toBeat = selection ? Number(selection.toBeat) : Infinity;
   const offset = Number.isFinite(fromBeat) ? fromBeat : 0;
 
+  // 确定性随机：同一份谱每次都得到同一组人性化参数，导出结果可复现。
+  const random = mulberry32(0x5eed1a2b);
+
   const plan = [];
   const partKeys = new Set();
   for (const note of notes) {
@@ -101,6 +124,16 @@ export function buildAudioPlan(options) {
       timbre: partTimbres.get(key) || globalTimbre,
       volume: Math.max(0, Math.min(1, volume)),
       peak: 0.16,
+      // 人性化参数在**建计划时**就固定下来，而不是播放时取随机数。
+      // 两个原因：
+      //   1) 同一份谱导出的音频要完全一致（用户重复导出不该得到不同结果）；
+      //   2) 导出改成「分块并行渲染」后，每个音可能在不同块里被调度，
+      //      参数若依赖调度顺序，分块与整块的结果就对不上。
+      human: {
+        offset: (random() - 0.5) * HUMANIZE.offset,
+        peakFactor: 1 - HUMANIZE.peak / 2 + random() * HUMANIZE.peak,
+        detune: (random() - 0.5) * HUMANIZE.detune,
+      },
     });
     partKeys.add(key);
   }
