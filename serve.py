@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import webbrowser
 import zipfile
 
@@ -261,28 +262,84 @@ def find_jianpu_python():
     return sys.executable
 
 
+def available_memory_gb():
+    """本机当前可用物理内存（GB）；拿不到就返回 None（调用方退回按核数估算）。
+
+    为什么不用 psutil：serve.py 一直坚持标准库（用户不装依赖也能跑）。
+    Windows 用 ctypes 调 kernel32.GlobalMemoryStatusEx 取 ullAvailPhys；
+    POSIX 用 os.sysconf 读 SC_AVPHYS_PAGES；都失败就返回 None，
+    让 omr_worker_count 退回「按核数」公式——多开进程只是变慢，不会影响正确性。
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return status.ullAvailPhys / (1024.0 ** 3)
+            return None
+        pages = os.sysconf("SC_AVPHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            return pages * page_size / (1024.0 ** 3)
+    except Exception:  # noqa: BLE001  平台不支持就退回按核数
+        return None
+    return None
+
+
 def omr_worker_count(page_count):
     """整本识别要开几个 Audiveris 进程。
 
-    为什么要并行：Audiveris 单个 JVM 内部的并行度有限，整本页面多时 CPU 用不满。
-    实测 10 页（16 核）：1 个进程 3.81 秒/页、2 个进程 **2.50 秒/页**、
-    4 个进程 2.28 秒/页。2 个进程收益最大、内存最省，所以默认 2；
-    页数很少时（JVM 启动开销占大头）仍然单进程。
-    默认按 CPU 自适应（≥12 核 3 个、≥6 核 2 个、更少 1 个），可用环境变量 PUJIAN_OMR_WORKERS 覆盖（1–4）。
+    为什么要并行：Audiveris 单个 JVM 内部的并行度有限（实测 16 核机器上单进程
+    平均只吃约 1.5–1.8 个核），整本页面多时 CPU 用不满。同一个 JVM 里的多页是
+    **顺序**处理的，所以只能靠多进程把页分散开。
+
+    实测（16 核 / 32G，8 页 150 DPI 图片型 PDF，每页 OMR 图 2970×4200）：
+        1 进程 171.5 秒（21.4 秒/页）；
+        2 进程 95.2 秒；3 进程 73.7 秒；4 进程 55.2 秒；
+        **8 进程 42.4 秒**（1 页/进程，最快，识别结果音符数与单进程完全一致）。
+    注意瓶颈是「每个分片的最长页数 × 单页耗时」：4 进程时 2 页/分片要 55 秒，
+    所以页数≤上限时按「一页一进程」最划算；页数远多于进程数时才靠交错分片均衡。
+
+    取值：`min(8, 核数//2, 可用内存GB//1.3, 页数)`，下限 1。
+    - 16 核 → 8 个；8 核 → 4 个；4 核 → 2 个；
+    - 内存按每个 Audiveris 进程约 1.3 GB 估算：本机 8 进程实测峰值——单进程 0.97 GB、
+      8 进程合计 6.1 GB（平均 0.76 GB/进程）。所以 1.3 GB/进程已含约 35% 余量；
+      若按 2.5 GB 估，12 GB 可用内存的机器会被压到 4 进程、丢掉「一页一进程」的最优档位
+      （8 页实测 8 进程 42.4 秒 vs 4 进程 55.2 秒）。小内存机器会自动少开，避免进交换区；
+    - 页数 2 也开 2 个进程：单页要 27–35 秒，而多开一个 JVM 只要约 3 秒，并行是净赚。
+    可用环境变量 PUJIAN_OMR_WORKERS 覆盖（1–8），显式指定时不再做内存/核数判断。
     """
-    if page_count < 3:
+    if page_count <= 1:
         return 1
     try:
         desired = int(os.environ.get("PUJIAN_OMR_WORKERS", "0"))
     except ValueError:
         desired = 0
-    if desired <= 0:
-        # 没指定就按 CPU 自适应：12 核以上开 3 个（实测 10 页：2 进程 25.0 秒、4 进程 22.8 秒，
-        # 再往上收益很小，而每个 JVM 要占 1 GB 上下内存，所以留一档余量）。
-        cores = os.cpu_count() or 4
-        desired = 3 if cores >= 12 else (2 if cores >= 6 else 1)
-    desired = min(4, max(1, desired))
-    return min(desired, max(1, (page_count + 2) // 3))
+    if desired > 0:
+        return min(8, max(1, desired), page_count)
+    cores = os.cpu_count() or 4
+    by_cpu = max(1, cores // 2)
+    memory_gb = available_memory_gb()
+    if memory_gb is None:
+        by_memory = 8          # 读不到内存信息：只按核数限制，不影响正确性
+    else:
+        by_memory = max(1, int(memory_gb // 1.3))
+    return max(1, min(8, by_cpu, by_memory, page_count))
 
 
 def omr_child_env(temporary_path):
@@ -667,8 +724,9 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             一次 16 页 **2.49 秒/页**（合计 39.79 秒）。
         也就是说整本识别的速度是逐页识别的 3.7 倍。
         混合谱（部分页面是简谱）现在只批量送「有谱表的页」，其余页由前端跳过并提示。
-        页数多时还会按 CPU 自适应拆给几个进程同时跑（可用 PUJIAN_OMR_WORKERS 指定 1–4），
-        实测 10 页：1 进程 3.81 秒/页 → 2 进程 2.50 → 4 进程 **2.28 秒/页**。
+        页数多时还会按 CPU/内存自适应拆给几个进程同时跑（见 omr_worker_count；
+        16 核/32G 机器上 8 页实测：1 进程 171.5 秒 → 8 进程 **42.4 秒**，
+        识别结果音符数完全一致）。
 
         请求体：JSON `{"images": ["<base64 png/jpeg>", ...]}`（最多 MAX_BATCH_PAGES 页）。
         响应：`{"pages": [{"musicxml": "..."} | {"error": "..."} , ...], "engine": "audiveris"}`。
@@ -689,6 +747,11 @@ class ProjectHandler(SimpleHTTPRequestHandler):
                     return
                 try:
                     workers = omr_worker_count(len(input_paths))
+                    memory_gb = available_memory_gb()
+                    print("[audiveris-batch] {} 页 → {} 进程（{} 核，可用内存 {}）".format(
+                        len(input_paths), workers, os.cpu_count(),
+                        "{:.1f} GB".format(memory_gb) if memory_gb is not None else "未知"), flush=True)
+                    batch_started = time.perf_counter()
                     if workers > 1:
                         # 交错分配（第 1、3、5… 页给 0 号进程）：各分片页数最均衡。
                         chunks = [input_paths[index::workers] for index in range(workers)]
@@ -709,9 +772,17 @@ class ProjectHandler(SimpleHTTPRequestHandler):
                             print("[audiveris-batch] 返回码 {}：\n{}".format(returncode, detail))
                         pages = [results.get(number, {"error": "第 {} 页没有识别出 MusicXML。".format(number)})
                                  for number in range(1, len(input_paths) + 1)]
+                    print("[audiveris-batch] 识别完成：{} 页 / {} 进程，耗时 {:.1f} 秒".format(
+                        len(input_paths), workers, time.perf_counter() - batch_started), flush=True)
                     if not pages:
                         pages = [{"error": "整本识别没有返回结果。"}]
-                    self.send_json(200, {"pages": pages, "engine": "audiveris"})
+                    # 附带本次批量的进程数/耗时（前端不依赖，但测量脚本与排查问题时有用）。
+                    self.send_json(200, {
+                        "pages": pages,
+                        "engine": "audiveris",
+                        "workers": workers,
+                        "elapsedMs": round((time.perf_counter() - batch_started) * 1000),
+                    })
                 finally:
                     OMR_SLOT.release()
         except subprocess.TimeoutExpired:

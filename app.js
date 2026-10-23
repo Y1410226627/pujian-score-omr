@@ -2485,8 +2485,30 @@ function tempoMarksFromPdfText(marks, { beatsPerMeasure = 4 } = {}) {
   return unique;
 }
 
-async function applyTempoOcr(prepared, entries, totalPages, superseded) {
+/**
+ * 速度查询的「现做」入口：先试 PDF 文字层，再回退到图片 OCR。
+ *
+ * 返回 [{beat, bpm}]（已按拍位排序、去重）；`prefetched` 传入整本识别快路径里
+ * 在识别期间就并行启动的速度查询（见 startTempoLookup），直接复用它的结果。
+ * 语义与改动前一致：文字层优先、OCR 兜底、映射规则不变。
+ */
+async function applyTempoOcr(prepared, entries, totalPages, superseded, prefetched = null) {
   // 主路径：PDF 文字层（速度和印刷小节号都是精确值，实测 Hall 曲 22 处全部读出）
+  if (prefetched) {
+    const marks = await prefetched.textMarksPromise;
+    if (superseded()) return [];
+    if (marks.length) {
+      const beats = beatsPerMeasureFromSummary((entries.find(Boolean) || {}).scoreInfo?.timeSummary);
+      console.info("速度：从 PDF 文字层读到", marks.length, "处");
+      return tempoMarksFromPdfText(marks, { beatsPerMeasure: beats });
+    }
+    const { pages: ocrPages, pageNumbers } = await prefetched.ocrPromise;
+    if (superseded() || !ocrPages.length) return [];
+    const mapped = mapOcrTempoMarksToBeats(ocrPages, entries, pageNumbers);
+    console.info("速度 OCR 结果：", mapped);
+    return mapped;
+  }
+  // 逐页兜底路径：识别已经全部结束，这里现场读文字层 / 跑 OCR
   if (state.file && state.pdf && state.pdfBytes) {
     const marks = await requestTempoFromPdfText(state.pdfBytes);
     if (superseded()) return [];
@@ -2508,6 +2530,18 @@ async function applyTempoOcr(prepared, entries, totalPages, superseded) {
     return [];
   }
   if (superseded() || !ocrPages.length) return [];
+  const mapped = mapOcrTempoMarksToBeats(ocrPages, entries, pageNumbers);
+  console.info("速度 OCR 结果：", mapped);
+  return mapped;
+}
+
+/**
+ * 把每页的 OCR 候选（x/y 坐标 + bpm）映射成全曲拍位。
+ *
+ * 原先这段逻辑内联在 applyTempoOcr 后半段，抽出来供「并行快路径」和「逐页兜底路径」
+ * 共用，避免两处各写一遍、将来只改一处导致行为分叉。
+ */
+function mapOcrTempoMarksToBeats(ocrPages, entries, pageNumbers) {
   // 每页的小节数与谱表几何（谱表几何从识别结果里拿；拿不到就只按页均分估计）
   const measuresPerPage = [];
   const stavesByPage = [];
@@ -2534,9 +2568,58 @@ async function applyTempoOcr(prepared, entries, totalPages, superseded) {
     }
     stavesByPage.push(staffs);
   }
-  const mapped = mapTempoMarksToBeats(ocrPages, stavesByPage, measuresPerPage);
-  console.info("速度 OCR 结果：", mapped);
-  return mapped;
+  return mapTempoMarksToBeats(ocrPages, stavesByPage, measuresPerPage);
+}
+
+/**
+ * 在「整本识别请求已发出、等 Audiveris 返回」的空档里，并行准备速度记号材料。
+ *
+ * 为什么值得：识别一整本要几十秒（实测 8 页 150 DPI 图片型 PDF 约 45–85 秒），
+ * 客户端原本完全空转，等识别结束后才串行跑速度 OCR（8 页实测文字层尝试 ~5 秒 +
+ * 图片 OCR ~10 秒 ≈ 15 秒）。现在把这段时间挪到空档里，识别结果回来时通常已经就绪。
+ *
+ * 语义与改动前一致：
+ * - 图片型 PDF（state.lowResPdf 为真）没有文字层 → 跳过 /api/omr/tempo-text（原来白跑约 5 秒）；
+ * - 有文字层的 PDF 仍以文字层结果优先，文字层读不到才回退图片 OCR；
+ * - OCR 用 3 倍高清图（OMR 图上等号横线太细，检不全），结果仍交给
+ *   mapTempoMarksToBeats 映射，不改变去重与优先级。
+ *
+ * @returns {{textMarksPromise: Promise<Array>, ocrPromise: Promise<{pages: Array, pageNumbers: number[]}>}}
+ */
+function startTempoLookup(staffPages, fileToken, superseded) {
+  const textMarksPromise = (state.file && state.pdf && state.pdfBytes && !state.lowResPdf)
+    ? requestTempoFromPdfText(state.pdfBytes)
+    : Promise.resolve([]);
+  const ocrPromise = (async () => {
+    let textMarks = [];
+    try {
+      textMarks = await textMarksPromise;
+    } catch {
+      textMarks = [];
+    }
+    // 文字层已经读到速度：不必再渲染 3 倍图跑 OCR（识别期间客户端的活到此为止）
+    if (superseded() || textMarks.length) return { pages: [], pageNumbers: [] };
+    const sources = [];
+    for (const item of staffPages) {
+      if (superseded()) return { pages: [], pageNumbers: [] };
+      try {
+        const blob = await tempoPageBlob(item.number, fileToken);
+        if (blob) sources.push({ number: item.number, blob });
+      } catch (error) {
+        console.info("第 " + item.number + " 页速度 OCR 取图失败：", error);
+      }
+    }
+    if (superseded() || !sources.length) return { pages: [], pageNumbers: [] };
+    let ocrPages = [];
+    try {
+      ocrPages = await requestTempoOcr(sources.map((item) => item.blob));
+    } catch (error) {
+      console.info("速度 OCR 失败，使用 MusicXML 自带的速度标记", error);
+      return { pages: [], pageNumbers: [] };
+    }
+    return { pages: ocrPages, pageNumbers: sources.map((item) => item.number) };
+  })();
+  return { textMarksPromise, ocrPromise };
 }
 
 function mergeTempoMarks(xmlMarks, ocrMarks) {
@@ -2688,6 +2771,8 @@ async function recognizeAllPages() {
   const entries = [];
   // 速度 OCR 的输入：每页的 OMR 高清图（识别时渲染的同一份，复用不重渲染）
   const tempoSources = [];
+  // 整本快路径里，速度查询在识别期间并行启动（见 startTempoLookup），结果暂存在这里
+  let tempoPrefetch = null;
   try {
     // ---- 快路径：把「有谱表的页」一次送给 Audiveris（省去每页一次的 JVM 启动）----
     // 实测：逐页调用约 9 秒/页；一次批量约 2.5–5 秒/页。16 页的谱从 2.4 分钟降到 40 秒左右。
@@ -2710,22 +2795,23 @@ async function recognizeAllPages() {
         const hasStaves = detectStaves(binary, width, height).length > 0;
         const blob = hasStaves ? await omrPageBlob(number, fileToken) : null;
         prepared.push({ number, blob, hasStaves });
-        // 速度 OCR 用 3 倍高清图（OMR 图上等号横线太细，检不全）
-        if (hasStaves) {
-          const tempoBlob = await tempoPageBlob(number, fileToken);
-          if (tempoBlob) tempoSources.push({ number, blob: tempoBlob });
-        }
+        // 速度 OCR 用的 3 倍高清图不在这里串行渲染：整本快路径会在识别请求发出后的
+        // 空档里并行准备（见 startTempoLookup）；逐页兜底路径仍在下面逐页准备。
         if (!hasStaves) noStaffPages.add(number);
       }
       const staffPages = prepared.filter((item) => item.hasStaves && item.blob);
       if (staffPages.length) {
         setRecognizeProgress(0, staffPages.length, `正在一次送出 ${staffPages.length} 页（省去每页的引擎启动）…`);
-        const batchResults = await recognizePagesInBatch(staffPages.map((item) => item.blob), {
+        // 先把批量识别请求发出去（不等它返回），再趁「等 Audiveris」的空档并行准备速度 OCR：
+        // 识别一整本要几十秒，客户端原本完全空转，速度 OCR 却要等识别结束后再串行跑十几秒。
+        const batchResultsPromise = recognizePagesInBatch(staffPages.map((item) => item.blob), {
           superseded,
           onProgress: ({ done, total, label }) => {
             setRecognizeProgress(done, Math.max(total, 1), label || `已完成 ${done} / ${total} 页`);
           },
         });
+        const tempoLookup = startTempoLookup(staffPages, fileToken, superseded);
+        const batchResults = await batchResultsPromise;
         if (superseded()) return;
         if (batchResults.length === staffPages.length) {
           const byPage = new Map(staffPages.map((item, index) => [item.number, batchResults[index]]));
@@ -2740,6 +2826,7 @@ async function recognizeAllPages() {
             });
           }
           skippedNoStaff = [...noStaffPages].sort((a, b) => a - b);
+          tempoPrefetch = tempoLookup;
           batchHandled = true;
         }
       }
@@ -2789,8 +2876,9 @@ async function recognizeAllPages() {
     }
     if (superseded()) return;
     // —— 速度 OCR：Audiveris 的速度记号实测漏读/误读严重（Hall 曲 5 处只给 1 处、还读成 66），
-    //    而谱面速度快慢数字本身用几何 OCR 能全部读对。这里在合并前补一次。
-    const tempoOcrApplied = await applyTempoOcr(tempoSources, entries, totalPages, superseded);
+    //    而谱面速度快慢数字本身用几何 OCR 能全部读对。这里在合并前补一次；
+    //    整本快路径的速度查询已在识别期间并行跑（tempoPrefetch），这里只是收结果。
+    const tempoOcrApplied = await applyTempoOcr(tempoSources, entries, totalPages, superseded, tempoPrefetch);
     if (superseded()) return;
     const merged = mergePageScores(entries.map((entry) => (entry ? entry.scoreInfo : null)), new Set(skippedNoStaff));
     if (tempoOcrApplied.length) {
