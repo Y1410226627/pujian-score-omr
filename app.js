@@ -3092,14 +3092,41 @@ const EXPORT_RENDER = {
   minSecondsPerChunk: 15,   // 每块至少这么长；太碎反而更慢（每块都有固定开销）
   maxChunks: 8,             // 实测 8 块以内继续变快，再多收益趋零（179 秒长曲实测）
   overlapSeconds: 2.4,      // 前后多渲：混响 1.9 秒 + 压限器 release 0.24 秒，留余量
-  maxLookback: 10,          // 往前看超过这么远就不值得分块了（长音太多）
+  // 往前看超过这么远就不值得分块了（长音太多）：12 秒能覆盖钹 8.5 / 碰铃 6.3 秒这类
+  // 常见打击乐长尾；小锣 19.5、大锣 27.3 秒则退回整块渲染（宁慢勿错）。
+  maxLookback: 12,
 };
 
-/** 一份计划里最长的音符时长（秒）。 */
+/**
+ * 一个音「实际会响多久」（秒）。
+ *
+ * 为什么不能只看时值：碰铃/木鱼/钹/锣这类 oneShot 音色是整段采样自然衰减，
+ * playSampledTone 里**不**按时值调用 stop（一个 0.08 秒的锣音符实际会响 19–27 秒）。
+ * 分块渲染时如果只按「时值 + 混响」算 lookback，块边界附近的锣声尾音会整段丢失
+ * （实测分块 vs 整块 RMS 差 -9.8 dB，等于完全不同的音频）。
+ */
+function audibleSecondsForNote(note) {
+  let seconds = note.durationSeconds;
+  if (isSampledTimbre(note.timbre)) {
+    const bank = state.sampleBanks.get(note.timbre);
+    if (bank && bank.oneShot) {
+      for (const layer of bank.layers || []) {
+        for (const sample of layer.samples || []) {
+          const clip = sample.buffer ? sample.buffer.duration : 0;
+          if (clip > seconds) seconds = clip;
+        }
+      }
+    }
+  }
+  return seconds;
+}
+
+/** 一份计划里最长的「可听时长」（秒）。 */
 function longestNoteSeconds(plan) {
   let longest = 0;
   for (const note of plan.notes) {
-    if (note.durationSeconds > longest) longest = note.durationSeconds;
+    const seconds = audibleSecondsForNote(note);
+    if (seconds > longest) longest = seconds;
   }
   return longest;
 }
