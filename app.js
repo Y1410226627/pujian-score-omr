@@ -88,6 +88,13 @@ const state = {
   partOctaves: new Map(),
   // 播放的滚动调度定时器（见 playMelody 里的说明）与软限幅曲线缓存。
   scheduleTimer: null, softClipCurve: null,
+  // 诊断用：滚动调度的进度/提前量、最近一次导出的分阶段耗时（性能测试与用户日志读取）。
+  playbackStats: null, lastRenderStats: null, isExporting: false,
+  // 播放看门狗（真机「放到一半没声」的自愈与诊断，见 playMelody）
+  playbackWatch: null, playbackWatchTimer: null,
+  // 「声部列表」缓存：partBus/panForPart 在播放和分块导出时会反复要它，
+  // 几十个声部 + 几万音符时不能每次都重扫全部音符（旧实现是 O(声部数 × 音符数)）。
+  partsCache: null, partsCacheNotes: -1, partsCacheSource: null,
   // 采样音源：清单、已加载的样本表、正在加载的 Promise、加载顺序（用于内存上限 LRU）。
   sampleManifest: null, sampleBanks: new Map(), sampleLoading: new Map(), sampleOrder: [],
   // 每次真正解码音源都记一条（测试用来确认「重复声部只加载一次」、排查用户机器上到底加载了什么）
@@ -1679,6 +1686,11 @@ function partSortKey(key) {
 
 /** 收集当前乐谱里的声部（每个 part 一行），返回 [{ key, name, count, piano }]。 */
 function collectParts() {
+  // 缓存：播放（声部总线/声像）和分块导出会反复要声部列表；几十声部 × 几万音符时
+  // 旧实现每次重扫全部音符 → O(声部数 × 音符数)，是「几十声部就卡死」的直接原因之一。
+  if (state.partsCache && state.partsCacheSource === state.notes && state.partsCacheNotes === state.notes.length) {
+    return state.partsCache;
+  }
   const groups = new Map();
   for (const note of state.notes) {
     const key = voiceIdentity(note);
@@ -1697,6 +1709,9 @@ function collectParts() {
     const [bHead, bNum] = partSortKey(b.key);
     return aHead.localeCompare(bHead) || aNum - bNum;
   });
+  state.partsCache = parts;
+  state.partsCacheNotes = state.notes.length;
+  state.partsCacheSource = state.notes;
   return parts;
 }
 
@@ -1797,6 +1812,7 @@ function duplicatePart(sourceKey, options = {}) {
   // 不用 push(...copies)：上千个参数展开有上限风险，也更容易触发大数组重排
   for (const copy of copies) state.notes.push(copy);
   state.partNames.set(newId, name);
+  state.partsCache = null;
   if (options.timbre) state.partTimbres.set(newId, options.timbre);
   if (state.selectedParts instanceof Set) state.selectedParts.add(newId);
   let mark = performance.now();
@@ -1983,6 +1999,7 @@ function updatePartControls(reset = false) {
 /** 改名：改一次，整份乐谱里该声部的所有音符一起更新（含 MIDI 导出用的 partName）。 */
 function applyPartName(key, name) {
   state.partNames.set(key, name);
+  state.partsCache = null;
   for (const note of state.notes) {
     if (voiceIdentity(note) === key) note.partName = name;
   }
@@ -2057,8 +2074,9 @@ function playbackTimeline() {
 function updatePlaybackReady() {
   const activeNotes = getPlaybackNotes();
   els.noteCount.innerHTML = activeNotes.length + " <small>个</small>";
-  els.playButton.disabled = activeNotes.length === 0 || activeNotes.some((note) => !Number.isFinite(note.midi)) || state.isPlaying;
-  els.midiButton.disabled = activeNotes.length === 0;
+  els.playButton.disabled = activeNotes.length === 0 || activeNotes.some((note) => !Number.isFinite(note.midi))
+    || state.isPlaying || state.isExporting;
+  els.midiButton.disabled = activeNotes.length === 0 || state.isExporting;
   if (els.audioButton) els.audioButton.disabled = activeNotes.length === 0 || state.isPlaying;
   els.midiButton.title = selectionRange() ? "下载所选片段的 MIDI 文件" : "下载 MIDI 文件";
   // 播放控件文案与选区状态保持一致：没有选区时就是「播放全曲」，选了片段就只播那一段。
@@ -3369,7 +3387,13 @@ const AUDIO_EXPORT_KBPS = 128;
  */
 const EXPORT_RENDER = {
   minSecondsPerChunk: 15,   // 每块至少这么长；太碎反而更慢（每块都有固定开销）
-  maxChunks: 12,            // 长曲实测：688 秒 8 块 7.45 s → 12 块 5.51 s；短曲被 minSecondsPerChunk 卡住不变
+  // 长曲的目标块长。为什么不是块越大越好：几十个声部同时发声时，块越长单位时间渲染越慢
+  // （实测同一段 288 秒音频：24 秒的块渲染 18.7 秒，48 秒的块要 44.8 秒），
+  // 而一次能并行渲染的块数受 CPU 核数限制 → 长曲切成很多短块、分「波」并行。
+  // 21 分钟 / 40 声部实测：12 块（每块 105 秒）264 秒 → 按 20 秒切块后约 1/3 的时间。
+  targetChunkSeconds: 20,
+  maxChunks: 96,            // 块数上限（21 分钟按 20 秒切 = 63 块）
+  maxParallel: 16,          // 一波最多同时渲染几块（实际按 CPU 核数-1 收敛；超过核数只会互相抢）
   overlapSeconds: 2.4,      // 前后多渲：混响 1.9 秒 + 压限器 release 0.24 秒，留余量
   // 往前看超过这么远就不值得分块了（长音太多）：12 秒能覆盖钹 8.5 / 碰铃 6.3 秒这类
   // 常见打击乐长尾；小锣 19.5、大锣 27.3 秒则退回整块渲染（宁慢勿错）。
@@ -3417,11 +3441,12 @@ function decideExportChunks(plan) {
   const lookback = longest + REVERB.seconds + 0.5;
   // 有超长音时，每块都要多渲很久，分块收益被吃掉，直接整块
   if (lookback > EXPORT_RENDER.maxLookback) return 1;
-  const cores = Math.max(1, Number(navigator.hardwareConcurrency) || 4);
-  let count = Math.min(EXPORT_RENDER.maxChunks, Math.max(2, cores - 1));
-  while (count > 2 && totalSeconds / count < EXPORT_RENDER.minSecondsPerChunk) count -= 1;
-  if (count < 2 || totalSeconds < EXPORT_RENDER.minSecondsPerChunk * 2) return 1;
-  return count;
+  // maxChunks=1 是测试用的「强制整块渲染」开关（分块/整块保真比对）
+  if (EXPORT_RENDER.maxChunks <= 1) return 1;
+  if (totalSeconds < EXPORT_RENDER.minSecondsPerChunk * 2) return 1;
+  const target = Math.max(EXPORT_RENDER.minSecondsPerChunk, EXPORT_RENDER.targetChunkSeconds);
+  const needed = Math.ceil(totalSeconds / target);
+  return Math.max(2, Math.min(EXPORT_RENDER.maxChunks, needed));
 }
 
 /** 保存渲染期间会被改写的全局音频状态。 */
@@ -3453,16 +3478,22 @@ function restoreAudioState(saved) {
 }
 
 /**
- * 在某个离线上下文里，把计划中「落在 [windowFrom, windowTo) 且会响到这段」的音符接上。
+ * 把主线程让出去一小段（让浏览器有机会处理点击/绘制/进度条）。
  *
- * @param {OfflineAudioContext} offline
- * @param {object} plan buildAudioPlan 的结果
- * @param {number} windowFrom 窗口起点（秒，计划时间轴）
- * @param {number} windowTo 窗口终点（秒）
- * @param {{sharedImpulse: AudioBuffer, shiftSeconds: number}} options
- *        sharedImpulse：所有块共用的混响脉冲；shiftSeconds：窗口起点在上下文里的时间偏移
+ * 用 MessageChannel 而不是 setTimeout(0)：不受「后台标签页定时器 1 秒节流」影响，
+ * 一个来回通常几十微秒，几十次让出也感觉不到。
  */
-function schedulePlanWindow(offline, plan, windowFrom, windowTo, options) {
+const yieldChannel = typeof MessageChannel === "function" ? new MessageChannel() : null;
+function yieldToMain() {
+  if (!yieldChannel) return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => {
+    yieldChannel.port1.onmessage = () => resolve();
+    yieldChannel.port2.postMessage(0);
+  });
+}
+
+/** 把全局音频状态切到某个离线上下文（每次分块建图都要重来一遍）。 */
+function prepareWindowAudioState(offline, options) {
   state.audio = offline;
   state.master = null;
   // 直接塞入共用脉冲：masterChain 建链时会用它，保证每块混响完全一致
@@ -3473,6 +3504,20 @@ function schedulePlanWindow(offline, plan, windowFrom, windowTo, options) {
   state.partBuses = new Map();
   state.partPanners = new Map();
   state.sources = new Set();
+}
+
+/**
+ * 在某个离线上下文里，把计划中「落在 [windowFrom, windowTo) 且会响到这段」的音符接上。
+ *
+ * @param {OfflineAudioContext} offline
+ * @param {object} plan buildAudioPlan 的结果
+ * @param {number} windowFrom 窗口起点（秒，计划时间轴）
+ * @param {number} windowTo 窗口终点（秒）
+ * @param {{sharedImpulse: AudioBuffer, shiftSeconds: number}} options
+ *        sharedImpulse：所有块共用的混响脉冲；shiftSeconds：窗口起点在上下文里的时间偏移
+ */
+function schedulePlanWindow(offline, plan, windowFrom, windowTo, options) {
+  prepareWindowAudioState(offline, options);
   const shift = Number(options.shiftSeconds) || 0;
   const tail = REVERB.seconds + 0.05;
   let scheduled = 0;
@@ -3495,6 +3540,41 @@ function schedulePlanWindow(offline, plan, windowFrom, windowTo, options) {
 }
 
 /**
+ * schedulePlanWindow 的「分片」版本：每拼 budgetMs 毫秒就让出主线程一次。
+ *
+ * 为什么需要：极端大谱（40 声部 × 21 分钟 / 7 万音符）导出时，12 块音频图加起来
+ * 要同步建 3.7 秒，点一下按钮整页就冻住（用户的原话是「按钮点都点不动」）。
+ * 分片之后一次最多冻几毫秒，进度条也能动起来。
+ */
+async function schedulePlanWindowSliced(offline, plan, windowFrom, windowTo, options, { budgetMs = 8 } = {}) {
+  prepareWindowAudioState(offline, options);
+  const shift = Number(options.shiftSeconds) || 0;
+  const tail = REVERB.seconds + 0.05;
+  let scheduled = 0;
+  let sliceStart = performance.now();
+  for (const note of plan.notes) {
+    const start = note.startSeconds;
+    if (start >= windowTo) break;                                       // 计划按时间升序
+    if (start + note.durationSeconds + tail <= windowFrom) continue;    // 含混响尾也早结束
+    const at = start + shift + 0.02;
+    if (at < 0) continue;
+    const destination = partBus(note.partKey);
+    humanOverride = note.human || null;
+    try {
+      playTone(note.midi, at, note.durationSeconds * 0.99, note.peak, destination, note.partKey);
+    } finally {
+      humanOverride = null;
+    }
+    scheduled += 1;
+    if (performance.now() - sliceStart >= budgetMs) {
+      await yieldToMain();
+      sliceStart = performance.now();
+    }
+  }
+  return scheduled;
+}
+
+/**
  * 离线渲染整曲（或选中片段）为 AudioBuffer。
  *
  * 复用实时播放用的同一套发声函数（playTone / partBus / masterChain），
@@ -3502,6 +3582,9 @@ function schedulePlanWindow(offline, plan, windowFrom, windowTo, options) {
  * 渲染分块并行，见 EXPORT_RENDER 的说明。
  */
 async function renderPlanToBuffer(plan, { onProgress } = {}) {
+  const perfStart = performance.now();
+  const renderStats = { chunkCount: 0, waves: 0, prepMs: 0, buildMs: 0, renderMs: 0, mergeMs: 0, totalFrames: 0 };
+  state.lastRenderStats = renderStats;
   const rate = AUDIO_EXPORT_RATE;
   const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   if (!OfflineContext) throw new Error("当前浏览器不支持离线音频渲染。");
@@ -3516,12 +3599,23 @@ async function renderPlanToBuffer(plan, { onProgress } = {}) {
     const ruler = new OfflineContext(1, 1, rate);
     const sharedImpulse = makeReverbImpulse(ruler, REVERB.seconds, REVERB.decay, state.exportReverbSeed, false);
     const longest = longestNoteSeconds(plan);
+    renderStats.chunkCount = chunkCount;
+    renderStats.totalFrames = totalFrames;
+    renderStats.prepMs = Math.round(performance.now() - perfStart);
+    let phaseMark = performance.now();
 
     if (chunkCount <= 1) {
       const offline = new OfflineContext(2, totalFrames, rate);
-      schedulePlanWindow(offline, plan, 0, plan.totalSeconds, { sharedImpulse, shiftSeconds: 0 });
+      await schedulePlanWindowSliced(offline, plan, 0, plan.totalSeconds, { sharedImpulse, shiftSeconds: 0 });
+      // 建图期间全局音频状态被临时改成离线上下文：开始渲染前先还给实时上下文。
+      restoreAudioState(saved);
+      renderStats.buildMs = Math.round(performance.now() - phaseMark);
+      phaseMark = performance.now();
       if (onProgress) onProgress(0.35, "正在渲染音频…");
-      return await offline.startRendering();
+      const buffer = await offline.startRendering();
+      renderStats.renderMs = Math.round(performance.now() - phaseMark);
+      renderStats.totalMs = Math.round(performance.now() - perfStart);
+      return buffer;
     }
 
     // 每块的帧范围按比例切，保证各块帧数之和精确等于 totalFrames
@@ -3530,6 +3624,7 @@ async function renderPlanToBuffer(plan, { onProgress } = {}) {
       const fromFrame = Math.round((totalFrames * index) / chunkCount);
       const toFrame = Math.round((totalFrames * (index + 1)) / chunkCount);
       ranges.push({
+        fromFrame,
         fromSeconds: fromFrame / rate,
         toSeconds: toFrame / rate,
         frames: toFrame - fromFrame,
@@ -3537,48 +3632,80 @@ async function renderPlanToBuffer(plan, { onProgress } = {}) {
     }
     const lookback = longest + REVERB.seconds + 0.5;
     const overlap = EXPORT_RENDER.overlapSeconds;
+    const cores = Math.max(1, Number(navigator.hardwareConcurrency) || 4);
+    const waveSize = Math.max(1, Math.min(EXPORT_RENDER.maxParallel, cores - 1, chunkCount));
+    // 实测：15 块 20 秒的音频同时渲染 13.9 秒，分两波反而要 21 秒——尽量一波并行完。
+    renderStats.waves = Math.ceil(chunkCount / waveSize);
 
-    // 阶段一：把所有块的音频图建好（同步）。必须建完再渲染——
-    // 建图会改写全局音频状态，边建边渲染会互相踩。
-    const built = ranges.map((range, index) => {
-      const windowFrom = Math.max(0, range.fromSeconds - Math.max(lookback, overlap));
-      const windowTo = Math.min(plan.totalSeconds, range.toSeconds + overlap);
-      const windowFrames = Math.max(range.frames + 2, Math.ceil((windowTo - windowFrom) * rate) + 2);
-      const offline = new OfflineContext(2, windowFrames, rate);
-      schedulePlanWindow(offline, plan, windowFrom, windowTo, {
-        sharedImpulse,
-        shiftSeconds: -windowFrom,
-      });
-      return {
-        offline,
-        index,
-        takeStart: Math.max(0, Math.round((range.fromSeconds - windowFrom) * rate)),
-        frames: range.frames,
-      };
-    });
-
-    if (onProgress) onProgress(0.25, `已排好 ${chunkCount} 段，正在并行渲染…`);
-    // 阶段二：并行渲染（每个 startRendering 在不同线程上跑）
-    const rendered = await Promise.all(built.map((job) => job.offline.startRendering()));
-
-    // 阶段三：拼接
-    if (onProgress) onProgress(0.85, "正在拼接音频…");
+    // 输出缓冲一次分配好（21 分钟约 420 MB，就是最终音频本身）。
+    // 分「波」渲染 + 每波渲完立刻拼进输出并释放：峰值内存 ≈ 输出 + 一波的块，
+    // 而不是旧写法的「输出 + 全部块缓冲区」。
     const output = ruler.createBuffer(2, totalFrames, rate);
     const left = output.getChannelData(0);
     const right = output.getChannelData(1);
-    let writeAt = 0;
-    for (let index = 0; index < built.length; index += 1) {
-      const job = built[index];
-      const buffer = rendered[index];
-      const available = Math.max(0, Math.min(job.frames, buffer.length - job.takeStart));
-      if (available > 0) {
-        left.set(buffer.getChannelData(0).subarray(job.takeStart, job.takeStart + available), writeAt);
-        right.set(buffer.getChannelData(1).subarray(job.takeStart, job.takeStart + available), writeAt);
+    let scheduledTotal = 0;
+    let buildSpent = 0;
+    let renderSpent = 0;
+
+    for (let waveStart = 0; waveStart < ranges.length; waveStart += waveSize) {
+      const wave = ranges.slice(waveStart, waveStart + waveSize);
+      const waveIndex = Math.floor(waveStart / waveSize) + 1;
+      // 1) 分片建这一波的音频图：每 8 毫秒让出主线程，点导出后界面不会冻住。
+      const jobs = [];
+      const buildT0 = performance.now();
+      for (const range of wave) {
+        const windowFrom = Math.max(0, range.fromSeconds - Math.max(lookback, overlap));
+        const windowTo = Math.min(plan.totalSeconds, range.toSeconds + overlap);
+        const windowFrames = Math.max(range.frames + 2, Math.ceil((windowTo - windowFrom) * rate) + 2);
+        const offline = new OfflineContext(2, windowFrames, rate);
+        const scheduled = await schedulePlanWindowSliced(offline, plan, windowFrom, windowTo, {
+          sharedImpulse,
+          shiftSeconds: -windowFrom,
+        }, { budgetMs: 8 });
+        scheduledTotal += scheduled;
+        jobs.push({
+          offline,
+          takeStart: Math.max(0, Math.round((range.fromSeconds - windowFrom) * rate)),
+          frames: range.frames,
+          writeAt: range.fromFrame,
+        });
+        await yieldToMain();
       }
-      writeAt += job.frames;
-      // 拼完这一块就释放它：长曲 8 块 × 几十 MB，早释放能明显压低峰值内存（少触发大 GC）。
-      rendered[index] = null;
+      restoreAudioState(saved);
+      buildSpent += performance.now() - buildT0;
+      if (onProgress) {
+        onProgress(0.05 + 0.75 * (waveStart / ranges.length),
+          `渲染第 ${waveIndex}/${renderStats.waves} 组（共 ${ranges.length} 段）…`);
+      }
+      // 2) 这一波并行渲染（每个 startRendering 在不同线程上跑）
+      const renderT0 = performance.now();
+      const buffers = await Promise.all(jobs.map((job) => job.offline.startRendering().then((buffer) => {
+        job.offline = null;             // 结果一到手就释放离线上下文，压低峰值内存
+        return buffer;
+      })));
+      renderSpent += performance.now() - renderT0;
+      // 3) 立刻拼进输出缓冲，然后释放这一波
+      for (let index = 0; index < jobs.length; index += 1) {
+        const job = jobs[index];
+        const buffer = buffers[index];
+        const available = Math.max(0, Math.min(job.frames, buffer.length - job.takeStart));
+        if (available > 0) {
+          left.set(buffer.getChannelData(0).subarray(job.takeStart, job.takeStart + available), job.writeAt);
+          right.set(buffer.getChannelData(1).subarray(job.takeStart, job.takeStart + available), job.writeAt);
+        }
+        buffers[index] = null;
+      }
+      if (onProgress) {
+        onProgress(0.05 + 0.75 * ((waveStart + wave.length) / ranges.length),
+          `已渲染 ${waveStart + wave.length}/${ranges.length} 段音频…`);
+      }
+      await yieldToMain();
     }
+    renderStats.scheduled = scheduledTotal;
+    renderStats.buildMs = Math.round(buildSpent);
+    renderStats.renderMs = Math.round(renderSpent);
+    renderStats.mergeMs = 0;           // 边渲边拼，没有单独的拼接阶段
+    renderStats.totalMs = Math.round(performance.now() - perfStart);
     return output;
   } finally {
     restoreAudioState(saved);
@@ -3774,6 +3901,10 @@ function encodeWav(left, right, sampleRate = AUDIO_EXPORT_RATE) {
  *   片段 → 音符选区（点序号 / Shift+点）
  */
 async function exportAudio() {
+  if (state.isExporting) {
+    showToast("正在导出音频，请稍候…");
+    return;
+  }
   const exportStartedAt = performance.now();
   const playbackNotes = getPlaybackNotes();
   if (!playbackNotes.length) {
@@ -3830,7 +3961,12 @@ async function exportAudio() {
     : `准备导出整曲（${plan.notes.length} 个音，约 ${totalText}）`;
   els.audioExportLabel.textContent = "正在渲染…";
   els.audioButton.disabled = true;
-  showToast(message + "，请稍候…");
+  showToast(message + (plan.totalSeconds > 240 || (plan.partKeys && plan.partKeys.length > 16)
+    ? "，长曲/多声部需要等一会儿（进度见上方进度条，界面可以继续滚动）。" : "，请稍候…"));
+  // 导出期间禁用「试听 / MIDI」：建图和渲染会把全局音频状态切到离线上下文，
+  // 这期间点播放会没声/串音（极端大谱导出要几十秒，用户很可能等不及去点）。
+  state.isExporting = true;
+  updatePlaybackReady();
   try {
     // 采样音源没准备好就渲染，那些声部会退回合成音色（和试听不一致）。
     // 这里把用到的采样音源先都加载完。
@@ -3865,6 +4001,8 @@ let exportMark = performance.now();
       },
     });
     exportStats.renderMs = Math.round(performance.now() - exportMark);
+    exportStats.chunks = state.lastRenderStats ? state.lastRenderStats.chunkCount : null;
+    exportStats.waves = state.lastRenderStats ? state.lastRenderStats.waves : null;
     exportMark = performance.now();
     // 峰值归一化改成原地做：不再整段复制两份数组（长曲能省几百 MB 内存、少一次大 GC）。
     const normalized = normalizeBufferInPlace(buffer, 0.89);
@@ -3927,9 +4065,11 @@ let exportMark = performance.now();
     console.error(error);
     showToast("导出音频失败：" + ((error && error.message) || "未知错误"));
   } finally {
+    state.isExporting = false;
     els.audioExportLabel.textContent = "↓ MP3";
     els.audioButton.disabled = false;
     els.recognizeProgress.hidden = true;
+    updatePlaybackReady();
   }
 }
 
@@ -5266,7 +5406,39 @@ function buildPlaybackTimeline(offset) {
   };
   return { secondsAtBeat, dynamicsAtBeat };
 }
+/**
+ * 结束播放看门狗，并把这次播放的「健康度」上报到本机性能日志。
+ *
+ * 为什么值得：用户机器上的「放到一半没声」我们复现不了，但日志能告诉我们
+ * 到底发生了多少次「调度掉队」(maxTickGap 很大) 或「音频上下文被挂起」(suspended>0)。
+ */
+function stopPlaybackWatch(reason) {
+  if (state.playbackWatchTimer) {
+    clearInterval(state.playbackWatchTimer);
+    state.playbackWatchTimer = null;
+  }
+  const watch = state.playbackWatch;
+  if (!watch) return;
+  state.playbackWatch = null;
+  reportUiPerf("playback", {
+    reason,
+    parts: state.partsCache ? state.partsCache.length : null,
+    notes: state.notes.length,
+    durationSeconds: Math.round((performance.now() - watch.startedAt) / 1000),
+    maxTickGapMs: Math.round(watch.maxTickGap),
+    starved: watch.starved,
+    suspended: watch.suspended,
+    audioState: state.audio ? state.audio.state : null,
+    sampleRate: state.audio ? state.audio.sampleRate : null,
+  });
+}
+
 async function playMelody() {
+  // 导出音频期间全局音频状态会被临时切到离线上下文（建音频图用），这时点播放会没声/串音。
+  if (state.isExporting) {
+    showToast("正在导出音频，等这次导出完成再播放。");
+    return;
+  }
   const { notes: playbackNotes, offset, finishBeat } = playbackTimeline();
   if (!playbackNotes.length || state.isPlaying) return;
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -5300,6 +5472,8 @@ async function playMelody() {
   }
   const events = [...eventMap.values()].sort((a, b) => a.startBeat - b.startBeat);
   const timeline = buildPlaybackTimeline(offset);
+  // 诊断：滚动调度进度（调试钩子/性能测试读；每窗口两次赋值，开销可忽略）。
+  state.playbackStats = { events: events.length, notes: playbackNotes.length, cursor: 0, windows: 0, lastAhead: 0, startedAt: performance.now() };
   const headStart = state.audio.currentTime + SCHEDULER.headStartSeconds;
   state.isPlaying = true;
   updatePlaybackControls();
@@ -5320,6 +5494,12 @@ async function playMelody() {
   };
   const scheduleWindow = () => {
     if (!state.isPlaying || !state.audio) return;
+    if (state.playbackWatch) {
+      const nowMs = performance.now();
+      state.playbackWatch.maxTickGap = Math.max(state.playbackWatch.maxTickGap,
+        nowMs - state.playbackWatch.lastTickAt);
+      state.playbackWatch.lastTickAt = nowMs;
+    }
     const horizon = state.audio.currentTime + SCHEDULER.aheadSeconds;
     let lastHighlightDelay = -1;
     while (cursor < events.length) {
@@ -5346,6 +5526,11 @@ async function playMelody() {
       pendingHighlights.push(...event.notes.map((note) => note.id));
       lastHighlightDelay = Math.max(0, (at - state.audio.currentTime) * 1000);
     }
+    if (state.playbackStats) {
+      state.playbackStats.cursor = cursor;
+      state.playbackStats.windows += 1;
+      state.playbackStats.lastAhead = Math.max(0, horizon - state.audio.currentTime);
+    }
     // 本轮调度出的音一起高亮：只建 1 个定时器（而不是每事件 1 个）。
     if (pendingHighlights.length && lastHighlightDelay >= 0) {
       state.timers.push(setTimeout(flushHighlights, lastHighlightDelay));
@@ -5360,9 +5545,38 @@ async function playMelody() {
     state.scheduleTimer = setInterval(scheduleWindow, SCHEDULER.tickMs);
   }
 
+  // ===== 播放看门狗（真机自愈，性能关键但不占什么资源）=====
+  // 用户反馈「几十个声部时放到一半直接没声」。常见原因有两个，而且都不是「音符没了」：
+  //   1) Windows 上系统音频设备变化/休眠后，AudioContext 会变成 suspended/interrupted，
+  //      但界面还在播、音符高亮也在走 —— 听感就是突然没声；
+  //   2) 主线程被别的重活（比如刚导入的几万行音符列表、导出）卡住超过 2 秒，
+  //      滚动调度掉队，之后没有新音符被排进去。
+  // 这里每 700 毫秒自检一次：上下文没在跑就 resume；音频图里一个活跃源都没有就补一轮调度。
+  // 同时把掉队/挂起的次数记进本机性能日志（event=playback），用户下次反馈就有证据。
+  const watch = {
+    startedAt: performance.now(), lastTickAt: performance.now(),
+    maxTickGap: 0, starved: 0, suspended: 0,
+  };
+  state.playbackWatch = watch;
+  if (state.playbackWatchTimer) clearInterval(state.playbackWatchTimer);
+  state.playbackWatchTimer = setInterval(() => {
+    if (!state.isPlaying || !state.audio) return;
+    if (state.audio.state && state.audio.state !== "running") {
+      watch.suspended += 1;
+      state.audio.resume().catch(() => {});
+    }
+    // 还在播、但音频图里一个活跃源都没有：说明调度掉队了，立刻补一轮（听感上能救回来）。
+    if (state.sources.size === 0 && cursor < events.length) {
+      watch.starved += 1;
+      try { scheduleWindow(); } catch (error) { console.info("播放调度补轮失败", error); }
+      if (watch.starved === 2) showToast("检测到音频短暂中断，已自动恢复。");
+    }
+  }, 700);
+
   state.timers.push(setTimeout(() => {
     state.isPlaying = false;
     if (state.scheduleTimer) { clearInterval(state.scheduleTimer); state.scheduleTimer = null; }
+    stopPlaybackWatch("end");
     highlightEvent(null);
     updatePlaybackControls();
     if (state.loop && getPlaybackNotes().length) playMelody().catch((error) => console.error(error));
@@ -5394,6 +5608,7 @@ function highlightEvent(noteIds) {
   state.highlightedIds = next;
 }
 function stopPlayback() {
+  stopPlaybackWatch("stop");
   highlightEvent(null);
   for (const timer of state.timers) clearTimeout(timer);
   state.timers = [];
@@ -5570,7 +5785,7 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
   encodeMp3WithWorker, normalizeBufferInPlace, scheduleTimbrePreload,
   whenNoteRowsIdle, reportUiPerf, ensurePlaybackTimbres, midisForTimbre,
-  preloadTimbreBank, setPartTimbre,
+  preloadTimbreBank, setPartTimbre, exportAudio,
   // 音源缓存快照：测试用来确认「换音色后已提前加载好」「重复声部只加载一次」「切回来 0 重载」。
   sampleSnapshot: () => ({
     loaded: [...state.sampleBanks.keys()],
