@@ -137,7 +137,19 @@ const HARDWARE = {
   memoryGb: Math.max(2, Number(navigator.deviceMemory) || 8),
   cores: Math.max(1, Number(navigator.hardwareConcurrency) || 4),
 };
-const BIG_MEMORY = HARDWARE.memoryGb >= 16;
+// 有些浏览器（Chrome）会故意把 deviceMemory 报成 8（封顶），32GB 机器也会被当成小内存；
+// 这类浏览器可以用 URL 加 ?bigmem=1，或在控制台执行 localStorage.setItem("pujian.bigMemory","1")，
+// 手动开启「大内存模式」（83 音源全预加载 / 全部真实音色 / 4 万行列表）。
+function bigMemoryOverride() {
+  try {
+    if (new URLSearchParams(window.location.search).get("bigmem") === "1") return true;
+    if (window.localStorage.getItem("pujian.bigMemory") === "1") return true;
+  } catch {
+    // localStorage 不可用（隐私模式等）时忽略
+  }
+  return false;
+}
+const BIG_MEMORY = bigMemoryOverride() || HARDWARE.memoryGb >= 16;
 /** 后台全量预加载音源开关：大内存机器默认开（可用 localStorage 关掉）。 */
 function fullBankPreloadEnabled() {
   try {
