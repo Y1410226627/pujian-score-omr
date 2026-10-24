@@ -144,8 +144,16 @@ try {
     let last = performance.now();
     let running = true;
     const tick = () => { const now = performance.now(); frames.push(now - last); last = now; if (running) requestAnimationFrame(tick); };
-    requestAnimationFrame(tick);
+    const t0 = performance.now();
     document.querySelector("#playButton").click();
+    // 点播放后可能要先把真实音源加载完（现在不会先播合成音色再偷偷换掉），
+    // 所以先等 isPlaying 变 true 再量帧间隔。
+    while (performance.now() - t0 < 8000 && !window.__pujian.state.isPlaying) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const startWaitMs = Math.round(performance.now() - t0);
+    requestAnimationFrame(tick);
+    last = performance.now();
     await new Promise((resolve) => setTimeout(resolve, 400));
     running = false;
     await new Promise((resolve) => setTimeout(resolve, 60));
@@ -155,6 +163,7 @@ try {
     const sourcesSnapshot = state.sources.size;
     const timersSnapshot = state.timers.length;
     const info = {
+      startWaitMs,
       frames: frames.length,
       p50: Number(sorted[Math.floor(sorted.length * 0.5)]?.toFixed(1)),
       p95: Number(sorted[Math.floor(sorted.length * 0.95)]?.toFixed(1)),
@@ -169,6 +178,7 @@ try {
   });
   console.log("多声部播放：", JSON.stringify(smooth));
   assert.ok(smooth.isPlaying, "应正在播放");
+  assert.ok(smooth.startWaitMs < 5000, `点播放到真正开始应不超过 5 秒，实际 ${smooth.startWaitMs}ms`);
   assert.ok(smooth.p95 < 60, `帧间隔 p95 应低于 60ms，实际 ${smooth.p95}`);
   assert.ok(smooth.timers < 500, `定时器数量应有界，实际 ${smooth.timers}`);
 

@@ -90,6 +90,8 @@ const state = {
   scheduleTimer: null, softClipCurve: null,
   // 采样音源：清单、已加载的样本表、正在加载的 Promise、加载顺序（用于内存上限 LRU）。
   sampleManifest: null, sampleBanks: new Map(), sampleLoading: new Map(), sampleOrder: [],
+  // 每次真正解码音源都记一条（测试用来确认「重复声部只加载一次」、排查用户机器上到底加载了什么）
+  bankLoadLog: [],
   // 混响预热状态（见 prewarmReverb：避免第一次点播放时同步生成 1.9 秒脉冲而卡顿）
   reverbWarming: false,
   // 识别结果对应的是哪一页（简谱/单页识别=页码；整本识别或 MusicXML 导入=null）。
@@ -560,6 +562,10 @@ async function loadFile(file) {
       showToast(scoreInfo.notes.length
         ? `已读取 ${scoreInfo.notes.length} 个音符，请校对后试听。`
         : "已读取乐谱，但没有找到可演奏的带音高音符。");
+      // MusicXML 导入不走 commitScore，这里补上同样的收尾：清掉音色缓存 + 后台按需预加载音源。
+      // 否则导入符号乐谱后要等点播放才开始加载音源（用户感受到的又是「音源跟不上演奏」）。
+      clearTimbreCache();
+      scheduleTimbrePreload();
       return;
     }
     if (isPdf) await loadPdf(file, token);
@@ -2454,18 +2460,15 @@ function scheduleTimbrePreload() {
   timbrePreloadTimer = setTimeout(() => {
     timbrePreloadTimer = null;
     if (!state.notes.length) return;
-    const needed = new Set();
-    for (const note of state.notes) {
-      const key = voiceIdentity(note);
-      if (needed.has(key)) continue;
-      needed.add(key);
-      const timbre = timbreForPart(key);
-      if (!isSampledTimbre(timbre)) continue;
-      const loaded = state.sampleBanks.get(timbre);
-      if (loaded && loaded.ready) continue;
+    // 按「音色」去重而不是按声部：几个声部（包括复制出来的重复声部）用同一份音源时只加载一次。
+    const neededTimbres = new Set();
+    for (const part of collectParts()) {
+      const timbre = timbreForPart(part.key);
+      if (!isSampledTimbre(timbre) || neededTimbres.has(timbre)) continue;
+      neededTimbres.add(timbre);
       // 不 await：让它在后台慢慢加载，界面上只会看到状态栏的进度提示。
       // 只加载这份乐谱用到的音高（+粗网格），首次加载比整库加载快 3 倍以上。
-      ensureSampleBank(timbre, { midis: midisForTimbre(timbre) }).catch(() => {});
+      preloadTimbreBank(timbre, { reason: "score" });
     }
   }, 1500);
 }
@@ -3842,7 +3845,7 @@ async function exportAudio() {
     for (const [timbre, midis] of neededTimbres) {
       els.audioExportLabel.textContent = "载入音源…";
       try {
-        await ensureSampleBank(timbre, { midis });
+        await ensureSampleBank(timbre, { midis, reason: "export" });
       } catch (error) {
         console.info("音源加载失败，这段会用合成音色", timbre, error);
       }
@@ -4035,11 +4038,9 @@ function setPartTimbre(key, value) {
   if (value && TIMBRE_LABELS[value]) {
     state.partTimbres.set(String(key), value);
     if (isSampledTimbre(value)) {
-      // 只加载这个声部用到的音高（比整库加载快数倍；换回来时命中缓存是 0 毫秒）
-      const partMidis = new Set(state.notes
-        .filter((note) => voiceIdentity(note) === String(key) && Number.isFinite(note.midi))
-        .map((note) => Math.round(note.midi)));
-      ensureSampleBank(value, { midis: partMidis });
+      // 换完立刻在后台加载（不用等点播放）。音高按「全谱用这个音色的所有声部」的并集算：
+      // 有重复出现的声部（复制成新声部得到的）时也只会解码一份音源；已加载过就是 0 毫秒。
+      preloadTimbreBank(value, { reason: "switch-part" });
     }
   } else {
     state.partTimbres.delete(String(key));
@@ -4130,24 +4131,30 @@ function gainForDynamics(value) {
 
 /** 设置播放音色（只在下次播放生效；正在放的音符不重建，避免播到一半音色突变）。 */
 function setTimbre(value) {
-  clearTimbreCache();
   if (!TIMBRE_LABELS[value]) return;
-  if (isSampledTimbre(value)) {
-    // 清单是异步读的：刚打开页面就点也可能还没读到，所以不在这里下"没安装"的结论，
-    // 交给 ensureSampleBank 去读；真读不到再回滚并提示。
-    ensureSampleBank(value, { midis: midisForTimbre(value) }).then((bank) => {
-      if (bank) return;
-      showToast("还没安装真实音源：双击项目里的「安装真实音源.bat」，装好后刷新页面再选。");
-      if (state.timbre !== value) return;
-      state.timbre = SAMPLED_TIMBRES[value].fallback;
-      if (els.timbreSelect) els.timbreSelect.value = state.timbre;
-    });
-  }
+  // 必须先更新状态、再算「需要哪些音高」：音色解析（timbreForPart）依赖 state.timbre，
+  // 顺序反了会算出空集合，退化成整库加载——实测真实钢琴从 0.6 秒变成 1.3 秒，白等一倍。
+  clearTimbreCache();
   state.timbre = value;
   saveSettings({ timbre: value });
   if (els.timbreSelect) els.timbreSelect.value = value;
   if (els.timbreHint) els.timbreHint.textContent = "各声部可单独选";
-  showToast("全局音色已切换为「" + TIMBRE_LABELS[value] + "」，下次播放生效。");
+  const sampled = isSampledTimbre(value);
+  const cached = Boolean(state.sampleBanks.get(value) && state.sampleBanks.get(value).ready);
+  showToast("全局音色已切换为「" + TIMBRE_LABELS[value] + "」，"
+    + (sampled ? (cached ? "音源已就绪，" : "正在后台准备音源，") : "") + "下次播放生效。");
+  if (!sampled) { updateSampleStatus(); return; }
+  // 换完立刻在后台加载（不等用户点播放）；按全谱该音色的音高并集加载，重复声部只解码一遍。
+  preloadTimbreBank(value, { reason: "switch" }).then(({ bank, skipped }) => {
+    if (bank || skipped) return;
+    // 清单是异步读的：真读不到（没安装/加载失败）再回滚并提示，保证"总有声音"。
+    showToast("还没安装真实音源：双击项目里的「安装真实音源.bat」，装好后刷新页面再选。");
+    if (state.timbre !== value) return;
+    clearTimbreCache();
+    state.timbre = SAMPLED_TIMBRES[value].fallback;
+    if (els.timbreSelect) els.timbreSelect.value = state.timbre;
+    updateSampleStatus();
+  });
 }
 
 /**
@@ -4222,10 +4229,8 @@ function prepareAudio() {
     state.audio = null;
     return;
   }
-  // 当前选的是采样音色就顺手开始加载（后台进行，不影响界面）。
-  if (isSampledTimbre(state.timbre)) {
-    ensureSampleBank(state.timbre, { midis: midisForTimbre(state.timbre) }).catch(() => {});
-  }
+  // 采样音源不在这里加载：换文件时 state.notes 还是上一份乐谱的，按它预加载可能白读；
+  // 等 commitScore / MusicXML 导入完成后由 scheduleTimbrePreload 按新乐谱的音高加载。
   // 空闲时提前生成混响脉冲：否则第一次播放要同步算 1.9 秒的噪声，卡约 2 秒。
   prewarmReverb();
 }
@@ -4756,6 +4761,13 @@ function updateSampleStatus(message) {
     element.textContent = message;
     return;
   }
+  // 换音色后后台正在加载：明确告诉用户「正在准备」，不用傻等或反复点播放。
+  if (state.sampleLoading.size) {
+    const names = [...state.sampleLoading.keys()].map((name) => TIMBRE_LABELS[name] || name);
+    element.hidden = false;
+    element.textContent = `正在后台加载音源：${names.join("、")}…（加载完点播放直接是真实音色）`;
+    return;
+  }
   if (!state.sampleManifest) {
     element.hidden = true;
     return;
@@ -4848,16 +4860,45 @@ async function ensurePlaybackTimbres(onStatus) {
     const [timbre, midis] = pending[index];
     if (onStatus) onStatus(timbre, index, pending.length);
     try {
-      await ensureSampleBank(timbre, { midis });
+      await ensureSampleBank(timbre, { midis, reason: "play" });
     } catch (error) {
       console.info("音源加载失败，这几个声部会用合成音色", error);
     }
   }
 }
 
+/**
+ * 切换音色后立刻在后台把「这个音色在这份乐谱里要用到的采样」加载好。
+ *
+ * 为什么值得：采样音源第一次加载要解码几十~一百多个音频文件（0.3–1.5 秒）。
+ * 以前要等用户点播放、或播放前才串行等待，听感上就成了「音源加载跟不上演奏」。
+ * 现在一换音色（全局或逐声部）就开始加载，用户看一眼谱面再点播放时通常已经就绪（命中缓存 0 毫秒）。
+ *
+ * 「重复出现的声部只加载一次」：
+ *   · 音高按「全谱用这个音色的所有声部」的并集算（不是每个声部各加载一遍）；
+ *   · 同一音源的并发调用由 ensureSampleBank 的 sampleLoading 合并成同一个加载 Promise，
+ *     几个声部同时切到同一音源、或复制声部后马上播放，都不会解码第二遍。
+ *
+ * @param {string} timbre 音色名（采样音源）
+ * @param {{reason?: string, force?: boolean}} options
+ * @returns {Promise<{bank: object|null, skipped: boolean}>}
+ *          skipped=true 表示「还没有谱面，先不加载」（等 commitScore 或点播放时再按需加载）。
+ */
+function preloadTimbreBank(timbre, options = {}) {
+  if (!isSampledTimbre(timbre)) return Promise.resolve({ bank: null, skipped: true });
+  const loaded = state.sampleBanks.get(timbre);
+  if (loaded && loaded.ready) return Promise.resolve({ bank: loaded, skipped: false });
+  const midis = midisForTimbre(timbre);
+  // 没有谱面时先不加载：整库要 1 秒以上，而且用户这时点了播放也没有音符可弹。
+  if (!midis.size && !options.force) return Promise.resolve({ bank: null, skipped: true });
+  return ensureSampleBank(timbre, { midis, reason: options.reason || "switch" })
+    .then((bank) => ({ bank, skipped: false }));
+}
+
 function ensureSampleBank(name, options = {}) {
   if (!isSampledTimbre(name)) return Promise.resolve(null);
   const midis = options.midis instanceof Set ? options.midis : null;
+  const reason = options.reason || "play";
   if (state.sampleBanks.has(name)) return Promise.resolve(state.sampleBanks.get(name));
   if (state.sampleLoading.has(name)) return state.sampleLoading.get(name);
   const promise = (async () => {
@@ -4887,7 +4928,7 @@ function ensureSampleBank(name, options = {}) {
       // 淘汰交给 pruneSampleBanks：当前乐谱用到的音色不淘汰，其余按内存预算淘汰
       pruneSampleBanks(name);
       const loadMs = Math.round(performance.now() - loadedAt);
-      reportUiPerf("bank-load", {
+      const detail = {
         timbre: name,
         ms: loadMs,
         samples: bank.loadedMidis ? bank.loadedMidis.size : null,
@@ -4895,9 +4936,20 @@ function ensureSampleBank(name, options = {}) {
         neededMidis: midis ? midis.size : 0,
         bankMb: Math.round(sampleBankMb(bank)),
         cachedBanks: state.sampleBanks.size,
-      });
-      if (loadMs > 400) showToast(`${TIMBRE_LABELS[name] || name}已加载完成。`);
+        // 为什么要记：用户按「换音色 / 导入后预加载 / 点播放 / 导出」不同路径触发加载，
+        // 排查时能看出是哪一步在等音源（本机日志不联网、不收集乐谱内容）。
+        reason,
+      };
+      state.bankLoadLog.push({ ...detail, at: Date.now() });
+      if (state.bankLoadLog.length > 60) state.bankLoadLog.splice(0, state.bankLoadLog.length - 60);
+      reportUiPerf("bank-load", detail);
+      // 只有这个音源还在用（全局选中或某个声部选中）才提示，避免快速连换音色时提示刷屏。
+      const stillWanted = state.timbre === name
+        || [...state.partTimbres.values()].some((chosen) => chosen === name);
+      if (loadMs > 400 && stillWanted) showToast(`${TIMBRE_LABELS[name] || name}已加载完成。`);
     }
+    // 先撤掉「加载中」标记，下面的 updateSampleStatus 才会显示「已就绪」而不是还在加载。
+    state.sampleLoading.delete(name);
     updateSampleStatus();
     return bank;
   })().catch((error) => {
@@ -5157,7 +5209,7 @@ function playTone(midi, startAt, duration, peak = 0.16, destination = null, part
     } else {
       // 第一次用到这个音色：后台开始加载，这一轮先用同类合成音色顶上。
       // 只要求加载「这个音及附近粗网格」，通常几十毫秒就能开始出真实音色（不用等整库）。
-      ensureSampleBank(chosen, { midis: new Set([Math.round(midi)]) });
+      ensureSampleBank(chosen, { midis: new Set([Math.round(midi)]), reason: "tone" });
     }
     playSynthTone(SAMPLED_TIMBRES[chosen].fallback, midi, startAt, duration, peak, destination, partKey);
     return;
@@ -5518,6 +5570,19 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
   encodeMp3WithWorker, normalizeBufferInPlace, scheduleTimbrePreload,
   whenNoteRowsIdle, reportUiPerf, ensurePlaybackTimbres, midisForTimbre,
+  preloadTimbreBank, setPartTimbre,
+  // 音源缓存快照：测试用来确认「换音色后已提前加载好」「重复声部只加载一次」「切回来 0 重载」。
+  sampleSnapshot: () => ({
+    loaded: [...state.sampleBanks.keys()],
+    loading: [...state.sampleLoading.keys()],
+    ready: [...state.sampleBanks.entries()].filter(([, bank]) => bank && bank.ready).map(([name]) => name),
+    loadedMidis: Object.fromEntries([...state.sampleBanks.entries()]
+      .map(([name, bank]) => [name, bank && bank.loadedMidis ? bank.loadedMidis.size : 0])),
+    loads: state.bankLoadLog.map((item) => ({
+      timbre: item.timbre, reason: item.reason, ms: item.ms,
+      needed: item.neededMidis, samples: item.samples,
+    })),
+  }),
   buildVoiceBlock };
 }
 renderNotes();
