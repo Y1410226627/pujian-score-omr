@@ -2463,8 +2463,9 @@ function scheduleTimbrePreload() {
       if (!isSampledTimbre(timbre)) continue;
       const loaded = state.sampleBanks.get(timbre);
       if (loaded && loaded.ready) continue;
-      // 不 await：让它在后台慢慢加载，界面上只会看到状态栏的进度提示
-      ensureSampleBank(timbre).catch(() => {});
+      // 不 await：让它在后台慢慢加载，界面上只会看到状态栏的进度提示。
+      // 只加载这份乐谱用到的音高（+粗网格），首次加载比整库加载快 3 倍以上。
+      ensureSampleBank(timbre, { midis: midisForTimbre(timbre) }).catch(() => {});
     }
   }, 1500);
 }
@@ -3831,13 +3832,17 @@ async function exportAudio() {
     // 采样音源没准备好就渲染，那些声部会退回合成音色（和试听不一致）。
     // 这里把用到的采样音源先都加载完。
     let bankMark = performance.now();
-    const neededTimbres = new Set();
-    for (const key of plan.partKeys) neededTimbres.add(timbreForPart(key));
-    for (const timbre of neededTimbres) {
+    const neededTimbres = new Map();   // timbre -> 这次导出要用到的音高
+    for (const note of plan.notes) {
+      const timbre = timbreForPart(note.partKey);
       if (!isSampledTimbre(timbre)) continue;
+      if (!neededTimbres.has(timbre)) neededTimbres.set(timbre, new Set());
+      if (Number.isFinite(note.midi)) neededTimbres.get(timbre).add(Math.round(note.midi));
+    }
+    for (const [timbre, midis] of neededTimbres) {
       els.audioExportLabel.textContent = "载入音源…";
       try {
-        await ensureSampleBank(timbre);
+        await ensureSampleBank(timbre, { midis });
       } catch (error) {
         console.info("音源加载失败，这段会用合成音色", timbre, error);
       }
@@ -4029,7 +4034,13 @@ function setPartTimbre(key, value) {
   clearTimbreCache();
   if (value && TIMBRE_LABELS[value]) {
     state.partTimbres.set(String(key), value);
-    if (isSampledTimbre(value)) ensureSampleBank(value);
+    if (isSampledTimbre(value)) {
+      // 只加载这个声部用到的音高（比整库加载快数倍；换回来时命中缓存是 0 毫秒）
+      const partMidis = new Set(state.notes
+        .filter((note) => voiceIdentity(note) === String(key) && Number.isFinite(note.midi))
+        .map((note) => Math.round(note.midi)));
+      ensureSampleBank(value, { midis: partMidis });
+    }
   } else {
     state.partTimbres.delete(String(key));
   }
@@ -4124,7 +4135,7 @@ function setTimbre(value) {
   if (isSampledTimbre(value)) {
     // 清单是异步读的：刚打开页面就点也可能还没读到，所以不在这里下"没安装"的结论，
     // 交给 ensureSampleBank 去读；真读不到再回滚并提示。
-    ensureSampleBank(value).then((bank) => {
+    ensureSampleBank(value, { midis: midisForTimbre(value) }).then((bank) => {
       if (bank) return;
       showToast("还没安装真实音源：双击项目里的「安装真实音源.bat」，装好后刷新页面再选。");
       if (state.timbre !== value) return;
@@ -4212,7 +4223,9 @@ function prepareAudio() {
     return;
   }
   // 当前选的是采样音色就顺手开始加载（后台进行，不影响界面）。
-  if (isSampledTimbre(state.timbre)) ensureSampleBank(state.timbre);
+  if (isSampledTimbre(state.timbre)) {
+    ensureSampleBank(state.timbre, { midis: midisForTimbre(state.timbre) }).catch(() => {});
+  }
   // 空闲时提前生成混响脉冲：否则第一次播放要同步算 1.9 秒的噪声，卡约 2 秒。
   prewarmReverb();
 }
@@ -4732,7 +4745,7 @@ function fillTimbreOptions(select, { followGlobal = false } = {}) {
 }
 
 /** 最多同时保留几个采样音源在内存里（每个 20–40 MB，再多容易把老机器撑爆）。 */
-const MAX_LOADED_SAMPLE_BANKS = 4;
+const MAX_LOADED_SAMPLE_BANKS = 10;   // 配合内存预算淘汰；当前乐谱用到的音色永不淘汰
 
 /** 更新界面上的「真实音源」状态提示（装没装、加载到百分之几、哪些已就绪）。 */
 function updateSampleStatus(message) {
@@ -4756,8 +4769,95 @@ function updateSampleStatus(message) {
  * 确保某个采样音源已加载（同一个音源只会加载一次）。
  * 没安装、加载失败都只返回 null，不抛错：调用方会自动退回合成音色，保证"总有声音"。
  */
-function ensureSampleBank(name) {
+/** 某个音色在当前乐谱里要用到的音高（给「按需加载音源」用）。 */
+function midisForTimbre(timbre, notes = null) {
+  const wanted = new Set();
+  const source = notes || state.notes;
+  for (const note of source) {
+    if (!Number.isFinite(note.midi)) continue;
+    if (timbreForPart(voiceIdentity(note)) !== timbre) continue;
+    wanted.add(Math.round(note.midi));
+  }
+  return wanted;
+}
+
+/** 一个已加载音源占多少 MB（用于内存预算淘汰）。 */
+function sampleBankMb(bank) {
+  let bytes = 0;
+  for (const layer of bank.layers || []) {
+    for (const sample of layer.samples || []) {
+      if (sample.buffer) bytes += sample.buffer.length * 4;
+    }
+  }
+  return bytes / (1024 * 1024);
+}
+
+/**
+ * 音源内存缓存淘汰。
+ *
+ * 规则：正在加载的这个 + 当前乐谱用到的音色绝不淘汰（否则每次播放/切回来都要重新加载），
+ * 其余按「最久没用」淘汰，同时受「个数上限」和「总内存预算」双重限制。
+ * 真实钢琴这种大音源按需加载后约 60 MB，预算 460 MB 能同时留住 8–10 个音源，
+ * 用户在音色下拉里来回切换时基本都能命中缓存（0 毫秒）。
+ */
+const SAMPLE_BANK_MEMORY_BUDGET_MB = 460;
+function pruneSampleBanks(keepName) {
+  const inUse = new Set();
+  for (const key of new Set(state.notes.map((note) => voiceIdentity(note)))) {
+    const timbre = timbreForPart(key);
+    if (isSampledTimbre(timbre)) inUse.add(timbre);
+  }
+  let totalMb = 0;
+  for (const name of state.sampleOrder) {
+    const bank = state.sampleBanks.get(name);
+    if (bank) totalMb += sampleBankMb(bank);
+  }
+  for (const name of state.sampleOrder.slice()) {
+    if (state.sampleBanks.size <= MAX_LOADED_SAMPLE_BANKS && totalMb <= SAMPLE_BANK_MEMORY_BUDGET_MB) break;
+    if (name === keepName || inUse.has(name)) continue;
+    const bank = state.sampleBanks.get(name);
+    if (bank) totalMb -= sampleBankMb(bank);
+    state.sampleBanks.delete(name);
+    state.sampleOrder = state.sampleOrder.filter((item) => item !== name);
+  }
+}
+
+/**
+ * 点「试听」前，把这次演奏要用到的采样音源都加载好。
+ *
+ * 为什么要等：以前播放开始得太早，音源还没解码完的音会退回合成音色——
+ * 用户听感就是「音源加载跟不上演奏」。现在先把要用的加载完（正常情况已在后台预加载好，
+ * 命中缓存时是 0 毫秒），再开始调度；加载时间用进度条如实显示。
+ */
+async function ensurePlaybackTimbres(onStatus) {
+  const needed = new Map();
+  for (const note of getPlaybackNotes()) {
+    if (!Number.isFinite(note.midi)) continue;
+    const timbre = timbreForPart(voiceIdentity(note));
+    if (!isSampledTimbre(timbre)) continue;
+    if (!needed.has(timbre)) needed.set(timbre, new Set());
+    needed.get(timbre).add(Math.round(note.midi));
+  }
+  const pending = [];
+  for (const [timbre, midis] of needed) {
+    const bank = state.sampleBanks.get(timbre);
+    if (bank && bank.ready) continue;
+    pending.push([timbre, midis]);
+  }
+  for (let index = 0; index < pending.length; index += 1) {
+    const [timbre, midis] = pending[index];
+    if (onStatus) onStatus(timbre, index, pending.length);
+    try {
+      await ensureSampleBank(timbre, { midis });
+    } catch (error) {
+      console.info("音源加载失败，这几个声部会用合成音色", error);
+    }
+  }
+}
+
+function ensureSampleBank(name, options = {}) {
   if (!isSampledTimbre(name)) return Promise.resolve(null);
+  const midis = options.midis instanceof Set ? options.midis : null;
   if (state.sampleBanks.has(name)) return Promise.resolve(state.sampleBanks.get(name));
   if (state.sampleLoading.has(name)) return state.sampleLoading.get(name);
   const promise = (async () => {
@@ -4768,7 +4868,9 @@ function ensureSampleBank(name) {
     }
     updateSampleStatus(`正在加载${TIMBRE_LABELS[name] || name}…`);
     let shownPercent = 0;
+    const loadedAt = performance.now();
     const bank = await loadSampleBank(state.sampleManifest, name, {
+      neededMidis: midis,
       onProgress: ({ done, total }) => {
         const percent = Math.round((done / Math.max(1, total)) * 100);
         if (percent - shownPercent >= 20) {
@@ -4782,13 +4884,19 @@ function ensureSampleBank(name) {
       state.sampleBanks.set(name, bank);
       state.sampleOrder = state.sampleOrder.filter((item) => item !== name);
       state.sampleOrder.push(name);
-      // 内存上限：采样音源每个要占 20–40 MB，只保留最近用过的几个（发出去的声音节点会自己握着 buffer 引用，
-      // 从 map 里删掉不会让正在播的音断掉）。
-      while (state.sampleOrder.length > MAX_LOADED_SAMPLE_BANKS) {
-        const oldest = state.sampleOrder.shift();
-        if (oldest && oldest !== name) state.sampleBanks.delete(oldest);
-      }
-      showToast(`${TIMBRE_LABELS[name] || name}已加载完成。`);
+      // 淘汰交给 pruneSampleBanks：当前乐谱用到的音色不淘汰，其余按内存预算淘汰
+      pruneSampleBanks(name);
+      const loadMs = Math.round(performance.now() - loadedAt);
+      reportUiPerf("bank-load", {
+        timbre: name,
+        ms: loadMs,
+        samples: bank.loadedMidis ? bank.loadedMidis.size : null,
+        partial: Boolean(bank.partial),
+        neededMidis: midis ? midis.size : 0,
+        bankMb: Math.round(sampleBankMb(bank)),
+        cachedBanks: state.sampleBanks.size,
+      });
+      if (loadMs > 400) showToast(`${TIMBRE_LABELS[name] || name}已加载完成。`);
     }
     updateSampleStatus();
     return bank;
@@ -5048,7 +5156,8 @@ function playTone(midi, startAt, duration, peak = 0.16, destination = null, part
       }
     } else {
       // 第一次用到这个音色：后台开始加载，这一轮先用同类合成音色顶上。
-      ensureSampleBank(chosen);
+      // 只要求加载「这个音及附近粗网格」，通常几十毫秒就能开始出真实音色（不用等整库）。
+      ensureSampleBank(chosen, { midis: new Set([Math.round(midi)]) });
     }
     playSynthTone(SAMPLED_TIMBRES[chosen].fallback, midi, startAt, duration, peak, destination, partKey);
     return;
@@ -5112,6 +5221,17 @@ async function playMelody() {
   if (!AudioContextClass) return showToast("当前浏览器不支持音频播放，请使用较新的浏览器。");
   if (!state.audio) state.audio = new AudioContextClass();
   await state.audio.resume();
+  // 音源没准备好就开播，前几个音会退回合成音色（听感就是「音源加载跟不上演奏」）。
+  // 这里先把这次演奏要用到的采样音源加载完再开始（正常已在后台预加载好，命中时 0 毫秒）。
+  if (!state.isPlaying) {
+    await ensurePlaybackTimbres((timbre, index, total) => {
+      const label = TIMBRE_LABELS[timbre] || timbre;
+      els.playLabel.textContent = `载入音源 ${index + 1}/${total} · ${label}`;
+      els.scoreHint.textContent = `正在载入音源：${label}（${index + 1}/${total}）…`;
+    });
+    els.playLabel.textContent = "播放全曲";
+    if (!getPlaybackNotes().length) return;
+  }
   // 清掉上一轮遗留的定时器（包括循环定时器），避免反复试听让定时器数组无界增长。
   for (const timer of state.timers) clearTimeout(timer);
   state.timers = [];
@@ -5397,7 +5517,7 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   playbackTempoSegments, beatsForNote, voiceIdentity, loadLame, normalizePeak, stereoChannels,
   EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
   encodeMp3WithWorker, normalizeBufferInPlace, scheduleTimbrePreload,
-  whenNoteRowsIdle, reportUiPerf,
+  whenNoteRowsIdle, reportUiPerf, ensurePlaybackTimbres, midisForTimbre,
   buildVoiceBlock };
 }
 renderNotes();

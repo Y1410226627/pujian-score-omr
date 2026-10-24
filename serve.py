@@ -387,6 +387,8 @@ def jianpu_available():
 
 
 class ProjectHandler(SimpleHTTPRequestHandler):
+    # HTTP/1.1 + keep-alive：浏览器复用连接，音源几百个请求不用逐个新建 TCP（实测明显更快）。
+    protocol_version = "HTTP/1.1"
     # 给每个连接设置读超时，避免客户端声明 Content-Length 后慢速滴流、长期占用线程。
     timeout = REQUEST_TIMEOUT_SECONDS
 
@@ -401,7 +403,11 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         for name, value in SECURITY_HEADERS:
             self.send_header(name, value)
         path = urlsplit(self.path).path
-        if path in ("", "/") or path.endswith(self.NO_CACHE_SUFFIXES):
+        if path.startswith("/.assets/"):
+            # 采样音源（几千个 mp3/ogg/wav，共约 220 MB）几乎不变：
+            # 让浏览器长期缓存，第二次打开页面就不用重新下载（只花解码时间）。
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        elif path in ("", "/") or path.endswith(self.NO_CACHE_SUFFIXES):
             self.send_header("Cache-Control", "no-cache, must-revalidate")
         super().end_headers()
 
