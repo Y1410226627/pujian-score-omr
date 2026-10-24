@@ -1470,24 +1470,79 @@ function appendPartNoteRows(partKey, newNotes) {
     byMeasure.get(measureIndex).push({ note, index: baseIndex + offset });
   }
   const name = partDisplayName(partKey, newNotes[0].partName || "旋律");
-  let appended = 0;
+  // 先把「空声部块」插进去（几十个块，很快），行在下一帧开始分批填：
+  // 这样点「复制成新声部」立刻返回，几千行的谱也不会冻结界面。
+  const pending = [];
   for (const [measureIndex, entries] of byMeasure) {
     const group = (state.measureGroups && state.measureGroups.get(measureIndex))
       || els.noteList.querySelector(`.measure-group[data-measure="${measureIndex + 1}"]`);
     if (!group) continue;
     entries.sort((left, right) => (Number(left.note.startBeat) || 0) - (Number(right.note.startBeat) || 0));
-    group.append(buildVoiceBlock(name, entries));
-    const meta = group.querySelector(".measure-head span");
-    if (meta) {
-      const current = Number(String(meta.textContent).replace(/[^\d]/g, "")) || 0;
-      meta.textContent = `${current + entries.length} 个音`;
-    }
-    appended += entries.length;
+    const block = document.createElement("div");
+    block.className = "measure-voice";
+    const label = document.createElement("div");
+    label.className = "measure-voice-name";
+    label.textContent = `${name} · ${entries.length} 个音`;
+    block.append(label);
+    group.append(block);
+    pending.push({ group, block, entries, cursor: 0, counted: false });
   }
   for (const note of newNotes) state.noteById.set(note.id, note);
-  if (!appended) renderNotes();   // 一个都没插进去（结构意外）就退回全量重绘
+  if (!pending.length) { renderNotes(); return; }
+  if (newNotes.length <= 300) {
+    fillNoteRows(pending, Infinity, Infinity);
+    return;
+  }
+  state.rowFillPending = (state.rowFillPending || 0) + 1;
+  const step = () => {
+    const finished = fillNoteRows(pending, 180, 6);
+    if (!finished) {
+      requestAnimationFrame(step);
+      return;
+    }
+    state.rowFillPending = Math.max(0, (state.rowFillPending || 1) - 1);
+  };
+  requestAnimationFrame(step);
 }
 
+/**
+ * 把待填的行填进对应的声部块（每帧有行数/毫秒预算，用完先返回 false，下一帧再继续）。
+ * @returns {boolean} 是否全部填完
+ */
+function fillNoteRows(pending, maxRows, maxMs) {
+  const startedAt = performance.now();
+  let built = 0;
+  for (const item of pending) {
+    while (item.cursor < item.entries.length) {
+      if (built >= maxRows || performance.now() - startedAt > maxMs) return false;
+      const entry = item.entries[item.cursor];
+      item.block.append(buildNoteRow(entry.note, entry.index));
+      item.cursor += 1;
+      built += 1;
+    }
+    if (!item.counted) {
+      const meta = item.group.querySelector(".measure-head span");
+      if (meta) {
+        const current = Number(String(meta.textContent).replace(/[^\d]/g, "")) || 0;
+        meta.textContent = `${current + item.entries.length} 个音`;
+      }
+      item.counted = true;
+    }
+  }
+  return true;
+}
+
+/** 等「渐进填行」全部完成（调试/测试用，避免读到半成品）。 */
+function whenNoteRowsIdle() {
+  if (!state.rowFillPending) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!state.rowFillPending) resolve();
+      else setTimeout(check, 30);
+    };
+    check();
+  });
+}
 /**
  * 把音符按「小节 → 声部」分组。
  *
@@ -1531,6 +1586,7 @@ function groupNotesByMeasure() {
 }
 
 function renderNotes() {
+  const renderStartedAt = performance.now();
   els.noteList.replaceChildren();
   installNoteListDelegation();
   // 行索引 & 音符索引：事件委托靠它从 DOM 找回音符对象。
@@ -1574,6 +1630,9 @@ function renderNotes() {
   els.scoreLegend.hidden = !state.notes.some((note) => Number.isFinite(note.x) && Number.isFinite(note.y));
   markSelectedRows();
   updateSelectionUi();
+  const renderMs = Math.round(performance.now() - renderStartedAt);
+  // 只有真的慢（>150 ms）才上报，避免正常编辑刷屏
+  if (renderMs > 150) reportUiPerf("render-notes", { ms: renderMs, rows: state.noteRowById ? state.noteRowById.size : 0 });
 }
 
 /** 在音符列表里跳到第 index 小节（1 起），并短暂高亮小节标题。 */
@@ -1658,7 +1717,47 @@ function focusedPartKey() {
  *        semitones：整体移调半音（高/低八度叠加用 ±12）；name：新声部名；timbre：新声部音色
  * @returns {{key: string, name: string, count: number} | null}
  */
+/**
+ * 性能遥测：把「用户在真实电脑上点一次操作花了多久」上报到本机服务器。
+ *
+ * 为什么需要：只看开发机上的数字判断不了用户为什么还觉得卡——真实乐谱有多少音符、
+ * 什么浏览器、机器几核，都会改变结论。这里把慢操作的关键阶段耗时 POST 到本机
+ * /api/perf（serve.py 只写本地日志 .cache/perf/ui-perf.jsonl，不联网、不收集乐谱内容），
+ * 用户正常使用就能留下证据，不用教他开控制台。
+ */
+let uiPerfSeq = 0;
+function reportUiPerf(event, detail = {}) {
+  try {
+    uiPerfSeq += 1;
+    const payload = {
+      seq: uiPerfSeq,
+      event,
+      at: new Date().toISOString(),
+      notes: state.notes.length,
+      parts: state.partNames ? state.partNames.size : 0,
+      measures: state.scoreInfo ? state.scoreInfo.measureCount : 0,
+      source: state.recognitionSource,
+      ua: navigator.userAgent,
+      cores: navigator.hardwareConcurrency || 0,
+      memory: navigator.deviceMemory || null,
+      dpr: window.devicePixelRatio || 1,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      detail,
+    };
+    fetch("/api/perf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (error) {
+    // 上报失败绝不影响功能
+  }
+}
+
 function duplicatePart(sourceKey, options = {}) {
+  const perf = { t0: performance.now(), sourceKey, existingNotes: state.notes.length };
   const source = state.notes.filter((note) => voiceIdentity(note) === sourceKey);
   if (!source.length) {
     showToast("这个声部还没有音符，先识别或添加音符再叠加。");
@@ -1666,7 +1765,6 @@ function duplicatePart(sourceKey, options = {}) {
   }
   const semitones = Math.round(Number(options.semitones) || 0);
   const baseName = options.name || (partDisplayName(sourceKey, sourceKey) + " · 叠加");
-  // 新声部的 partId 要避开已有的，保证 voiceIdentity 唯一
   let index = 1;
   let newId = `${sourceKey}-layer${index}`;
   const used = new Set(state.notes.map((note) => voiceIdentity(note)));
@@ -1689,20 +1787,32 @@ function duplicatePart(sourceKey, options = {}) {
       isLowConfidence: false,
     };
   });
-  state.notes.push(...copies);
+  perf.copyMs = Math.round(performance.now() - perf.t0);
+  // 不用 push(...copies)：上千个参数展开有上限风险，也更容易触发大数组重排
+  for (const copy of copies) state.notes.push(copy);
   state.partNames.set(newId, name);
   if (options.timbre) state.partTimbres.set(newId, options.timbre);
-  // 新声部默认参与演奏
   if (state.selectedParts instanceof Set) state.selectedParts.add(newId);
+  let mark = performance.now();
   updatePartControls();
+  perf.partPanelMs = Math.round(performance.now() - mark);
+  mark = performance.now();
   appendPartNoteRows(newId, copies);
+  perf.rowsMs = Math.round(performance.now() - mark);
+  mark = performance.now();
   refreshScoreOverlay();
+  perf.overlayMs = Math.round(performance.now() - mark);
+  mark = performance.now();
   updatePlaybackReady();
+  perf.readyMs = Math.round(performance.now() - mark);
   const octaveText = semitones > 0 ? "高八度" : semitones < 0 ? "低八度" : "同音高";
   showToast(`已把「${partDisplayName(sourceKey, sourceKey)}」复制成新声部「${name}」（${octaveText}，${copies.length} 个音），可在声部行单独选音色。`);
+  perf.totalMs = Math.round(performance.now() - perf.t0);
+  perf.copiedNotes = copies.length;
+  perf.notesAfter = state.notes.length;
+  reportUiPerf("duplicate", perf);
   return { key: newId, name, count: copies.length };
 }
-
 /** 让新声部名不重复（否则声部面板会把同名合在一起，用户会以为没加上）。 */
 function uniquePartName(baseName) {
   const alive = new Set(collectParts().map((part) => part.name));
@@ -3790,6 +3900,7 @@ let exportMark = performance.now();
       + exportStats.normalizeMs + exportStats.encodeMs;
     state.lastExportStats = exportStats;
     console.info("[导出计时]", exportStats);
+    reportUiPerf("export", exportStats);
     const name = audioFileName(els.scoreTitle.textContent || (state.file && state.file.name) || "谱见",
       beatRange, extension);
     const url = URL.createObjectURL(blob);
@@ -3882,6 +3993,7 @@ function partOctave(key) {
 
 /** 把某个声部的所有音符整体升降八度（识别结果整声部高/低八度时用；不影响其它声部）。 */
 function setPartOctave(key, octaves) {
+  const perfT0 = performance.now();
   const id = String(key);
   const target = Math.max(-2, Math.min(2, Math.round(Number(octaves) || 0)));
   const delta = target - partOctave(id);
@@ -3902,6 +4014,11 @@ function setPartOctave(key, octaves) {
   showToast(target === 0
     ? `「${name}」已还原到原八度。`
     : `「${name}」已${target > 0 ? "升" : "降"} ${Math.abs(target)} 个八度（只改这个声部，可再选「原八度」还原）。`);
+  reportUiPerf("octave", {
+    totalMs: Math.round(performance.now() - perfT0),
+    notes: state.notes.length,
+    partNotes: state.notes.filter((note) => voiceIdentity(note) === id).length,
+  });
 }
 
 function setPartTimbre(key, value) {
@@ -5280,6 +5397,7 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   playbackTempoSegments, beatsForNote, voiceIdentity, loadLame, normalizePeak, stereoChannels,
   EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
   encodeMp3WithWorker, normalizeBufferInPlace, scheduleTimbrePreload,
+  whenNoteRowsIdle, reportUiPerf,
   buildVoiceBlock };
 }
 renderNotes();

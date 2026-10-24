@@ -282,3 +282,6 @@ h1 span { color: var(--green); }
    加上 content-visibility 后浏览器只为看得见的几屏做排版，滚动恢复顺滑。
    contain-intrinsic-size 给一个估计高度，避免滚动条乱跳（渲染过一次后浏览器会记住真实高度）。 */
 .measure-group { content-visibility: auto; contain-intrinsic-size: auto 520px; }
+
+/* 页脚版本号：让用户一眼能确认浏览器拿到的是不是最新代码（旧缓存时会看旧版本号） */
+.app-version { margin-left: 8px; padding: 1px 6px; border-radius: 999px; background: #eef3ee; color: #7c8a81; font-size: 10px; }

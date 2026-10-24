@@ -518,6 +518,9 @@ class ProjectHandler(SimpleHTTPRequestHandler):
         if route == "/api/jianpu/recognize":
             self.handle_jianpu()
             return
+        if route == "/api/perf":
+            self.handle_perf_report()
+            return
         if route == "/api/omr/recognize-batch":
             self.handle_audiveris_batch()
             return
@@ -724,6 +727,42 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             else:
                 results[number] = {"musicxml": result}
         return results, process.returncode, detail
+
+
+    # ===== 前端性能遥测 =====
+    # 页面把「复制声部 / 切八度 / 导出 / 列表重绘」等操作的耗时上报到这里，
+    # 只写本机日志（.cache/perf/ui-perf.jsonl + 启动窗口），不联网、不收集乐谱内容。
+    # 用途：用户说「卡」时，能直接看到是哪一步慢、在什么浏览器/多少音符的谱上慢。
+    PERF_LOG_PATH = PROJECT_DIR / ".cache" / "perf" / "ui-perf.jsonl"
+
+    def handle_perf_report(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self.send_json(400, {"error": "bad length"})
+            return
+        if length <= 0 or length > 64 * 1024:
+            self.send_json(400, {"error": "bad size"})
+            return
+        try:
+            raw = self.rfile.read(length)
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except Exception as error:  # noqa: BLE001  上报失败不影响使用
+            self.send_json(400, {"error": "bad json: {!r}".format(error)})
+            return
+        if not isinstance(payload, dict):
+            self.send_json(400, {"error": "bad payload"})
+            return
+        payload["serverAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        line = json.dumps(payload, ensure_ascii=False)
+        try:
+            self.PERF_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.PERF_LOG_PATH, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except Exception as error:  # noqa: BLE001
+            print("[ui-perf] 写日志失败：{!r}".format(error), flush=True)
+        print("[ui-perf] " + line, flush=True)
+        self.send_json(200, {"ok": True})
 
     def handle_audiveris_batch(self):
         """整本五线谱识别：把多页图片**一次**交给 Audiveris，共享同一个 JVM。
