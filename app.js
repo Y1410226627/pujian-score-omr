@@ -102,6 +102,8 @@ const state = {
   partsCache: null, partsCacheNotes: -1, partsCacheSource: null,
   // 采样音源：清单、已加载的样本表、正在加载的 Promise、加载顺序（用于内存上限 LRU）。
   sampleManifest: null, sampleBanks: new Map(), sampleLoading: new Map(), sampleOrder: [],
+  // 大内存机器的「后台把 83 个音源全部预加载好」进度
+  fullBankPreload: { done: 0, total: 0, running: false },
   // 每次真正解码音源都记一条（测试用来确认「重复声部只加载一次」、排查用户机器上到底加载了什么）
   bankLoadLog: [],
   // 混响预热状态（见 prewarmReverb：避免第一次点播放时同步生成 1.9 秒脉冲而卡顿）
@@ -123,10 +125,32 @@ const state = {
 };
 // 粗略估算得到的符头置信分低于此值即标为"待校对"
 const LOW_CONFIDENCE_THRESHOLD = 0.5;
+/**
+ * 本机硬件画像。
+ *
+ * 用户明确说「内存 32GB，完全不怕，只要够快够流畅」——所以内存相关的保护全部按本机内存自适应：
+ * 大内存机器（≥16 GB）上「用内存换速度/换完整音色」：更多音源常驻、全部真实音色不降级、
+ * 后台把 83 个音源全部预加载好（切音色/点播放 0 等待）。
+ * 小内存机器仍然保守，避免旧机器被撑爆。
+ */
+const HARDWARE = {
+  memoryGb: Math.max(2, Number(navigator.deviceMemory) || 8),
+  cores: Math.max(1, Number(navigator.hardwareConcurrency) || 4),
+};
+const BIG_MEMORY = HARDWARE.memoryGb >= 16;
+/** 后台全量预加载音源开关：大内存机器默认开（可用 localStorage 关掉）。 */
+function fullBankPreloadEnabled() {
+  try {
+    return loadSettings().fullBankPreload !== false;
+  } catch {
+    return true;
+  }
+}
+
 // 音符列表最多渲染多少行。实测 20 万音符全渲染要 4.4 秒、DOM 内存几百 MB，
 // 播放时的 GC/重排就是「卡顿、放到一半没声」的元凶之一；只渲染前 1.2 万行后
 // 导入渲染从 4.4 秒降到约 0.3 秒，播放/导出完全不受影响（只是列表看不到后面的行）。
-const NOTE_ROW_RENDER_LIMIT = 12000;
+const NOTE_ROW_RENDER_LIMIT = BIG_MEMORY ? 40000 : 12000;
 // 识谱（OMR）用的整页渲染参数。
 // · 普通（矢量）PDF：识谱图按 2600px 长边、3.8× 上限渲染——和以前一样的像素量，
 //   只是不再用 JPEG（JPEG 的二次压缩会伤到小音符和谱线）。
@@ -3500,9 +3524,11 @@ function buildMidiFile(notes = getPlaybackNotes(), offset = 0) {
 /** 采样率与码率：44.1 kHz / 128 kbps 立体声，兼容性最好。 */
 const AUDIO_EXPORT_RATE = 44100;
 const AUDIO_EXPORT_KBPS = 128;
-// 一次导出最多同时加载几种真实音源（几十个声部各一种乐器时，全部常驻会吃掉几 GB 内存）。
-// 超出的音色在渲染时自动退回同类合成音色（不会没声），优先保留音符最多的。
-const EXPORT_MAX_TIMBRES = 16;
+// 一次导出最多同时加载几种真实音源。大内存（≥16GB）机器上直接放开到 96 种——
+// 用户实测的极端场景是 74 个声部各一种乐器，大内存下让全部声部保持真实音色
+//（实测真实采样音色比合成兜底更快：74 音色全真实导出反而比降级成合成更快）。
+// 超出上限的音色在渲染时自动退回同类合成音色（不会没声），优先保留音符最多的。
+const EXPORT_MAX_TIMBRES = BIG_MEMORY ? 96 : 16;
 
 /**
  * 导出渲染的分块策略。
@@ -4165,7 +4191,8 @@ async function exportAudio() {
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(3, bankTotal) }, () => loadBankWorker()));
+    const bankParallel = BIG_MEMORY ? 8 : 3;
+    await Promise.all(Array.from({ length: Math.min(bankParallel, bankTotal) }, () => loadBankWorker()));
     const bankMs = Math.round(performance.now() - bankMark);
     els.audioExportLabel.textContent = "正在渲染…";
     els.audioExportLabel.textContent = "渲染中…";
@@ -5072,15 +5099,13 @@ function fillTimbreOptions(select, { followGlobal = false } = {}) {
 /**
  * 最多同时保留几个采样音源在内存里。
  *
- * 为什么从 10 提到 16 还要加「硬上限」：用户实测给 74 个声部各配了一种真实乐器，
- * 旧规则「当前乐谱用到的音色永不淘汰」让 74 个音源全部常驻内存（约 2 GB+ 解码音频），
- * 浏览器 GC/内存压力直接表现为播放卡顿、放到一半没声。现在：
- *   · 总数不超过 16 个、总内存不超过 700 MB；
- *   · 优先淘汰「当前乐谱没用」的音源，实在超标时连在用的也按最久没用淘汰；
- *   · 播放时只保留前 PLAYBACK_MAX_TIMBRES 种真实音色（见 buildPlaybackTimbrePlan），
- *     其余声部用合成音色兜底——不会没声，也不会为了几十种音色把内存撑爆。
+ * 上限按本机内存自适应（用户 32GB 机器：内存不是限制，那就全部常驻，换 0 等待切换/播放）：
+ *   · 大内存（≥16GB）：最多 96 个音源 / 6 GB，足够把 83 个音源全部留在内存里；
+ *   · 小内存：16 个 / 700 MB，超标时连在用的也按最久没用淘汰，避免卡顿/没声。
+ * 另外播放/导出各有自己的音色预算（PLAYBACK_MAX_TIMBRES / EXPORT_MAX_TIMBRES），
+ * 大内存下同样放开，不再把声部降级成合成音色。
  */
-const MAX_LOADED_SAMPLE_BANKS = 16;
+const MAX_LOADED_SAMPLE_BANKS = BIG_MEMORY ? 96 : 16;
 
 /** 更新界面上的「真实音源」状态提示（装没装、加载到百分之几、哪些已就绪）。 */
 function updateSampleStatus(message) {
@@ -5089,6 +5114,13 @@ function updateSampleStatus(message) {
   if (message) {
     element.hidden = false;
     element.textContent = message;
+    return;
+  }
+  // 大内存机器正在后台全量预加载：显示进度，让用户知道「切音色 0 等待」正在准备
+  if (state.fullBankPreload.running) {
+    element.hidden = false;
+    element.textContent = `后台预加载真实音源 ${state.fullBankPreload.done}/${state.fullBankPreload.total}…`
+      + `（内存充足：加载完后切音色/点播放都不用等）`;
     return;
   }
   // 换音色后后台正在加载：明确告诉用户「正在准备」，不用傻等或反复点播放。
@@ -5104,7 +5136,13 @@ function updateSampleStatus(message) {
   }
   const ready = [...state.sampleBanks.entries()].map(([name]) => TIMBRE_LABELS[name] || name);
   element.hidden = false;
-  element.textContent = ready.length ? `真实音源已就绪：${ready.join("、")}` : "真实音源已安装（选中后自动加载）";
+  if (!ready.length) {
+    element.textContent = "真实音源已安装（选中后自动加载）";
+    return;
+  }
+  // 大内存机器会把 83 个音源全预加载好：状态栏只显示「已就绪 N 种」，不刷屏
+  const shown = ready.length > 6 ? [...ready.slice(0, 6), `…等 ${ready.length} 种`] : ready;
+  element.textContent = `真实音源已就绪：${shown.join("、")}`;
 }
 
 /**
@@ -5112,6 +5150,57 @@ function updateSampleStatus(message) {
  * 没安装、加载失败都只返回 null，不抛错：调用方会自动退回合成音色，保证"总有声音"。
  */
 /** 某个音色在当前乐谱里要用到的音高（给「按需加载音源」用）。 */
+let fullBankPreloadTimer = null;
+/**
+ * 大内存机器：后台把清单里的全部音源逐个解码进内存。
+ *
+ * 用户有 32GB 内存、明确要求「内存不是限制，只要够快够流畅」。
+ * 83 个音源全部常驻约 2.5–4 GB，换来的是：
+ *   · 切换音色 0 等待（不用再等 0.3–2 秒解码）；
+ *   · 点播放 0 等待（音源早就在内存里）；
+ *   · 导出前也不用现加载音源。
+ * 播放/导出/识别进行中会自动暂停，避免抢 CPU；每次加载之间也留一点间隔，不阻塞界面。
+ */
+function scheduleFullBankPreload() {
+  if (!BIG_MEMORY || !fullBankPreloadEnabled()) return;
+  if (fullBankPreloadTimer) clearTimeout(fullBankPreloadTimer);
+  fullBankPreloadTimer = setTimeout(() => {
+    fullBankPreloadTimer = null;
+    runFullBankPreload().catch((error) => console.info("后台预加载音源失败（不影响使用）", error));
+  }, 6000);
+}
+
+async function runFullBankPreload() {
+  if (!state.sampleManifest || state.fullBankPreload.running) return;
+  const names = Object.keys(state.sampleManifest.banks || {});
+  if (!names.length) return;
+  state.fullBankPreload = { done: 0, total: names.length, running: true };
+  for (const name of names) {
+    // 播放/导出/识别时先不抢资源（它们结束后自动继续）
+    while (state.isPlaying || state.isExporting || state.isRecognizing) {
+      if (!state.fullBankPreload.running) return;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    if (state.sampleBanks.has(name)) {
+      state.fullBankPreload.done += 1;
+      updateSampleStatus();
+      continue;
+    }
+    try {
+      await ensureSampleBank(name, { reason: "preload-all" });
+    } catch {
+      // 单个音源失败不影响其它音源
+    }
+    state.fullBankPreload.done += 1;
+    updateSampleStatus();
+    // 每个音源之间让一下：解码是异步的，这里只避免连续网络/解码把首屏拖慢
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  state.fullBankPreload.running = false;
+  updateSampleStatus();
+  console.info(`[音源] 后台预加载完成：${names.length} 个音源已全部在内存里（内存充足模式）`);
+}
+
 function midisForTimbre(timbre, notes = null) {
   const wanted = new Set();
   const source = notes || state.notes;
@@ -5141,7 +5230,7 @@ function sampleBankMb(bank) {
  * 超标时连在用的音源也按「最久没用」淘汰——宁可下次播放某个声部退回合成音色，
  * 也不能让几十种真实音色把浏览器内存撑爆（实测那会直接卡顿/没声）。
  */
-const SAMPLE_BANK_MEMORY_BUDGET_MB = 700;
+const SAMPLE_BANK_MEMORY_BUDGET_MB = BIG_MEMORY ? 6144 : 700;
 function pruneSampleBanks(keepName) {
   const inUse = new Set();
   for (const key of new Set(state.notes.map((note) => voiceIdentity(note)))) {
@@ -5181,9 +5270,9 @@ function pruneSampleBanks(keepName) {
  *
  * 用户实测给 74 个声部各配一种真实乐器：74 个音源约 2 GB+ 解码音频，
  * 播放时既有内存压力、又要同时调和几十个采样器——这是「卡顿/放到一半没声」的根源之一。
- * 超过这个数就只保留「音符最多」的 12 种真实音色，其余声部退回同类合成音色（不会没声）。
+ * 大内存（≥16GB）机器上放开到 83 种（全部真实音色，不降级）；小内存仍只保留 12 种。
  */
-const PLAYBACK_MAX_TIMBRES = 12;
+const PLAYBACK_MAX_TIMBRES = BIG_MEMORY ? 83 : 12;
 
 /**
  * 规划这次演奏每个声部到底用哪种音色。
@@ -5263,7 +5352,9 @@ async function ensurePlaybackTimbres(onStatus, timbrePlan = null) {
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(3, total) }, () => worker()));
+  // 大内存机器上并行度开大：74 种音色冷启动也只要几秒（小机器保守用 3 路，避免网络/解码抢 CPU）
+  const loadParallel = BIG_MEMORY ? 8 : 3;
+  await Promise.all(Array.from({ length: Math.min(loadParallel, total) }, () => worker()));
 }
 
 /**
@@ -6069,6 +6160,7 @@ if (els.timbreSelect) {
   fetchSampleManifest().then((manifest) => {
     state.sampleManifest = manifest;
     updateSampleStatus();
+    scheduleFullBankPreload();
     if (manifest && !TIMBRE_LABELS[savedTimbre]) {
       const preferred = manifest.banks.piano_real ? "piano_real" : state.timbre;
       if (isSampledTimbre(preferred)) {
@@ -6102,6 +6194,8 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   whenNoteRowsIdle, reportUiPerf, ensurePlaybackTimbres, midisForTimbre,
   preloadTimbreBank, setPartTimbre, exportAudio, buildPlaybackTimbrePlan,
   NOTE_ROW_RENDER_LIMIT, EXPORT_MAX_TIMBRES, MAX_LOADED_SAMPLE_BANKS,
+  HARDWARE, BIG_MEMORY, PLAYBACK_MAX_TIMBRES, SAMPLE_BANK_MEMORY_BUDGET_MB,
+  scheduleFullBankPreload, runFullBankPreload,
   // 音源缓存快照：测试用来确认「换音色后已提前加载好」「重复声部只加载一次」「切回来 0 重载」。
   sampleSnapshot: () => ({
     loaded: [...state.sampleBanks.keys()],
