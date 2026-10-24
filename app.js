@@ -50,6 +50,7 @@ const els = {
   instrumentNote: byId("instrumentNote"), timbreSelect: byId("timbreSelect"), timbreHint: byId("timbreHint"),
   sampleStatus: byId("sampleStatus"), tempoHint: byId("tempoHint"),
   noteLimitBanner: byId("noteLimitBanner"),
+  exportRateSelect: byId("exportRateSelect"),
   layerToolbar: byId("layerToolbar"), addLayerPart: byId("addLayerPart"),
   addLayerBatch: byId("addLayerBatch"), layerBatchCount: byId("layerBatchCount"),
   addLayerEcho: byId("addLayerEcho"), addLayerLower: byId("addLayerLower"),
@@ -3536,6 +3537,50 @@ function buildMidiFile(notes = getPlaybackNotes(), offset = 0) {
 /** 采样率与码率：44.1 kHz / 128 kbps 立体声，兼容性最好。 */
 const AUDIO_EXPORT_RATE = 44100;
 const AUDIO_EXPORT_KBPS = 128;
+
+/**
+ * 导出采样率选项（越低越快）。
+ *
+ * 为什么降采样率能大幅提速：导出成本 ≈ 帧数 × (混音声部数 + 卷积混响的脉冲长度)，
+ * 而卷积混响的成本是「帧数 × 脉冲帧数」——采样率减半，混响成本直接降到 1/4。
+ * 音源本身是 24 kHz 解码的，导出用 24 kHz 时大多数音还能 1:1 播放（不用重采样）。
+ * 听感：44.1k 最保真（20 kHz 带宽）；32k 约 15 kHz 带宽、人声/乐器几乎听不出；
+ *       24k 约 11 kHz 带宽，会明显偏闷（只推荐听音高校对时用）。
+ */
+const EXPORT_RATES = { standard: 44100, fast: 32000, turbo: 24000 };
+const EXPORT_RATE_LABELS = {
+  auto: "自动", standard: "标准 44.1kHz", fast: "快速 32kHz", turbo: "极速 24kHz",
+};
+
+/** 用户在界面上选的导出音质（auto/standard/fast/turbo）。 */
+function exportRateMode() {
+  const saved = loadSettings().exportRate;
+  return EXPORT_RATES[saved] || saved === "auto" ? (saved || "auto") : "auto";
+}
+
+/**
+ * 这次导出用多少采样率。
+ *
+ * 自动模式：普通乐谱 44.1kHz（音质最好）；长曲（≥4 分钟）或声部多（≥12 个）自动用 32kHz。
+ * 实测 32kHz 比 44.1kHz 快 1.5–2 倍，听感几乎没差别；用户想更快可以手动选「极速 24kHz」。
+ */
+function exportRateForPlan(plan) {
+  const mode = exportRateMode();
+  if (mode === "standard") return EXPORT_RATES.standard;
+  if (mode === "fast") return EXPORT_RATES.fast;
+  if (mode === "turbo") return EXPORT_RATES.turbo;
+  const seconds = Math.max(1, Number(plan.totalSeconds) || 1);
+  const parts = plan.partKeys ? plan.partKeys.length : 1;
+  const notesPerSecond = (plan.notes ? plan.notes.length : 0) / seconds;
+  const longOrMany = seconds >= 240 || parts >= 12;
+  if (!longOrMany) return EXPORT_RATES.standard;
+  // 实测：声部很多、音符很密的极端导出，32kHz 反而比 44.1kHz 慢（24k 音源升到 32k 的
+  // 重采样成本盖过了帧数减少的收益），而 24kHz 时音源基本 1:1 播放、反而最快。
+  // 所以「超密超大」导出自动用 24kHz（实测 80 声部 × 30 分钟：24k 275 秒 vs 44.1k 317 秒），
+  // 其余长曲/多声部用 32kHz（音质损失小、普遍快 1.5–3 倍）。
+  if (notesPerSecond >= 90 && parts >= 24) return EXPORT_RATES.turbo;
+  return EXPORT_RATES.fast;
+}
 // 一次导出最多同时加载几种真实音源。大内存（≥16GB）机器上直接放开到 96 种——
 // 用户实测的极端场景是 74 个声部各一种乐器，大内存下让全部声部保持真实音色
 //（实测真实采样音色比合成兜底更快：74 音色全真实导出反而比降级成合成更快）。
@@ -3753,11 +3798,10 @@ async function schedulePlanWindowSliced(offline, plan, windowFrom, windowTo, opt
  * 所以导出听到的声音 = 试听到的声音（含分段变速、逐声部音色与音量、混响压限）。
  * 渲染分块并行，见 EXPORT_RENDER 的说明。
  */
-async function renderPlanToBuffer(plan, { onProgress } = {}) {
+async function renderPlanToBuffer(plan, { onProgress, rate = AUDIO_EXPORT_RATE } = {}) {
   const perfStart = performance.now();
-  const renderStats = { chunkCount: 0, waves: 0, prepMs: 0, buildMs: 0, renderMs: 0, mergeMs: 0, totalFrames: 0 };
+  const renderStats = { chunkCount: 0, waves: 0, rate, prepMs: 0, buildMs: 0, renderMs: 0, mergeMs: 0, totalFrames: 0 };
   state.lastRenderStats = renderStats;
-  const rate = AUDIO_EXPORT_RATE;
   const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   if (!OfflineContext) throw new Error("当前浏览器不支持离线音频渲染。");
   const totalFrames = Math.max(1, Math.ceil(plan.totalSeconds * rate));
@@ -3994,7 +4038,7 @@ function normalizeBufferInPlace(buffer, target = 0.89) {
  * @param {{kbps?: number, onProgress?: (fraction: number) => void}} options
  * @returns {Promise<Blob>}
  */
-function encodeMp3WithWorker(left, right, { kbps = AUDIO_EXPORT_KBPS, onProgress } = {}) {
+function encodeMp3WithWorker(left, right, { kbps = AUDIO_EXPORT_KBPS, sampleRate = AUDIO_EXPORT_RATE, onProgress } = {}) {
   return new Promise((resolve, reject) => {
     let worker;
     try {
@@ -4032,7 +4076,7 @@ function encodeMp3WithWorker(left, right, { kbps = AUDIO_EXPORT_KBPS, onProgress
       type: "encode",
       left,
       right,
-      sampleRate: AUDIO_EXPORT_RATE,
+      sampleRate,
       kbps,
     };
     try {
@@ -4155,13 +4199,15 @@ async function exportAudio() {
     showToast("选中范围内没有音符。");
     return;
   }
+  const exportRate = exportRateForPlan(plan);
   const totalText = formatDuration(plan.totalSeconds);
   const message = selection
     ? `准备导出选中片段（${plan.notes.length} 个音，约 ${totalText}）`
     : `准备导出整曲（${plan.notes.length} 个音，约 ${totalText}）`;
   els.audioExportLabel.textContent = "正在渲染…";
   els.audioButton.disabled = true;
-  showToast(message + (plan.totalSeconds > 240 || (plan.partKeys && plan.partKeys.length > 16)
+  const rateText = exportRate !== AUDIO_EXPORT_RATE ? `（本次用 ${Math.round(exportRate / 1000)} kHz 渲染，更快）` : "";
+  showToast(message + rateText + (plan.totalSeconds > 240 || (plan.partKeys && plan.partKeys.length > 16)
     ? "，长曲/多声部需要等一会儿（进度见上方进度条，界面可以继续滚动）。" : "，请稍候…"));
   // 导出期间禁用「试听 / MIDI」：建图和渲染会把全局音频状态切到离线上下文，
   // 这期间点播放会没声/串音（极端大谱导出要几十秒，用户很可能等不及去点）。
@@ -4211,8 +4257,10 @@ async function exportAudio() {
     const exportStats = { seconds: Math.round(plan.totalSeconds), notes: plan.notes.length };
     exportStats.prepareMs = Math.round(performance.now() - exportStartedAt);
     exportStats.bankMs = bankMs;
+    exportStats.rate = exportRate;
 let exportMark = performance.now();
     const buffer = await renderPlanToBuffer(plan, {
+      rate: exportRate,
       onProgress: (fraction, label) => {
         // 复用识别进度条的位置，但文案必须说清是「导出」，否则用户以为是又在识别
         setRecognizeProgress(fraction, 1, `导出音频 · ${label}`);
@@ -4237,6 +4285,7 @@ let exportMark = performance.now();
     if (typeof Worker === "function") {
       try {
         blob = await encodeMp3WithWorker(left, right, {
+          sampleRate: exportRate,
           onProgress: (fraction) => setRecognizeProgress(0.95 + 0.04 * fraction, 1,
             `导出音频 · 正在压缩成 MP3…（${Math.round(fraction * 100)}%）`),
         });
@@ -4248,14 +4297,14 @@ let exportMark = performance.now();
     }
     if (!blob && await loadLame()) {
       try {
-        blob = encodeMp3(left, right);
+        blob = encodeMp3(left, right, exportRate);
         extension = "mp3";
       } catch (error) {
         console.info("MP3 编码失败，改用 WAV", error);
       }
     }
     if (!blob) {
-      blob = encodeWav(left, right);
+      blob = encodeWav(left, right, exportRate);
       extension = "wav";
       showToast("MP3 编码器不可用，已导出 WAV（音质更好，体积更大）。");
     }
@@ -6068,6 +6117,22 @@ if (els.measureJumpInput) els.measureJumpInput.addEventListener("keydown", (even
     jumpToMeasureInList(els.measureJumpInput.value);
   }
 });
+// 导出音质/速度：默认「自动」（长曲自动切 32kHz），也可手动选 44.1k / 32k / 24k
+if (els.exportRateSelect) {
+  const saved = exportRateMode();
+  els.exportRateSelect.value = EXPORT_RATES[saved] ? saved : saved === "auto" ? "auto" : "auto";
+  els.exportRateSelect.addEventListener("change", () => {
+    const value = EXPORT_RATE_LABELS[els.exportRateSelect.value] ? els.exportRateSelect.value : "auto";
+    saveSettings({ exportRate: value });
+    const hints = {
+      auto: "导出音质：自动（普通乐谱 44.1kHz；长曲/多声部自动用 32kHz 加速）",
+      standard: "导出音质：标准 44.1kHz（音质最好，适合短曲）",
+      fast: "导出音质：快速 32kHz（约快 1.5–2 倍，人声/乐器几乎听不出差别）",
+      turbo: "导出音质：极速 24kHz（最快，但声音明显偏闷，适合只听音高）",
+    };
+    showToast(hints[value] + "；下次导出生效。");
+  });
+}
 if (els.addLayerPart) els.addLayerPart.addEventListener("click", addLayerPart);
 // 批量复制：份数输入框（记住上次用的份数），一键复制成 N 个新声部
 if (els.layerBatchCount) {
@@ -6207,6 +6272,7 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   preloadTimbreBank, setPartTimbre, exportAudio, buildPlaybackTimbrePlan,
   NOTE_ROW_RENDER_LIMIT, EXPORT_MAX_TIMBRES, MAX_LOADED_SAMPLE_BANKS,
   HARDWARE, BIG_MEMORY, PLAYBACK_MAX_TIMBRES, SAMPLE_BANK_MEMORY_BUDGET_MB,
+  EXPORT_RATES, EXPORT_RATE_LABELS, exportRateForPlan, exportRateMode,
   scheduleFullBankPreload, runFullBankPreload,
   // 音源缓存快照：测试用来确认「换音色后已提前加载好」「重复声部只加载一次」「切回来 0 重载」。
   sampleSnapshot: () => ({

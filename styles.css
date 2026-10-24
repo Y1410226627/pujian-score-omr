@@ -94,6 +94,15 @@ h1 span { color: var(--green); }
 .part-piano input { margin: 0; accent-color: #47715d; }
 .part-hint { margin: 6px 0 0; }
 .note-columns, .note-row { display: grid; grid-template-columns: 23px minmax(45px, 1fr) 48px 82px 22px; gap: 5px; align-items: center; }
+.export-rate-select {
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid #dfe5df;
+  border-radius: 6px;
+  background: #fff;
+  color: #4d5b53;
+  font-size: 11px;
+}
 .note-limit {
   margin: 6px 0 0;
   padding: 6px 8px;

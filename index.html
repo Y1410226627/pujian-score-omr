@@ -195,7 +195,7 @@
               <label class="tempo-box" title="试听速度（每分钟四分音符数）。识别到谱面的 ♩=66 这类标记会自动填入；手动改只影响播放速度，不会改谱。"><span class="summary-label">速度</span><span class="tempo-value"><input id="tempoInput" type="number" min="20" max="320" value="84" aria-label="每分钟拍数（BPM）" /><small>BPM</small></span></label>
             </div>
             <p class="tempo-hint" id="tempoHint" hidden></p>
-            <div class="notes-toolbar"><span class="field-label">旋律音符</span><div class="note-actions"><button class="ghost-button" id="lowConfidenceButton" type="button" title="只显示置信度偏低、建议校对的音符" hidden>只看待校对</button><button class="midi-button" id="midiButton" type="button" title="下载 MIDI 文件" disabled>↓ MIDI</button><button class="midi-button" id="audioButton" type="button" title="导出 MP3 音频（按当前声部/音色/音量/移调/选区）" disabled><span id="audioExportLabel">↓ MP3</span></button><button class="add-note-button" id="addNoteButton" type="button" title="添加音符">＋ 添加</button></div></div>
+            <div class="notes-toolbar"><span class="field-label">旋律音符</span><div class="note-actions"><button class="ghost-button" id="lowConfidenceButton" type="button" title="只显示置信度偏低、建议校对的音符" hidden>只看待校对</button><button class="midi-button" id="midiButton" type="button" title="下载 MIDI 文件" disabled>↓ MIDI</button><select class="export-rate-select" id="exportRateSelect" aria-label="导出音质与速度" title="导出音质：自动（推荐）/ 标准 44.1kHz / 快速 32kHz / 极速 24kHz——越低越省时间"><option value="auto">音质：自动</option><option value="standard">44.1kHz</option><option value="fast">32kHz 快</option><option value="turbo">24kHz 极速</option></select><button class="midi-button" id="audioButton" type="button" title="导出 MP3 音频（按当前声部/音色/音量/移调/选区）" disabled><span id="audioExportLabel">↓ MP3</span></button><button class="add-note-button" id="addNoteButton" type="button" title="添加音符">＋ 添加</button></div></div>
             <div class="part-panel" id="partPanel" hidden>
               <div class="part-panel-head">
                 <span class="field-label">要演奏哪些声部</span>
@@ -260,7 +260,7 @@
           </div>
         </section>
       </main>
-      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-10-25·提速9</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
+      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-10-25·提速10</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="app.js"></script>
