@@ -276,3 +276,9 @@ h1 span { color: var(--green); }
 .duration-menu-item[hidden] { display: none; }
 .duration-menu-item:hover { background: #eef4ef; }
 .duration-menu-item.is-active { background: #e4efe6; color: #2f5a3f; font-weight: 600; }
+
+/* 大谱性能：屏幕外的小节不参与排版和绘制。
+   8419 音的谱原来滚动时每帧都要给上千行做样式/布局，实测最差一帧 95 ms（肉眼就是卡）；
+   加上 content-visibility 后浏览器只为看得见的几屏做排版，滚动恢复顺滑。
+   contain-intrinsic-size 给一个估计高度，避免滚动条乱跳（渲染过一次后浏览器会记住真实高度）。 */
+.measure-group { content-visibility: auto; contain-intrinsic-size: auto 520px; }

@@ -53,6 +53,8 @@ def read_musicxml_from_mxl(mxl_path):
 ALLOWED_SUFFIXES = {
     ".html", ".htm", ".css", ".js", ".mjs", ".json", ".md",
     ".svg", ".ico", ".png", ".webmanifest", ".mp3", ".wav", ".ogg",
+    # WebAssembly 模块：MP3 编码器用的是 wasm 版 LAME（vendor/wasm-mp3/mp3.wasm）。
+    ".wasm",
     # 乐谱字形字体（VexFlow 的 Bravura 等）。缺了这些，符头会退化成黑色方块。
     ".woff2", ".woff", ".ttf", ".otf",
 }
@@ -171,7 +173,9 @@ SECURITY_HEADERS = (
     ("Referrer-Policy", "no-referrer"),
     ("Content-Security-Policy", (
         "default-src 'self'; "
-        "script-src 'self'; "
+        # 'wasm-unsafe-eval' 只允许 WebAssembly 编译/实例化（MP3 编码器用 wasm 版 LAME，
+        # 比纯 JS 的 lamejs 快一个数量级）；它不等于放开 eval，JS 动态执行仍然被禁止。
+        "script-src 'self' 'wasm-unsafe-eval'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' data: https://fonts.gstatic.com; "
         "img-src 'self' blob: data:; "
@@ -389,9 +393,16 @@ class ProjectHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PROJECT_DIR), **kwargs)
 
+    # 这些是要跟着代码一起更新的文件：每次都必须向服务器确认（304 也很快），
+    # 绝对不能沿用浏览器启发式缓存——否则用户刷新后还在跑旧版 app.js。
+    NO_CACHE_SUFFIXES = (".html", ".js", ".mjs", ".css", ".json")
+
     def end_headers(self):
         for name, value in SECURITY_HEADERS:
             self.send_header(name, value)
+        path = urlsplit(self.path).path
+        if path in ("", "/") or path.endswith(self.NO_CACHE_SUFFIXES):
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
         super().end_headers()
 
     def send_json(self, status, payload):

@@ -65,6 +65,8 @@ const state = {
   noteRowById: null, highlightedIds: new Set(),
   // 音符 id → 音符对象（事件委托用）：整表重绘时重建，复制声部时增量补充。
   noteById: null, noteListDelegated: false, hoverRow: null,
+  // 谱面叠加层静态底图缓存（音符圆点/谱表框）：悬停、点选时只重画高亮，不再遍历全部音符。
+  overlayEpoch: 0, overlayBase: null, overlayBaseSignature: "",
   // 小节序号 → 小节 <section> 节点：复制声部时 O(1) 找到要插入的小节。
   measureGroups: null,
   // 时值选择菜单（全局只有一个，避免每行 19 个 <option>）。
@@ -968,37 +970,90 @@ function estimateStaffNotes(staff, binary, width, height, clef) {
   return { notes, tempo: 84, measureCount: 0, warnings: [], clef: CLEF_NAME_TO_SIGN[clef] || "" };
 }
 const CLEF_NAME_TO_SIGN = { treble: "G2", bass: "F4", alto: "C3", tenor: "C4" };
-function drawNoteOverlay(notes, focusedNoteId = null, staffBoxes = null) {
-  clearOverlay();
-  const ctx = els.overlayCanvas.getContext("2d");
-  const boxes = staffBoxes || state.staffBoxes;
-  const focusedNote = focusedNoteId ? notes.find((note) => note.id === focusedNoteId) : null;
-  const focusedStaff = focusedNote && boxes ? boxes[focusedNote.staffIndex] : null;
-  // 多行谱表时把每行谱表的识别区域画出来，便于确认切分是否正确、当前在看哪一行。
+/**
+ * 画（或取）谱面叠加层的「静态底图」：谱表框 + 每个音符的小圆点。
+ *
+ * 为什么单独缓存：OMR 识别出来的大谱有几千个带坐标的音符，原来鼠标在音符列表上
+ * 每移动一行就把这几千个圆点整个重画一遍，单次几十毫秒——用户感受到的就是「卡」。
+ * 底图只在「音符集合变了（renderNotes）/ 谱表框变了 / 画布尺寸变了」时才重画，
+ * 悬停和点选只做一次 drawImage + 画当前高亮，单次降到 1–2 毫秒。
+ */
+function overlayBaseCanvas(notes, boxes) {
+  const signature = state.overlayEpoch + "|" + notes.length + "|"
+    + (boxes ? boxes.length : 0) + "|" + els.overlayCanvas.width + "x" + els.overlayCanvas.height;
+  if (state.overlayBase && state.overlayBaseSignature === signature) return state.overlayBase;
+  const canvas = document.createElement("canvas");
+  canvas.width = els.overlayCanvas.width;
+  canvas.height = els.overlayCanvas.height;
+  const ctx = canvas.getContext("2d");
+  // 多行谱表时把每行谱表的识别区域画出来，便于确认切分是否正确。
   if (boxes && boxes.length > 1) {
-    boxes.forEach((staff, index) => {
-      const inThisStaff = focusedStaff === staff;
+    boxes.forEach((staff) => {
       const left = Number.isFinite(staff.left) ? staff.left : 0;
-      const right = Number.isFinite(staff.right) ? staff.right : els.overlayCanvas.width;
+      const right = Number.isFinite(staff.right) ? staff.right : canvas.width;
       ctx.beginPath();
       ctx.rect(left, staff.top - 3, right - left, staff.bottom - staff.top + 6);
-      ctx.fillStyle = inThisStaff ? "rgba(71, 113, 93, .10)" : "rgba(71, 113, 93, .035)";
+      ctx.fillStyle = "rgba(71, 113, 93, .035)";
       ctx.fill();
-      ctx.lineWidth = inThisStaff ? 1.6 : 1;
-      ctx.strokeStyle = inThisStaff ? "rgba(71, 113, 93, .55)" : "rgba(71, 113, 93, .16)";
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(71, 113, 93, .16)";
       ctx.stroke();
     });
   }
-  // 音符的纵坐标可以由音高精确推算（横坐标不能，所以不画点，改画一条音高基准线）。
-  // 例外：简谱识别会回传音符在页面上的真实像素坐标，这类音符直接画点、并可点选定位。
-  notes.forEach((note) => {
-    if (!Number.isFinite(note.x) || !Number.isFinite(note.y)) return;
+  // 音符的纵坐标可以由音高精确推算（横坐标不能，所以不画点），
+  // 例外：简谱/图片识别会回传音符在页面上的真实像素坐标，这类音符直接画点。
+  for (const note of notes) {
+    if (!Number.isFinite(note.x) || !Number.isFinite(note.y)) continue;
     ctx.beginPath();
-    ctx.arc(note.x, note.y, focusedNote === note ? 5 : 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = focusedNote === note ? "rgba(220, 145, 103, .85)" : "rgba(71, 113, 93, .55)";
+    ctx.arc(note.x, note.y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(71, 113, 93, .55)";
     ctx.fill();
-  });
-  if (focusedNote && focusedStaff && focusedNote.pitch) {
+    ctx.beginPath();
+    ctx.arc(note.x, note.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(120, 167, 132, .19)";
+    ctx.fill();
+    ctx.lineWidth = 1.7;
+    ctx.strokeStyle = "rgba(67, 117, 79, .82)";
+    ctx.stroke();
+  }
+  state.overlayBase = canvas;
+  state.overlayBaseSignature = signature;
+  return canvas;
+}
+
+function drawNoteOverlay(notes, focusedNoteId = null, staffBoxes = null) {
+  const ctx = els.overlayCanvas.getContext("2d");
+  const boxes = staffBoxes || state.staffBoxes;
+  const focusedNote = focusedNoteId ? notes.find((note) => note.id === focusedNoteId) : null;
+  // 底图（几千个点）直接贴上来；没有聚焦时到这里就结束了
+  clearOverlay();
+  ctx.drawImage(overlayBaseCanvas(notes, boxes), 0, 0);
+  if (!focusedNote) return;
+  const focusedStaff = boxes ? boxes[focusedNote.staffIndex] : null;
+  // 当前音符：高亮圈
+  if (Number.isFinite(focusedNote.x) && Number.isFinite(focusedNote.y)) {
+    ctx.beginPath();
+    ctx.arc(focusedNote.x, focusedNote.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(220, 145, 103, .35)";
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = "rgba(180, 92, 55, .95)";
+    ctx.stroke();
+  }
+  // 当前谱表：整行加亮
+  if (focusedStaff) {
+    const left = Number.isFinite(focusedStaff.left) ? focusedStaff.left : 0;
+    const right = Number.isFinite(focusedStaff.right) ? focusedStaff.right : els.overlayCanvas.width;
+    ctx.beginPath();
+    ctx.rect(left, focusedStaff.top - 3, right - left, focusedStaff.bottom - focusedStaff.top + 6);
+    ctx.fillStyle = "rgba(71, 113, 93, .10)";
+    ctx.fill();
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = "rgba(71, 113, 93, .55)";
+    ctx.stroke();
+  }
+  // 音高基准线（横坐标不可靠，只画纵坐标线帮助对准谱表）
+  if (focusedStaff && focusedNote.pitch) {
     const match = /^([A-Ga-g])(?:\(([-+]?\d+(?:\.\d+)?)\)|(##|bb|#|b))?(-?\d{1,2})$/.exec(focusedNote.pitch.trim());
     if (match) {
       const y = yForPitch(match[1].toUpperCase(), Number(match[4]), focusedStaff, focusedNote.clefName || "treble");
@@ -1018,17 +1073,6 @@ function drawNoteOverlay(notes, focusedNoteId = null, staffBoxes = null) {
       ctx.fillStyle = "rgba(180, 92, 55, .95)";
       ctx.fill();
     }
-  }
-  for (const note of notes) {
-    if (!Number.isFinite(note.x) || !Number.isFinite(note.y)) continue;
-    const focused = note.id === focusedNoteId;
-    ctx.beginPath();
-    ctx.arc(note.x, note.y, focused ? 8 : 5, 0, Math.PI * 2);
-    ctx.fillStyle = focused ? "rgba(220, 145, 103, .35)" : "rgba(120, 167, 132, .19)";
-    ctx.fill();
-    ctx.lineWidth = focused ? 2.5 : 1.7;
-    ctx.strokeStyle = focused ? "rgba(180, 92, 55, .95)" : "rgba(67, 117, 79, .82)";
-    ctx.stroke();
   }
 }
 /**
@@ -1492,6 +1536,8 @@ function renderNotes() {
   // 行索引 & 音符索引：事件委托靠它从 DOM 找回音符对象。
   state.noteRowById = new Map();
   state.noteById = new Map();
+  state.overlayEpoch += 1;   // 音符集合变了：谱面叠加层底图作废
+  state.overlayBase = null;
   for (const note of state.notes) state.noteById.set(note.id, note);
   state.measureGroups = new Map();
   state.hoverRow = null;
@@ -2275,11 +2321,42 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
     if (!(scoreInfo.warnings || []).includes(tempoNote)) scoreInfo.warnings = [...(scoreInfo.warnings || []), tempoNote];
   }
   // 图片型低清 PDF：把「为什么不准」如实写进结果，而不是让用户对着错音纳闷。
+  scheduleTimbrePreload();
+
   if (state.lowResPdf) {
     const note = `这份 PDF 是图片型文档（每页约 ${state.lowResPdf.dpi} DPI），谱面字号太小，识别准确率会明显下降；`
       + "建议换 300 DPI 以上的清晰扫描件或矢量 PDF，并逐音校对后再使用。";
     if (!(scoreInfo.warnings || []).includes(note)) scoreInfo.warnings = [...(scoreInfo.warnings || []), note];
   }
+}
+
+/**
+ * 空闲时后台预加载「这次识别/导入会用到」的采样音源。
+ *
+ * 为什么值得：真实钢琴/人声这些采样音源第一次加载要 2–8 秒（11 分钟大谱实测 8 秒），
+ * 以前要等用户点「导出 MP3」才开始加载，那几秒全加在导出耗时上；点播放也会卡一下。
+ * 现在识别完成 1.5 秒后（用户通常还在看谱面）就在后台按需加载，导出/试听时已经就绪。
+ * 只加载当前乐谱实际用到的音色，不会把 83 个音源全读进来。
+ */
+let timbrePreloadTimer = null;
+function scheduleTimbrePreload() {
+  if (timbrePreloadTimer) clearTimeout(timbrePreloadTimer);
+  timbrePreloadTimer = setTimeout(() => {
+    timbrePreloadTimer = null;
+    if (!state.notes.length) return;
+    const needed = new Set();
+    for (const note of state.notes) {
+      const key = voiceIdentity(note);
+      if (needed.has(key)) continue;
+      needed.add(key);
+      const timbre = timbreForPart(key);
+      if (!isSampledTimbre(timbre)) continue;
+      const loaded = state.sampleBanks.get(timbre);
+      if (loaded && loaded.ready) continue;
+      // 不 await：让它在后台慢慢加载，界面上只会看到状态栏的进度提示
+      ensureSampleBank(timbre).catch(() => {});
+    }
+  }, 1500);
 }
 
 /**
@@ -3178,7 +3255,7 @@ const AUDIO_EXPORT_KBPS = 128;
  */
 const EXPORT_RENDER = {
   minSecondsPerChunk: 15,   // 每块至少这么长；太碎反而更慢（每块都有固定开销）
-  maxChunks: 8,             // 实测 8 块以内继续变快，再多收益趋零（179 秒长曲实测）
+  maxChunks: 12,            // 长曲实测：688 秒 8 块 7.45 s → 12 块 5.51 s；短曲被 minSecondsPerChunk 卡住不变
   overlapSeconds: 2.4,      // 前后多渲：混响 1.9 秒 + 压限器 release 0.24 秒，留余量
   // 往前看超过这么远就不值得分块了（长音太多）：12 秒能覆盖钹 8.5 / 碰铃 6.3 秒这类
   // 常见打击乐长尾；小锣 19.5、大锣 27.3 秒则退回整块渲染（宁慢勿错）。
@@ -3385,6 +3462,8 @@ async function renderPlanToBuffer(plan, { onProgress } = {}) {
         right.set(buffer.getChannelData(1).subarray(job.takeStart, job.takeStart + available), writeAt);
       }
       writeAt += job.frames;
+      // 拼完这一块就释放它：长曲 8 块 × 几十 MB，早释放能明显压低峰值内存（少触发大 GC）。
+      rendered[index] = null;
     }
     return output;
   } finally {
@@ -3439,6 +3518,105 @@ function encodeMp3(left, right, sampleRate = AUDIO_EXPORT_RATE, kbps = AUDIO_EXP
   return new Blob(chunks, { type: "audio/mpeg" });
 }
 
+/**
+ * 把一段 AudioBuffer 里的声道「原地」归一化到目标峰值。
+ *
+ * 为什么不再复制两份新数组：一段 11 分钟的立体声音频是 2 × 121 MB，
+ * 旧写法 normalizePeak 会再复制两份（峰值扫描后再 scale），内存一下子翻三倍，
+ * 浏览器光 GC 就要卡很久。这里直接改原数组，只多算一遍峰值。
+ *
+ * @returns {{gain: number, left: Float32Array, right: Float32Array}}
+ */
+function normalizeBufferInPlace(buffer, target = 0.89) {
+  const channels = [];
+  for (let index = 0; index < buffer.numberOfChannels; index += 1) channels.push(buffer.getChannelData(index));
+  let peak = 0;
+  for (const channel of channels) {
+    for (let index = 0; index < channel.length; index += 1) {
+      const value = Math.abs(channel[index]);
+      if (value > peak) peak = value;
+    }
+  }
+  const gain = peak <= 1e-6 ? 1 : Math.min(8, target / peak);
+  if (gain !== 1) {
+    for (const channel of channels) {
+      for (let index = 0; index < channel.length; index += 1) channel[index] *= gain;
+    }
+  }
+  const left = channels[0] || new Float32Array(0);
+  const right = channels[1] || left;
+  return { gain, left, right };
+}
+
+/**
+ * 用 Web Worker + WebAssembly 版 LAME 编码 MP3。
+ *
+ * 两个好处：
+ *  · 速度：wasm 版 LAME 比纯 JS 的 lamejs 快约 3–5 倍（实测 120 秒音频 3.48 s → 1.06 s）；
+ *  · 不卡界面：编码在 Worker 里跑，主线程能继续响应点击/滚动（旧写法编码 11 分钟音频要卡 30 多秒）。
+ *
+ * 输入是主线程的 Float32Array，用 transferable 直接转移（零拷贝、主线程立刻释放内存）。
+ * 编码完成后 Worker 把 MP3 字节转移回来，这里拼成 Blob。
+ *
+ * @param {Float32Array} left
+ * @param {Float32Array} right
+ * @param {{kbps?: number, onProgress?: (fraction: number) => void}} options
+ * @returns {Promise<Blob>}
+ */
+function encodeMp3WithWorker(left, right, { kbps = AUDIO_EXPORT_KBPS, onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = new Worker("./vendor/mp3-encode-worker.js", { type: "module" });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    let settled = false;
+    const finish = (action, payload) => {
+      if (settled) return;
+      settled = true;
+      worker.terminate();
+      worker = null;
+      action(payload);
+    };
+    worker.addEventListener("message", (event) => {
+      const message = event.data || {};
+      if (message.type === "progress") {
+        if (typeof onProgress === "function") onProgress(Math.min(1, Math.max(0, Number(message.done) || 0)));
+        return;
+      }
+      if (message.type === "done") {
+        finish(resolve, new Blob([message.mp3], { type: "audio/mpeg" }));
+        return;
+      }
+      if (message.type === "error") finish(reject, new Error(message.message || "MP3 编码失败"));
+    });
+    worker.addEventListener("error", (event) => finish(reject, new Error((event && event.message) || "MP3 编码 Worker 出错")));
+    // 声道数据用 transferable 转移：不复制，主线程这边立刻可回收（之后不能再读这两个数组）
+    const transfer = [];
+    if (left.buffer && left.byteLength) transfer.push(left.buffer);
+    if (right !== left && right.buffer && right.byteLength) transfer.push(right.buffer);
+    const payload = {
+      type: "encode",
+      left,
+      right,
+      sampleRate: AUDIO_EXPORT_RATE,
+      kbps,
+    };
+    try {
+      worker.postMessage(payload, transfer);
+    } catch (error) {
+      // 某些老浏览器不允许 transfer（或 buffer 已被 detach）：退回普通结构化克隆
+      try {
+        worker.postMessage(payload);
+      } catch (secondError) {
+        finish(reject, secondError);
+      }
+    }
+  });
+}
+
 /** WAV 兜底（16 位 PCM 立体声）。 */
 function encodeWav(left, right, sampleRate = AUDIO_EXPORT_RATE) {
   const frames = left.length;
@@ -3482,6 +3660,7 @@ function encodeWav(left, right, sampleRate = AUDIO_EXPORT_RATE) {
  *   片段 → 音符选区（点序号 / Shift+点）
  */
 async function exportAudio() {
+  const exportStartedAt = performance.now();
   const playbackNotes = getPlaybackNotes();
   if (!playbackNotes.length) {
     showToast("还没有音符，先识别或导入一份乐谱。");
@@ -3541,6 +3720,7 @@ async function exportAudio() {
   try {
     // 采样音源没准备好就渲染，那些声部会退回合成音色（和试听不一致）。
     // 这里把用到的采样音源先都加载完。
+    let bankMark = performance.now();
     const neededTimbres = new Set();
     for (const key of plan.partKeys) neededTimbres.add(timbreForPart(key));
     for (const timbre of neededTimbres) {
@@ -3552,8 +3732,13 @@ async function exportAudio() {
         console.info("音源加载失败，这段会用合成音色", timbre, error);
       }
     }
+    const bankMs = Math.round(performance.now() - bankMark);
     els.audioExportLabel.textContent = "正在渲染…";
     els.audioExportLabel.textContent = "渲染中…";
+    const exportStats = { seconds: Math.round(plan.totalSeconds), notes: plan.notes.length };
+    exportStats.prepareMs = Math.round(performance.now() - exportStartedAt);
+    exportStats.bankMs = bankMs;
+let exportMark = performance.now();
     const buffer = await renderPlanToBuffer(plan, {
       onProgress: (fraction, label) => {
         // 复用识别进度条的位置，但文案必须说清是「导出」，否则用户以为是又在识别
@@ -3561,29 +3746,50 @@ async function exportAudio() {
         els.recognizeProgress.hidden = false;
       },
     });
-    const channels = [];
-    for (let index = 0; index < buffer.numberOfChannels; index += 1) {
-      channels.push(buffer.getChannelData(index));
-    }
-    const { left, right } = stereoChannels(channels);
-    const normalized = normalizePeak(left, right, 0.89);
+    exportStats.renderMs = Math.round(performance.now() - exportMark);
+    exportMark = performance.now();
+    // 峰值归一化改成原地做：不再整段复制两份数组（长曲能省几百 MB 内存、少一次大 GC）。
+    const normalized = normalizeBufferInPlace(buffer, 0.89);
+    exportStats.normalizeMs = Math.round(performance.now() - exportMark);
+    exportMark = performance.now();
+    const left = normalized.left;
+    const right = normalized.right;
     els.audioExportLabel.textContent = "编码中…";
     setRecognizeProgress(0.95, 1, "导出音频 · 正在压缩成 MP3…");
     let blob = null;
     let extension = "wav";
-    if (await loadLame()) {
+    // 首选：Worker + wasm LAME（快、不卡界面）；不可用时退回原来的纯 JS 编码器。
+    if (typeof Worker === "function") {
       try {
-        blob = encodeMp3(normalized.left, normalized.right);
+        blob = await encodeMp3WithWorker(left, right, {
+          onProgress: (fraction) => setRecognizeProgress(0.95 + 0.04 * fraction, 1,
+            `导出音频 · 正在压缩成 MP3…（${Math.round(fraction * 100)}%）`),
+        });
+        extension = "mp3";
+      } catch (error) {
+        console.info("wasm MP3 编码不可用，退回内置编码器", error);
+        blob = null;
+      }
+    }
+    if (!blob && await loadLame()) {
+      try {
+        blob = encodeMp3(left, right);
         extension = "mp3";
       } catch (error) {
         console.info("MP3 编码失败，改用 WAV", error);
       }
     }
     if (!blob) {
-      blob = encodeWav(normalized.left, normalized.right);
+      blob = encodeWav(left, right);
       extension = "wav";
       showToast("MP3 编码器不可用，已导出 WAV（音质更好，体积更大）。");
     }
+    exportStats.encodeMs = Math.round(performance.now() - exportMark);
+    exportStats.extension = extension;
+    exportStats.totalMs = exportStats.prepareMs + exportStats.renderMs
+      + exportStats.normalizeMs + exportStats.encodeMs;
+    state.lastExportStats = exportStats;
+    console.info("[导出计时]", exportStats);
     const name = audioFileName(els.scoreTitle.textContent || (state.file && state.file.name) || "谱见",
       beatRange, extension);
     const url = URL.createObjectURL(blob);
@@ -5073,6 +5279,7 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   buildAudioPlan, renderPlanToBuffer, encodeMp3, getPlaybackNotes, playbackTimeline,
   playbackTempoSegments, beatsForNote, voiceIdentity, loadLame, normalizePeak, stereoChannels,
   EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
+  encodeMp3WithWorker, normalizeBufferInPlace, scheduleTimbrePreload,
   buildVoiceBlock };
 }
 renderNotes();
