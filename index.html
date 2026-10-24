@@ -209,9 +209,11 @@
                 <input type="checkbox" id="pianoToggle" checked /><span>包含钢琴伴奏</span>
               </label>
                             <div class="layer-toolbar" id="layerToolbar">
-                <span class="layer-label">加厚音色（复制一份当前声部，换乐器一起演奏）</span>
+                <span class="layer-label">加厚音色（复制当前声部：单个点一次，或填份数后点「批量复制」，换乐器一起演奏）</span>
                 <span class="layer-actions">
                   <button class="ghost-button small" id="addLayerPart" type="button" title="复制当前声部为新声部，可换音色/八度">＋ 复制成新声部</button>
+                  <button class="ghost-button small" id="addLayerBatch" type="button" title="把当前声部一次复制成多个新声部（份数看右边的输入框）">＋ 批量复制</button>
+                  <input class="layer-count-input" id="layerBatchCount" type="number" min="1" max="48" step="1" value="4" aria-label="批量复制成几个新声部" title="一次复制几份（1–48）" />
                   <button class="ghost-button small" id="addLayerEcho" type="button" title="给当前声部加一条高八度的同旋律">＋ 高八度叠加</button>
                   <button class="ghost-button small" id="addLayerLower" type="button" title="给当前声部加一条低八度的同旋律">＋ 低八度叠加</button>
                 </span>
@@ -257,7 +259,7 @@
           </div>
         </section>
       </main>
-      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-10-24·提速6</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
+      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-10-25·提速7</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="app.js"></script>

@@ -254,7 +254,18 @@ h1 span { color: var(--green); }
 }
 .layer-toolbar[hidden] { display: none; }
 .layer-label { font-size: 10px; color: #6f7d74; }
-.layer-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.layer-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.layer-count-input {
+  width: 44px;
+  padding: 3px 5px;
+  border: 1px solid #dfe5df;
+  border-radius: 7px;
+  background: #fff;
+  color: #4d5b53;
+  font-size: 11px;
+  text-align: center;
+}
+.layer-count-input:focus { outline: 2px solid #cfe3d6; outline-offset: 0; }
 .layer-actions .ghost-button {
   border: 1px solid #dfe5df;
   border-radius: 7px;

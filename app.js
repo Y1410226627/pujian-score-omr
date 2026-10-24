@@ -50,6 +50,7 @@ const els = {
   instrumentNote: byId("instrumentNote"), timbreSelect: byId("timbreSelect"), timbreHint: byId("timbreHint"),
   sampleStatus: byId("sampleStatus"), tempoHint: byId("tempoHint"),
   layerToolbar: byId("layerToolbar"), addLayerPart: byId("addLayerPart"),
+  addLayerBatch: byId("addLayerBatch"), layerBatchCount: byId("layerBatchCount"),
   addLayerEcho: byId("addLayerEcho"), addLayerLower: byId("addLayerLower"),
 };
 const state = {
@@ -1815,25 +1816,29 @@ function duplicatePart(sourceKey, options = {}) {
   state.partsCache = null;
   if (options.timbre) state.partTimbres.set(newId, options.timbre);
   if (state.selectedParts instanceof Set) state.selectedParts.add(newId);
-  let mark = performance.now();
-  updatePartControls();
-  perf.partPanelMs = Math.round(performance.now() - mark);
-  mark = performance.now();
-  appendPartNoteRows(newId, copies);
-  perf.rowsMs = Math.round(performance.now() - mark);
-  mark = performance.now();
-  refreshScoreOverlay();
-  perf.overlayMs = Math.round(performance.now() - mark);
-  mark = performance.now();
-  updatePlaybackReady();
-  perf.readyMs = Math.round(performance.now() - mark);
-  const octaveText = semitones > 0 ? "高八度" : semitones < 0 ? "低八度" : "同音高";
-  showToast(`已把「${partDisplayName(sourceKey, sourceKey)}」复制成新声部「${name}」（${octaveText}，${copies.length} 个音），可在声部行单独选音色。`);
-  perf.totalMs = Math.round(performance.now() - perf.t0);
-  perf.copiedNotes = copies.length;
-  perf.notesAfter = state.notes.length;
-  reportUiPerf("duplicate", perf);
-  return { key: newId, name, count: copies.length };
+  // deferUi：批量复制时由调用方最后统一刷新一次界面。
+  // 为什么需要：逐个复制要各刷一遍声部面板/谱面/播放按钮，几十个声部时会白卡 N 倍时间。
+  if (!options.deferUi) {
+    let mark = performance.now();
+    updatePartControls();
+    perf.partPanelMs = Math.round(performance.now() - mark);
+    mark = performance.now();
+    appendPartNoteRows(newId, copies);
+    perf.rowsMs = Math.round(performance.now() - mark);
+    mark = performance.now();
+    refreshScoreOverlay();
+    perf.overlayMs = Math.round(performance.now() - mark);
+    mark = performance.now();
+    updatePlaybackReady();
+    perf.readyMs = Math.round(performance.now() - mark);
+    const octaveText = semitones > 0 ? "高八度" : semitones < 0 ? "低八度" : "同音高";
+    showToast(`已把「${partDisplayName(sourceKey, sourceKey)}」复制成新声部「${name}」（${octaveText}，${copies.length} 个音），可在声部行单独选音色。`);
+    perf.totalMs = Math.round(performance.now() - perf.t0);
+    perf.copiedNotes = copies.length;
+    perf.notesAfter = state.notes.length;
+    reportUiPerf("duplicate", perf);
+  }
+  return { key: newId, name, count: copies.length, copies };
 }
 /** 让新声部名不重复（否则声部面板会把同名合在一起，用户会以为没加上）。 */
 function uniquePartName(baseName) {
@@ -1856,6 +1861,64 @@ function addLayerOctave(semitones) {
   if (!key) return showToast("还没有声部可以叠加，先识别或导入一份乐谱。");
   const label = semitones > 0 ? "高八度" : "低八度";
   duplicatePart(key, { semitones, name: `${partDisplayName(key, key)} · ${label}` });
+}
+
+/**
+ * 一次把某个声部复制成 count 个新声部（批量加厚）。
+ *
+ * 结果和逐个点「复制成新声部」完全一样（每个新声部都有独立的音量/音色/勾选），
+ * 区别只是界面只刷新一次，所以几十个声部也是一两秒内完成，而不是点几十次。
+ *
+ * @returns {Array<{key:string, name:string, count:number, copies:Array}>}
+ */
+function duplicatePartMany(sourceKey, count) {
+  const wanted = Math.max(1, Math.min(48, Math.round(Number(count) || 0)));
+  const created = [];
+  for (let index = 0; index < wanted; index += 1) {
+    const result = duplicatePart(sourceKey, { deferUi: true });
+    if (!result) break;
+    created.push(result);
+  }
+  if (!created.length) return created;
+  // 界面只统一刷新一次
+  updatePartControls();
+  for (const item of created) appendPartNoteRows(item.key, item.copies || []);
+  refreshScoreOverlay();
+  updatePlaybackReady();
+  return created;
+}
+
+/**
+ * 「＋ 批量复制」按钮：按输入框里的份数，一次把当前声部复制成多个新声部。
+ *
+ * 用户反馈「想要复制多个声部，一个一个点太麻烦了」——这里份数由用户自己填（1–48），
+ * 默认记住上次用的份数。一次加太多会先提示，避免几万个音符把浏览器拖死。
+ */
+function addLayerBatch() {
+  const key = focusedPartKey();
+  if (!key) return showToast("还没有声部可以复制，先识别或导入一份乐谱。");
+  const sourceCount = state.notes.filter((note) => voiceIdentity(note) === key).length;
+  if (!sourceCount) return showToast("这个声部还没有音符，先识别或添加音符再复制。");
+  const input = els.layerBatchCount;
+  const raw = input ? Number(input.value) : 4;
+  const wanted = Math.round(Number(raw) || 0);
+  const count = Math.max(1, Math.min(48, wanted || 1));
+  if (input) input.value = String(count);
+  if (wanted > 48) showToast("一次最多复制 48 个声部，已按 48 个处理。");
+  // 防止一次造出太多音符把浏览器拖死（30 万个音已经是几万行音符列表的上限）
+  if (sourceCount * count > 300000) {
+    return showToast(`一次会新增 ${sourceCount * count} 个音符（超过 30 万），浏览器会非常卡；请把份数改小一点。`);
+  }
+  saveSettings({ layerBatchCount: count });
+  const perf = { t0: performance.now(), sourceKey: key, copies: count, sourceNotes: sourceCount };
+  const created = duplicatePartMany(key, count);
+  perf.totalMs = Math.round(performance.now() - perf.t0);
+  perf.created = created.length;
+  perf.notesAfter = state.notes.length;
+  reportUiPerf("duplicate-batch", perf);
+  if (!created.length) return showToast("复制失败：这个声部还没有音符。");
+  showToast(`已把「${partDisplayName(key, key)}」一次复制成 ${created.length} 个新声部`
+    + `（共 ${state.notes.length} 个音），可在每条声部行分别改音色和音量。`);
 }
 
 /** 这个声部是否要参与演奏/导出。 */
@@ -5665,6 +5728,20 @@ if (els.measureJumpInput) els.measureJumpInput.addEventListener("keydown", (even
   }
 });
 if (els.addLayerPart) els.addLayerPart.addEventListener("click", addLayerPart);
+// 批量复制：份数输入框（记住上次用的份数），一键复制成 N 个新声部
+if (els.layerBatchCount) {
+  const savedBatch = Math.max(1, Math.min(48, Math.round(Number(loadSettings().layerBatchCount) || 4)));
+  els.layerBatchCount.value = String(savedBatch);
+  els.layerBatchCount.addEventListener("change", () => {
+    const value = Math.max(1, Math.min(48, Math.round(Number(els.layerBatchCount.value)) || 1));
+    els.layerBatchCount.value = String(value);
+    saveSettings({ layerBatchCount: value });
+  });
+  els.layerBatchCount.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); addLayerBatch(); }
+  });
+}
+if (els.addLayerBatch) els.addLayerBatch.addEventListener("click", addLayerBatch);
 if (els.addLayerEcho) els.addLayerEcho.addEventListener("click", () => addLayerOctave(12));
 if (els.addLayerLower) els.addLayerLower.addEventListener("click", () => addLayerOctave(-12));
 els.midiButton.addEventListener("click", downloadMidi);
@@ -5779,7 +5856,7 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   renderNotes, highlightEvent, updatePlaybackReady, commitScore, tempoPageBlob, omrPageBlob,
   // 性能基准用：暴露内部函数，测试才能分别量「复制声部 / 切八度 / 导出渲染」各花多久。
   // EXPORT_RENDER 可改（例如 maxChunks = 1 强制整块渲染），用来做分块/整块的逐样本保真比对。
-  duplicatePart, setPartOctave, refreshScoreOverlay, updatePartControls,
+  duplicatePart, duplicatePartMany, addLayerBatch, setPartOctave, refreshScoreOverlay, updatePartControls,
   buildAudioPlan, renderPlanToBuffer, encodeMp3, getPlaybackNotes, playbackTimeline,
   playbackTempoSegments, beatsForNote, voiceIdentity, loadLame, normalizePeak, stereoChannels,
   EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
