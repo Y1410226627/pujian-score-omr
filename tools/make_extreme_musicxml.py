@@ -26,19 +26,21 @@ def pitch_xml(midi):
     return "<step>%s</step>%s<octave>%d</octave>" % (name, alter, octave)
 
 
-def build(parts, measures):
+def build(parts, measures, distinct=None):
     lines = []
     lines.append('<?xml version="1.0" encoding="UTF-8"?>')
     lines.append('<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">')
     lines.append('<score-partwise version="3.1">')
-    lines.append('<work><work-title>极端规模压力测试（%d 声部 × %d 小节）</work-title></work>' % (parts, measures))
+    lines.append('<work><work-title>极端规模压力测试（%d 声部%s × %d 小节）</work-title></work>' % (parts, ("，其中 %d 个不同声部、其余为复制" % distinct) if distinct else "", measures))
     lines.append('<part-list>')
     for part in range(parts):
         lines.append('<score-part id="P%d"><part-name>声部%d</part-name></score-part>' % (part + 1, part + 1))
     lines.append('</part-list>')
+    distinct_count = distinct if distinct else parts
     for part in range(parts):
         # 声部音域铺开：低音区 → 高音区，保证几十个声部时各声部不会全挤在同一个八度。
-        base = 48 + round(part * 30 / max(1, parts - 1))
+        # distinct < parts 时，后面的是前面声部的「完全一样」的复制（模拟批量复制的叠加层）。
+        base = 48 + round((part % distinct_count) * 30 / max(1, distinct_count - 1))
         lines.append('<part id="P%d">' % (part + 1))
         for measure in range(1, measures + 1):
             lines.append('<measure number="%d">' % measure)
@@ -67,10 +69,15 @@ def main():
         sys.exit(1)
     parts = int(sys.argv[1])
     measures = int(sys.argv[2])
+    distinct = int(sys.argv[3]) if len(sys.argv) > 3 else None
+    if distinct is not None and (distinct < 1 or distinct > parts):
+        print("distinct 必须在 1..parts 之间")
+        sys.exit(1)
     out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "perf")
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "extreme-%dv-%dm.musicxml" % (parts, measures))
-    text = build(parts, measures)
+    name = "extreme-%dv-%dm" % (parts, measures) + (("-d%d" % distinct) if distinct else "") + ".musicxml"
+    path = os.path.join(out_dir, name)
+    text = build(parts, measures, distinct)
     io.open(path, "w", encoding="utf-8", newline="\n").write(text)
     notes = parts * measures * BEATS_PER_MEASURE
     seconds = measures * BEATS_PER_MEASURE * 60 / BPM

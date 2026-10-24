@@ -94,6 +94,17 @@ h1 span { color: var(--green); }
 .part-piano input { margin: 0; accent-color: #47715d; }
 .part-hint { margin: 6px 0 0; }
 .note-columns, .note-row { display: grid; grid-template-columns: 23px minmax(45px, 1fr) 48px 82px 22px; gap: 5px; align-items: center; }
+.note-limit {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border: 1px solid #f0dfb8;
+  border-radius: 7px;
+  background: #fffaf0;
+  color: #8a6d20;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.note-limit[hidden] { display: none; }
 .note-columns { padding: 0 4px 4px; color: #a0aaa1; font-size: 8px; text-align: center; }
 .note-columns span:first-child, .note-columns span:last-child { visibility: hidden; }
 .note-row { padding: 5px 4px; border-bottom: 1px solid #f0f2ee; transition: background .15s; }.note-row.is-playing { background: #edf5ee; border-radius: 6px; }.note-index { color: #a1aaa3; font-size: 9px; text-align: center; }.note-pitch { width: 100%; height: 28px; padding: 0 7px; border: 1px solid #e8ece7; border-radius: 5px; outline: none; color: #334c3c; font-size: 10px; font-weight: 600; text-transform: uppercase; }.note-pitch:focus, .note-onset:focus, .note-duration:focus { border-color: #8eaa96; }.note-onset { width: 100%; height: 28px; padding: 0 3px; border: 1px solid #e8ece7; border-radius: 5px; outline: none; color: #68786d; font-size: 9px; text-align: center; }.note-duration { min-width: 0; width: 100%; height: 28px; border: 1px solid #e8ece7; border-radius: 5px; background: #fff; padding: 0 3px; color: #78857b; font-size: 9px; outline: none; }.delete-note { border: 0; width: 22px; height: 24px; display: grid; place-items: center; background: transparent; color: #aeb7af; font-size: 15px; cursor: pointer; border-radius: 4px; }.delete-note:hover { color: #ba6c57; background: #fbf0eb; }

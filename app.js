@@ -49,6 +49,7 @@ const els = {
   transposeInput: byId("transposeInput"), resetTranspose: byId("resetTranspose"),
   instrumentNote: byId("instrumentNote"), timbreSelect: byId("timbreSelect"), timbreHint: byId("timbreHint"),
   sampleStatus: byId("sampleStatus"), tempoHint: byId("tempoHint"),
+  noteLimitBanner: byId("noteLimitBanner"),
   layerToolbar: byId("layerToolbar"), addLayerPart: byId("addLayerPart"),
   addLayerBatch: byId("addLayerBatch"), layerBatchCount: byId("layerBatchCount"),
   addLayerEcho: byId("addLayerEcho"), addLayerLower: byId("addLayerLower"),
@@ -72,6 +73,9 @@ const state = {
   measureGroups: null,
   // 时值选择菜单（全局只有一个，避免每行 19 个 <option>）。
   durationMenu: null, durationMenuNote: null,
+  // 超大乐谱的音符列表限制：只渲染前 N 行（几十万行 DOM 会让内存和主线程崩掉）。
+  // noteRowsCapped=本次是否被截断；showAllNoteRows=用户点了「显示全部」。
+  noteRowsCapped: false, showAllNoteRows: false,
   // 演奏范围：selectedParts=null 表示全选；includePiano=是否把钢琴伴奏算进去。
   // partNames 存「声部标识 -> 用户改的名字」，改一次整份乐谱一起生效。
   selectedParts: null, includePiano: true, partNames: new Map(), pianoKeys: new Set(),
@@ -119,6 +123,10 @@ const state = {
 };
 // 粗略估算得到的符头置信分低于此值即标为"待校对"
 const LOW_CONFIDENCE_THRESHOLD = 0.5;
+// 音符列表最多渲染多少行。实测 20 万音符全渲染要 4.4 秒、DOM 内存几百 MB，
+// 播放时的 GC/重排就是「卡顿、放到一半没声」的元凶之一；只渲染前 1.2 万行后
+// 导入渲染从 4.4 秒降到约 0.3 秒，播放/导出完全不受影响（只是列表看不到后面的行）。
+const NOTE_ROW_RENDER_LIMIT = 12000;
 // 识谱（OMR）用的整页渲染参数。
 // · 普通（矢量）PDF：识谱图按 2600px 长边、3.8× 上限渲染——和以前一样的像素量，
 //   只是不再用 JPEG（JPEG 的二次压缩会伤到小音符和谱线）。
@@ -1460,7 +1468,8 @@ function updatePartPitchRows(partKey) {
     const input = row.querySelector(".note-pitch");
     if (input) input.value = note.pitch;
   }
-  if (missing) renderNotes();
+  // 列表被截断时，没渲染的行本来就不存在，换八度不需要整表重绘（否则十几万行会卡几秒）。
+  if (missing && !state.noteRowsCapped) renderNotes();
 }
 
 /**
@@ -1502,7 +1511,12 @@ function appendPartNoteRows(partKey, newNotes) {
     pending.push({ group, block, entries, cursor: 0, counted: false });
   }
   for (const note of newNotes) state.noteById.set(note.id, note);
-  if (!pending.length) { renderNotes(); return; }
+  if (!pending.length) {
+    // 列表被截断时，新声部的行可能落在截断范围之后：不渲染行即可，绝不能再整表重绘。
+    if (state.noteRowsCapped) return;
+    renderNotes();
+    return;
+  }
   if (newNotes.length <= 300) {
     fillNoteRows(pending, Infinity, Infinity);
     return;
@@ -1603,6 +1617,11 @@ function renderNotes() {
   const renderStartedAt = performance.now();
   els.noteList.replaceChildren();
   installNoteListDelegation();
+  // 超大乐谱（十几万个音，通常是批量复制出来的叠加层）只渲染前 NOTE_ROW_RENDER_LIMIT 行；
+  // 用户点「显示全部」才全渲染（会很慢，但这是用户自己的选择）。
+  const rowLimit = state.showAllNoteRows ? Infinity : NOTE_ROW_RENDER_LIMIT;
+  state.noteRowsCapped = state.notes.length > rowLimit;
+  updateNoteLimitBanner();
   // 行索引 & 音符索引：事件委托靠它从 DOM 找回音符对象。
   state.noteRowById = new Map();
   state.noteById = new Map();
@@ -1619,7 +1638,9 @@ function renderNotes() {
     const measures = groupNotesByMeasure();
     // 先攒在 DocumentFragment 里一次插入：8419 行时比分多次 append 少很多重排。
     const fragment = document.createDocumentFragment();
+    let renderedRows = 0;
     for (const measure of measures) {
+      if (renderedRows >= rowLimit) break;
       const group = document.createElement("section");
       group.className = "measure-group";
       group.dataset.measure = String(measure.measureIndex + 1);
@@ -1631,7 +1652,15 @@ function renderNotes() {
       meta.textContent = `${measure.count} 个音`;
       head.append(title, meta);
       group.append(head);
-      for (const voice of measure.voices) group.append(buildVoiceBlock(voice.name, voice.items));
+      for (const voice of measure.voices) {
+        if (renderedRows >= rowLimit) break;
+        const slice = renderedRows + voice.items.length <= rowLimit
+          ? voice.items
+          : voice.items.slice(0, rowLimit - renderedRows);
+        if (!slice.length) continue;
+        group.append(buildVoiceBlock(voice.name, slice));
+        renderedRows += slice.length;
+      }
       group.hidden = Boolean(state.onlyLowConfidence) && !group.querySelector(".note-row:not([hidden])");
       state.measureGroups.set(measure.measureIndex, group);
       fragment.append(group);
@@ -1649,12 +1678,46 @@ function renderNotes() {
   if (renderMs > 150) reportUiPerf("render-notes", { ms: renderMs, rows: state.noteRowById ? state.noteRowById.size : 0 });
 }
 
+/**
+ * 更新音符列表上方的「只显示前 N 行」提示条（超大乐谱时出现）。
+ *
+ * 为什么不虚拟滚动：行里是可编辑输入框、时值菜单、选中等交互，虚拟化改动风险大；
+ * 而「只渲染前 1.2 万行 + 一键显示全部」已经能把用户真实遇到的十几万行谱子
+ * 从「卡顿/没声」救回来，播放和导出本来就包含全部音符。
+ */
+function updateNoteLimitBanner() {
+  const banner = els.noteLimitBanner;
+  if (!banner) return;
+  if (!state.noteRowsCapped) {
+    banner.hidden = true;
+    return;
+  }
+  banner.hidden = false;
+  banner.textContent = `这份乐谱有 ${state.notes.length} 个音，为保证流畅，列表只显示前 ${NOTE_ROW_RENDER_LIMIT} 行`
+    + `（播放 / 导出 / MIDI 仍包含全部音符）。`;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-button small";
+  button.textContent = "显示全部（可能卡）";
+  button.addEventListener("click", () => {
+    state.showAllNoteRows = true;
+    renderNotes();
+    showToast("正在渲染全部音符行……如果卡住，刷新页面即可恢复只显示前 1.2 万行。");
+  });
+  banner.append(" ", button);
+}
+
 /** 在音符列表里跳到第 index 小节（1 起），并短暂高亮小节标题。 */
 function jumpToMeasureInList(index) {
   const target = Math.max(1, Math.floor(Number(index) || 1));
   const group = els.noteList.querySelector(`.measure-group[data-measure="${target}"]`);
   if (!group) {
-    showToast(`没有找到第 ${target} 小节。`);
+    if (state.noteRowsCapped) {
+      showToast(`这份乐谱有 ${state.notes.length} 个音，列表只渲染了前 ${NOTE_ROW_RENDER_LIMIT} 行；`
+        + `第 ${target} 小节在截断范围之后，点列表上方的「显示全部」才能看到（会比较卡）。`);
+    } else {
+      showToast(`没有找到第 ${target} 小节。`);
+    }
     return;
   }
   const listBox = els.noteList.getBoundingClientRect();
@@ -2148,7 +2211,12 @@ function updatePlaybackReady() {
   els.stopButton.disabled = !state.isPlaying;
 }
 function addNote() {
-  const eventId = state.notes.length ? Math.max(...state.notes.map((note) => note.eventId)) + 1 : 0;
+  // 同样不能用 Math.max(...notes.map())：几十万音符时调用栈会溢出
+  let maxEventId = 0;
+  for (const note of state.notes) {
+    if (Number.isFinite(note.eventId) && note.eventId > maxEventId) maxEventId = note.eventId;
+  }
+  const eventId = state.notes.length ? maxEventId + 1 : 0;
   const startBeat = state.notes.reduce((end, note) => Math.max(end, note.startBeat + beatsForNote(note)), 0);
   state.notes.push({ id: makeId(), eventId, pitch: "C4", midi: 60, duration: "quarter", durationBeats: 1, startBeat, x: NaN, y: NaN });
   renderNotes();
@@ -3432,6 +3500,9 @@ function buildMidiFile(notes = getPlaybackNotes(), offset = 0) {
 /** 采样率与码率：44.1 kHz / 128 kbps 立体声，兼容性最好。 */
 const AUDIO_EXPORT_RATE = 44100;
 const AUDIO_EXPORT_KBPS = 128;
+// 一次导出最多同时加载几种真实音源（几十个声部各一种乐器时，全部常驻会吃掉几 GB 内存）。
+// 超出的音色在渲染时自动退回同类合成音色（不会没声），优先保留音符最多的。
+const EXPORT_MAX_TIMBRES = 16;
 
 /**
  * 导出渲染的分块策略。
@@ -3593,7 +3664,7 @@ function schedulePlanWindow(offline, plan, windowFrom, windowTo, options) {
     const destination = partBus(note.partKey);
     humanOverride = note.human || null;
     try {
-      playTone(note.midi, at, note.durationSeconds * 0.99, note.peak, destination, note.partKey);
+      playTone(note.midi, at, note.durationSeconds * 0.99, note.peak, destination, note.partKey, note.timbre || null);
     } finally {
       humanOverride = null;
     }
@@ -3624,7 +3695,7 @@ async function schedulePlanWindowSliced(offline, plan, windowFrom, windowTo, opt
     const destination = partBus(note.partKey);
     humanOverride = note.human || null;
     try {
-      playTone(note.midi, at, note.durationSeconds * 0.99, note.peak, destination, note.partKey);
+      playTone(note.midi, at, note.durationSeconds * 0.99, note.peak, destination, note.partKey, note.timbre || null);
     } finally {
       humanOverride = null;
     }
@@ -3741,11 +3812,29 @@ async function renderPlanToBuffer(plan, { onProgress } = {}) {
           `渲染第 ${waveIndex}/${renderStats.waves} 组（共 ${ranges.length} 段）…`);
       }
       // 2) 这一波并行渲染（每个 startRendering 在不同线程上跑）
+      // 长曲一段就要渲染几十秒，进度条如果只在段完成时才动，用户会以为「点下去卡死」；
+      // 这里每秒刷新一次「已用 N 秒」，让人看得见它还在干活。
       const renderT0 = performance.now();
-      const buffers = await Promise.all(jobs.map((job) => job.offline.startRendering().then((buffer) => {
-        job.offline = null;             // 结果一到手就释放离线上下文，压低峰值内存
-        return buffer;
-      })));
+      let finishedChunks = 0;
+      const ticker = onProgress ? setInterval(() => {
+        const elapsed = Math.round((performance.now() - renderT0) / 1000);
+        onProgress(0.05 + 0.75 * ((waveStart + finishedChunks) / ranges.length),
+          `${waveIndex}/${renderStats.waves} 组渲染中 · 已用 ${elapsed} 秒（每完成一段会更新）…`);
+      }, 1000) : null;
+      let buffers;
+      try {
+        buffers = await Promise.all(jobs.map((job) => job.offline.startRendering().then((buffer) => {
+          job.offline = null;             // 结果一到手就释放离线上下文，压低峰值内存
+          finishedChunks += 1;
+          if (onProgress) {
+            onProgress(0.05 + 0.75 * ((waveStart + finishedChunks) / ranges.length),
+              `已渲染 ${waveStart + finishedChunks}/${ranges.length} 段音频…`);
+          }
+          return buffer;
+        })));
+      } finally {
+        if (ticker) clearInterval(ticker);
+      }
       renderSpent += performance.now() - renderT0;
       // 3) 立刻拼进输出缓冲，然后释放这一波
       for (let index = 0; index < jobs.length; index += 1) {
@@ -3977,9 +4066,14 @@ async function exportAudio() {
   if (state.isPlaying) stopPlayback();
   const selection = selectionRange();
   const { notes: timelineNotes } = playbackTimeline();
-  const offset = timelineNotes.length
-    ? Math.min(...timelineNotes.map((note) => Number(note.startBeat) || 0))
-    : 0;
+  // 注意：不能写 Math.min(...timelineNotes.map(...))——几十万音符时参数展开会让调用栈溢出
+  // （实测 20 万音符导出直接报 RangeError: Maximum call stack size exceeded）。
+  let offset = 0;
+  if (timelineNotes.length) {
+    offset = Infinity;
+    for (const note of timelineNotes) offset = Math.min(offset, Number(note.startBeat) || 0);
+    if (!Number.isFinite(offset)) offset = 0;
+  }
   const scoreInfo = state.scoreInfo || {};
   const tempoPlan = playbackTempoSegments(scoreInfo.tempoMarks || [], {
     offset: 0,
@@ -3996,7 +4090,12 @@ async function exportAudio() {
           .map((id) => state.notes.find((note) => note.id === id))
           .filter(Boolean)
           .map((note) => (Number(note.startBeat) || 0) + beatsForNote(note));
-        return starts.length ? { fromBeat: Math.min(...starts), toBeat: Math.max(...ends) } : null;
+        if (!starts.length) return null;
+        let fromBeat = Infinity;
+        let toBeat = -Infinity;
+        for (const value of starts) fromBeat = Math.min(fromBeat, value);
+        for (const value of ends) toBeat = Math.max(toBeat, value);
+        return { fromBeat: Number.isFinite(fromBeat) ? fromBeat : 0, toBeat: Number.isFinite(toBeat) ? toBeat : 0 };
       })()
     : null;
   const plan = buildAudioPlan({
@@ -4032,23 +4131,41 @@ async function exportAudio() {
   updatePlaybackReady();
   try {
     // 采样音源没准备好就渲染，那些声部会退回合成音色（和试听不一致）。
-    // 这里把用到的采样音源先都加载完。
+    // 这里把用到的采样音源先都加载完：用「计划里算好的音色」（而不是当前界面设置），
+    // 最多加载 EXPORT_MAX_TIMBRES 种、并行 3 路；超出的音色在渲染时自动退回同类合成音色，
+    // 避免「几十个声部各一种乐器」时把几 GB 解码音频同时压进内存。
     let bankMark = performance.now();
-    const neededTimbres = new Map();   // timbre -> 这次导出要用到的音高
+    const neededTimbres = new Map();   // timbre -> { midis:Set<number>, count:number }
     for (const note of plan.notes) {
-      const timbre = timbreForPart(note.partKey);
+      const timbre = note.timbre;
       if (!isSampledTimbre(timbre)) continue;
-      if (!neededTimbres.has(timbre)) neededTimbres.set(timbre, new Set());
-      if (Number.isFinite(note.midi)) neededTimbres.get(timbre).add(Math.round(note.midi));
+      if (!neededTimbres.has(timbre)) neededTimbres.set(timbre, { midis: new Set(), count: 0 });
+      const entry = neededTimbres.get(timbre);
+      entry.count += 1;
+      if (Number.isFinite(note.midi)) entry.midis.add(Math.round(note.midi));
     }
-    for (const [timbre, midis] of neededTimbres) {
-      els.audioExportLabel.textContent = "载入音源…";
-      try {
-        await ensureSampleBank(timbre, { midis, reason: "export" });
-      } catch (error) {
-        console.info("音源加载失败，这段会用合成音色", timbre, error);
+    const rankedTimbres = [...neededTimbres.entries()].sort((left, right) => right[1].count - left[1].count);
+    const keepTimbres = rankedTimbres.slice(0, EXPORT_MAX_TIMBRES);
+    if (rankedTimbres.length > EXPORT_MAX_TIMBRES) {
+      showToast(`这次导出用到 ${rankedTimbres.length} 种不同的真实音色，`
+        + `为保证内存和速度只加载最重要的 ${EXPORT_MAX_TIMBRES} 种；其余声部用合成音色替代（不会没声）。`);
+    }
+    let bankNext = 0;
+    const bankTotal = keepTimbres.length;
+    const loadBankWorker = async () => {
+      while (bankNext < keepTimbres.length) {
+        const slot = bankNext;
+        bankNext += 1;
+        const [timbre, entry] = keepTimbres[slot];
+        els.audioExportLabel.textContent = `载入音源 ${slot + 1}/${bankTotal}…`;
+        try {
+          await ensureSampleBank(timbre, { midis: entry.midis, reason: "export" });
+        } catch (error) {
+          console.info("音源加载失败，这段会用合成音色", timbre, error);
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, bankTotal) }, () => loadBankWorker()));
     const bankMs = Math.round(performance.now() - bankMark);
     els.audioExportLabel.textContent = "正在渲染…";
     els.audioExportLabel.textContent = "渲染中…";
@@ -4952,8 +5069,18 @@ function fillTimbreOptions(select, { followGlobal = false } = {}) {
   }
 }
 
-/** 最多同时保留几个采样音源在内存里（每个 20–40 MB，再多容易把老机器撑爆）。 */
-const MAX_LOADED_SAMPLE_BANKS = 10;   // 配合内存预算淘汰；当前乐谱用到的音色永不淘汰
+/**
+ * 最多同时保留几个采样音源在内存里。
+ *
+ * 为什么从 10 提到 16 还要加「硬上限」：用户实测给 74 个声部各配了一种真实乐器，
+ * 旧规则「当前乐谱用到的音色永不淘汰」让 74 个音源全部常驻内存（约 2 GB+ 解码音频），
+ * 浏览器 GC/内存压力直接表现为播放卡顿、放到一半没声。现在：
+ *   · 总数不超过 16 个、总内存不超过 700 MB；
+ *   · 优先淘汰「当前乐谱没用」的音源，实在超标时连在用的也按最久没用淘汰；
+ *   · 播放时只保留前 PLAYBACK_MAX_TIMBRES 种真实音色（见 buildPlaybackTimbrePlan），
+ *     其余声部用合成音色兜底——不会没声，也不会为了几十种音色把内存撑爆。
+ */
+const MAX_LOADED_SAMPLE_BANKS = 16;
 
 /** 更新界面上的「真实音源」状态提示（装没装、加载到百分之几、哪些已就绪）。 */
 function updateSampleStatus(message) {
@@ -5008,14 +5135,13 @@ function sampleBankMb(bank) {
 }
 
 /**
- * 音源内存缓存淘汰。
+ * 音源内存缓存淘汰（带硬上限）。
  *
- * 规则：正在加载的这个 + 当前乐谱用到的音色绝不淘汰（否则每次播放/切回来都要重新加载），
- * 其余按「最久没用」淘汰，同时受「个数上限」和「总内存预算」双重限制。
- * 真实钢琴这种大音源按需加载后约 60 MB，预算 460 MB 能同时留住 8–10 个音源，
- * 用户在音色下拉里来回切换时基本都能命中缓存（0 毫秒）。
+ * 规则：正在加载的 + 当前乐谱用到的音色优先保留；但个数和总内存有**硬上限**，
+ * 超标时连在用的音源也按「最久没用」淘汰——宁可下次播放某个声部退回合成音色，
+ * 也不能让几十种真实音色把浏览器内存撑爆（实测那会直接卡顿/没声）。
  */
-const SAMPLE_BANK_MEMORY_BUDGET_MB = 460;
+const SAMPLE_BANK_MEMORY_BUDGET_MB = 700;
 function pruneSampleBanks(keepName) {
   const inUse = new Set();
   for (const key of new Set(state.notes.map((note) => voiceIdentity(note)))) {
@@ -5027,9 +5153,22 @@ function pruneSampleBanks(keepName) {
     const bank = state.sampleBanks.get(name);
     if (bank) totalMb += sampleBankMb(bank);
   }
+  const overLimit = () => state.sampleBanks.size > MAX_LOADED_SAMPLE_BANKS
+    || totalMb > SAMPLE_BANK_MEMORY_BUDGET_MB;
+  if (!overLimit()) return;
+  // 第一轮：先淘汰「当前乐谱没用到」的（最久没用优先）
   for (const name of state.sampleOrder.slice()) {
-    if (state.sampleBanks.size <= MAX_LOADED_SAMPLE_BANKS && totalMb <= SAMPLE_BANK_MEMORY_BUDGET_MB) break;
+    if (!overLimit()) break;
     if (name === keepName || inUse.has(name)) continue;
+    const bank = state.sampleBanks.get(name);
+    if (bank) totalMb -= sampleBankMb(bank);
+    state.sampleBanks.delete(name);
+    state.sampleOrder = state.sampleOrder.filter((item) => item !== name);
+  }
+  // 第二轮：还超标就淘汰在用的里最久没用的（硬上限，防止内存爆炸）
+  for (const name of state.sampleOrder.slice()) {
+    if (!overLimit()) break;
+    if (name === keepName) continue;
     const bank = state.sampleBanks.get(name);
     if (bank) totalMb -= sampleBankMb(bank);
     state.sampleBanks.delete(name);
@@ -5038,18 +5177,62 @@ function pruneSampleBanks(keepName) {
 }
 
 /**
- * 点「试听」前，把这次演奏要用到的采样音源都加载好。
+ * 一次演奏最多同时用几种不同的真实采样音色。
+ *
+ * 用户实测给 74 个声部各配一种真实乐器：74 个音源约 2 GB+ 解码音频，
+ * 播放时既有内存压力、又要同时调和几十个采样器——这是「卡顿/放到一半没声」的根源之一。
+ * 超过这个数就只保留「音符最多」的 12 种真实音色，其余声部退回同类合成音色（不会没声）。
+ */
+const PLAYBACK_MAX_TIMBRES = 12;
+
+/**
+ * 规划这次演奏每个声部到底用哪种音色。
+ *
+ * 返回的 partTimbre 直接给 playTone 当音色覆盖：被「音色预算」挤掉的声部
+ * 映射到同类合成音色（例如真实二胡 → 合成弦乐），保证一定有声、也不占音源内存。
+ */
+function buildPlaybackTimbrePlan(notes = null) {
+  const source = notes || getPlaybackNotes();
+  const perPart = new Map();
+  const counts = new Map();
+  for (const note of source) {
+    if (!Number.isFinite(note.midi)) continue;
+    const key = voiceIdentity(note);
+    if (!perPart.has(key)) perPart.set(key, timbreForPart(key));
+    const timbre = perPart.get(key);
+    counts.set(timbre, (counts.get(timbre) || 0) + 1);
+  }
+  const sampled = [...counts.entries()]
+    .filter(([timbre]) => isSampledTimbre(timbre))
+    .sort((left, right) => right[1] - left[1]);
+  const keep = new Set(sampled.slice(0, PLAYBACK_MAX_TIMBRES).map(([timbre]) => timbre));
+  const partTimbre = new Map();
+  const degraded = new Set();
+  for (const [key, timbre] of perPart) {
+    if (isSampledTimbre(timbre) && !keep.has(timbre)) {
+      degraded.add(timbre);
+      partTimbre.set(key, SAMPLED_TIMBRES[timbre].fallback);
+    } else {
+      partTimbre.set(key, timbre);
+    }
+  }
+  return { partTimbre, keep, degraded, sampledCount: sampled.length };
+}
+
+/**
+ * 点「试听」前，把这次演奏要用到的采样音源都加载好（并行，最多 3 路）。
  *
  * 为什么要等：以前播放开始得太早，音源还没解码完的音会退回合成音色——
  * 用户听感就是「音源加载跟不上演奏」。现在先把要用的加载完（正常情况已在后台预加载好，
  * 命中缓存时是 0 毫秒），再开始调度；加载时间用进度条如实显示。
  */
-async function ensurePlaybackTimbres(onStatus) {
+async function ensurePlaybackTimbres(onStatus, timbrePlan = null) {
+  const plan = timbrePlan || buildPlaybackTimbrePlan();
   const needed = new Map();
   for (const note of getPlaybackNotes()) {
     if (!Number.isFinite(note.midi)) continue;
-    const timbre = timbreForPart(voiceIdentity(note));
-    if (!isSampledTimbre(timbre)) continue;
+    const timbre = plan.partTimbre.get(voiceIdentity(note));
+    if (!timbre || !isSampledTimbre(timbre)) continue;
     if (!needed.has(timbre)) needed.set(timbre, new Set());
     needed.get(timbre).add(Math.round(note.midi));
   }
@@ -5059,15 +5242,28 @@ async function ensurePlaybackTimbres(onStatus) {
     if (bank && bank.ready) continue;
     pending.push([timbre, midis]);
   }
-  for (let index = 0; index < pending.length; index += 1) {
-    const [timbre, midis] = pending[index];
-    if (onStatus) onStatus(timbre, index, pending.length);
-    try {
-      await ensureSampleBank(timbre, { midis, reason: "play" });
-    } catch (error) {
-      console.info("音源加载失败，这几个声部会用合成音色", error);
-    }
+  if (plan.degraded.size) {
+    showToast(`这次演奏用到 ${plan.sampledCount} 种不同的真实音色，为保证流畅只加载最重要的 `
+      + `${PLAYBACK_MAX_TIMBRES} 种；其余声部暂时用合成音色（声音还在，避免卡顿/没声；导出仍按原音色）。`);
   }
+  if (!pending.length) return;
+  // 并行加载 3 路：以前 14 种音色串行要 7 秒以上，用户点播放会以为死机。
+  let next = 0;
+  const total = pending.length;
+  const worker = async () => {
+    while (next < pending.length) {
+      const slot = next;
+      next += 1;
+      const [timbre, midis] = pending[slot];
+      if (onStatus) onStatus(timbre, slot, total);
+      try {
+        await ensureSampleBank(timbre, { midis, reason: "play" });
+      } catch (error) {
+        console.info("音源加载失败，这几个声部会用合成音色", error);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, total) }, () => worker()));
 }
 
 /**
@@ -5397,10 +5593,14 @@ function playSynthTone(chosen, midi, startAt, duration, peak, destination, partK
   }
 }
 
-/** 按声部音色把一个音符交给对应音源（采样优先、没装/没加载好就用合成音色兜底）。 */
-function playTone(midi, startAt, duration, peak = 0.16, destination = null, partKey = "") {
+/** 按声部音色把一个音符交给对应音源（采样优先、没装/没加载好就用合成音色兜底）。
+ *
+ * @param {string|null} timbreOverride 指定音色（播放音色预算/导出计划用）；
+ *        为空时才按声部当前设置（state.partTimbres → 全局音色）解析。
+ */
+function playTone(midi, startAt, duration, peak = 0.16, destination = null, partKey = "", timbreOverride = null) {
   if (!state.audio || !Number.isFinite(midi)) return;
-  const chosen = timbreForPart(partKey);
+  const chosen = timbreOverride || timbreForPart(partKey);
   if (isSampledTimbre(chosen)) {
     const bank = state.sampleBanks.get(chosen);
     if (bank && bank.ready) {
@@ -5508,14 +5708,18 @@ async function playMelody() {
   if (!AudioContextClass) return showToast("当前浏览器不支持音频播放，请使用较新的浏览器。");
   if (!state.audio) state.audio = new AudioContextClass();
   await state.audio.resume();
-  // 音源没准备好就开播，前几个音会退回合成音色（听感就是「音源加载跟不上演奏」）。
-  // 这里先把这次演奏要用到的采样音源加载完再开始（正常已在后台预加载好，命中时 0 毫秒）。
+
+  // 音色预算：几十个声部各一种真实音色时，只保留最重要的 12 种，其余用合成音色，
+  // 避免 74 个音源（约 2 GB+）把内存撑爆——那正是「播放卡顿、放到一半没声」的根因之一。
+  const timbrePlan = buildPlaybackTimbrePlan(playbackNotes);
+  // 音源没准备好就开播，前几个音会退回合成音色。这里先把这次演奏要用到的加载完
+  // （并行 3 路，正常已在后台预加载好，命中时 0 毫秒）。
   if (!state.isPlaying) {
     await ensurePlaybackTimbres((timbre, index, total) => {
       const label = TIMBRE_LABELS[timbre] || timbre;
       els.playLabel.textContent = `载入音源 ${index + 1}/${total} · ${label}`;
       els.scoreHint.textContent = `正在载入音源：${label}（${index + 1}/${total}）…`;
-    });
+    }, timbrePlan);
     els.playLabel.textContent = "播放全曲";
     if (!getPlaybackNotes().length) return;
   }
@@ -5524,6 +5728,11 @@ async function playMelody() {
   state.timers = [];
   const tempo = Math.min(320, Math.max(20, Number(els.tempoInput.value) || 84));
   els.tempoInput.value = tempo;
+
+  // ===== 预计算：把「每个音什么时候响、响多久、多大声、走哪条声部总线、用什么音色」都提前算好 =====
+  // 以前这些要在每个调度窗口里逐音现算（时间换算/力度查找/声部解析/音色缓存），
+  // 十几万音符、每秒几百个音时主线程每轮要花几十毫秒——实测会出现 600ms 的调度掉队。
+  // 现在只在开播时算一遍（约 0.1–0.2 秒），之后每轮调度只是「取数组 → 建节点」。
   const eventMap = new Map();
   for (const note of playbackNotes) {
     const onset = Math.max(0, (Number(note.startBeat) || 0) - offset);
@@ -5535,8 +5744,51 @@ async function playMelody() {
   }
   const events = [...eventMap.values()].sort((a, b) => a.startBeat - b.startBeat);
   const timeline = buildPlaybackTimeline(offset);
+  // 声部总线提前建好（74 个声部时每个声部要建 1 条 gain+panner，第一次建的总线不能落在调度窗口里）。
+  const busByPart = new Map();
+  for (const partKey of timbrePlan.partTimbre.keys()) busByPart.set(partKey, partBus(partKey));
+  for (const event of events) {
+    const onset = Math.max(0, event.startBeat);
+    const firstBeats = event.notes[0] ? beatsForNote(event.notes[0]) : 1;
+    const eventSeconds = Math.max(0.05, timeline.secondsAtBeat(onset + firstBeats) - timeline.secondsAtBeat(onset));
+    const dynamics = gainForDynamics(timeline.dynamicsAtBeat(onset));
+    const secondsCache = new Map([[firstBeats, eventSeconds]]);
+    event.atSeconds = timeline.secondsAtBeat(event.startBeat);
+    event.ids = event.notes.map((note) => note.id);
+    event.entries = [];
+    for (const note of event.notes) {
+      const noteBeats = beatsForNote(note);
+      let seconds = secondsCache.get(noteBeats);
+      if (seconds === undefined) {
+        seconds = Math.max(0.05, timeline.secondsAtBeat(onset + noteBeats) - timeline.secondsAtBeat(onset));
+        secondsCache.set(noteBeats, seconds);
+      }
+      const partKey = voiceIdentity(note);
+      event.entries.push({
+        midi: note.midi,
+        seconds: seconds * 0.99,     // 留 1% 间隙，连奏段落里不会听成「莫名的停顿」
+        peak: dynamics,
+        bus: busByPart.get(partKey) || null,
+        partKey,
+        timbre: timbrePlan.partTimbre.get(partKey) || null,
+      });
+    }
+  }
+
+  // 自适应提前量：每秒音符越多，单轮调度越重（也越容易被 GC/界面操作打断），
+  // 就提前更久建节点，用更大的缓冲换「不出现空档」。
+  const scoreSeconds = Math.max(1, timeline.secondsAtBeat(finishBeat));
+  const notesPerSecond = playbackNotes.length / scoreSeconds;
+  const aheadSeconds = notesPerSecond > 120 ? 3.4 : notesPerSecond > 60 ? 2.6 : SCHEDULER.aheadSeconds;
+  const tickMs = notesPerSecond > 120 ? 150 : SCHEDULER.tickMs;
+
   // 诊断：滚动调度进度（调试钩子/性能测试读；每窗口两次赋值，开销可忽略）。
-  state.playbackStats = { events: events.length, notes: playbackNotes.length, cursor: 0, windows: 0, lastAhead: 0, startedAt: performance.now() };
+  state.playbackStats = {
+    events: events.length, notes: playbackNotes.length, cursor: 0, windows: 0,
+    lastAhead: 0, startedAt: performance.now(),
+    notesPerSecond: Number(notesPerSecond.toFixed(1)), aheadSeconds, tickMs,
+    timbres: timbrePlan.partTimbre.size, degradedTimbres: timbrePlan.degraded.size,
+  };
   const headStart = state.audio.currentTime + SCHEDULER.headStartSeconds;
   state.isPlaying = true;
   updatePlaybackControls();
@@ -5544,8 +5796,7 @@ async function playMelody() {
   // ===== 滚动窗口调度（性能关键，别改回"一次性全建"）=====
   // 整曲一次把上千个音符的音频节点全建出来，实测（44 小节 / 1408 音符）主线程卡 820 ms，
   // 并且上千个"还没开始响"的振荡器仍会被音频线程逐个处理，弱机器直接爆音（噼里啪啦）。
-  // 改成只提前 SCHEDULER.aheadSeconds 秒建节点、每 SCHEDULER.tickMs 毫秒补一次后，
-  // 任意时刻音频图里只有几十个音，主线程每轮只花几毫秒（实测 1408 音符的图里只有 48 个源）。
+  // 现在只提前 aheadSeconds 秒建节点、每 tickMs 毫秒补一次，且所有逐音参数已预计算。
   let cursor = 0;
   // 本轮调度出去的「要一起高亮的音符」：攒起来用**一个** setTimeout 批量高亮。
   // 原实现是每个事件一个 setTimeout（8419 音 → 8419 个定时器），定时器队列本身就会拖慢主线程。
@@ -5563,30 +5814,17 @@ async function playMelody() {
         nowMs - state.playbackWatch.lastTickAt);
       state.playbackWatch.lastTickAt = nowMs;
     }
-    const horizon = state.audio.currentTime + SCHEDULER.aheadSeconds;
+    const horizon = state.audio.currentTime + aheadSeconds;
     let lastHighlightDelay = -1;
     while (cursor < events.length) {
       const event = events[cursor];
-      const at = headStart + timeline.secondsAtBeat(event.startBeat);
+      const at = headStart + event.atSeconds;
       if (at > horizon) break;
       cursor += 1;
-      // 同一事件内所有音的起拍相同：时间换算一次就够，别每个音都算两遍。
-      const onset = Math.max(0, event.startBeat);
-      const eventSeconds = Math.max(0.05,
-        timeline.secondsAtBeat(onset + (event.notes[0] ? beatsForNote(event.notes[0]) : 1)) - timeline.secondsAtBeat(onset));
-      const dynamics = gainForDynamics(timeline.dynamicsAtBeat(onset));
-      for (const note of event.notes) {
-        // 和弦里各音时值可能不同：只有和首个音不一样时才重新算
-        const noteBeats = beatsForNote(note);
-        const seconds = noteBeats === (event.notes[0] ? beatsForNote(event.notes[0]) : noteBeats)
-          ? eventSeconds
-          : Math.max(0.05, timeline.secondsAtBeat(onset + noteBeats) - timeline.secondsAtBeat(onset));
-        // 力度记号（P1-3）：该处起生效的力度决定音量峰值。
-        // 发音长度取名义时值的 0.99：留 8%（原来）× 的长度会在连奏段落里听成「莫名的停顿」。
-        playTone(note.midi, at, seconds * 0.99, dynamics,
-          partBus(voiceIdentity(note)), voiceIdentity(note));
+      for (const entry of event.entries) {
+        playTone(entry.midi, at, entry.seconds, entry.peak, entry.bus, entry.partKey, entry.timbre);
       }
-      pendingHighlights.push(...event.notes.map((note) => note.id));
+      for (const id of event.ids) pendingHighlights.push(id);
       lastHighlightDelay = Math.max(0, (at - state.audio.currentTime) * 1000);
     }
     if (state.playbackStats) {
@@ -5605,7 +5843,7 @@ async function playMelody() {
   };
   scheduleWindow();
   if (cursor < events.length) {
-    state.scheduleTimer = setInterval(scheduleWindow, SCHEDULER.tickMs);
+    state.scheduleTimer = setInterval(scheduleWindow, tickMs);
   }
 
   // ===== 播放看门狗（真机自愈，性能关键但不占什么资源）=====
@@ -5862,7 +6100,8 @@ if (new URLSearchParams(window.location.search).has("debug")) {
   EXPORT_RENDER, appendPartNoteRows, updatePartPitchRows, makeId, measureIndexForNote,
   encodeMp3WithWorker, normalizeBufferInPlace, scheduleTimbrePreload,
   whenNoteRowsIdle, reportUiPerf, ensurePlaybackTimbres, midisForTimbre,
-  preloadTimbreBank, setPartTimbre, exportAudio,
+  preloadTimbreBank, setPartTimbre, exportAudio, buildPlaybackTimbrePlan,
+  NOTE_ROW_RENDER_LIMIT, EXPORT_MAX_TIMBRES, MAX_LOADED_SAMPLE_BANKS,
   // 音源缓存快照：测试用来确认「换音色后已提前加载好」「重复声部只加载一次」「切回来 0 重载」。
   sampleSnapshot: () => ({
     loaded: [...state.sampleBanks.keys()],
