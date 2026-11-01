@@ -71,6 +71,71 @@ function readTieTypes(note) {
   return { start: types.has("start"), stop: types.has("stop") };
 }
 
+/**
+ * 力度记号 → 近似 MIDI 力度值。
+ *
+ * Audiveris 对「p / mf / f」这类印刷力度有时只写 `<dynamics><mf/></dynamics>`，
+ * 不附带 `<sound dynamics="...">`；以前这种记号会被当成「无法量化」而丢弃，
+ * 用户听感上就是「谱上的强弱记号没识别出来」。这里给每个常见记号一个近似值。
+ */
+const DYNAMIC_VALUES = {
+  ppp: 30, pp: 38, p: 48, mp: 58, mf: 70, f: 84, ff: 96, fff: 108,
+  fp: 70, sf: 92, sfz: 90, sffz: 96, rf: 88, rfz: 88, mfp: 62, pf: 60,
+};
+function dynamicValueFromMark(element) {
+  if (!element) return Number.NaN;
+  for (const child of Array.from(element.children || [])) {
+    const name = localName(child);
+    if (Object.prototype.hasOwnProperty.call(DYNAMIC_VALUES, name)) return DYNAMIC_VALUES[name];
+  }
+  return Number.NaN;
+}
+
+// 奏法优先级：重音 > 断奏 > 保持音（同音上若同时有多个，取最"响"的那个来演奏）。
+const ARTICULATION_PRIORITY = ["marcato", "accent", "staccatissimo", "staccato", "tenuto"];
+
+/**
+ * 读一个音符上的记号：圆滑线（slur）、奏法、延长号、琶音、装饰音、歌词、连音（tuplet）。
+ *
+ * 为什么放在解析器里：这些记号以前被整体忽略，只在 warnings 里说一句"不模拟"。
+ * 现在把标记落到音符上，试听/MIDI 导出就能真的体现断奏、重音、延长号与圆滑线的连奏。
+ */
+function readNoteDecoration(note) {
+  const notations = childNamed(note, "notations");
+  let slurStart = false, slurStop = false;
+  const articulations = [];
+  let fermata = false, arpeggiate = false, ornament = false;
+  if (notations) {
+    for (const slur of descendantsNamed(notations, "slur")) {
+      const type = slur.getAttribute("type");
+      if (type === "start") slurStart = true;
+      if (type === "stop") slurStop = true;
+    }
+    for (const child of Array.from(notations.children || [])) {
+      const name = localName(child);
+      if (name === "articulations") {
+        for (const mark of Array.from(child.children || [])) {
+          const markName = localName(mark);
+          if (ARTICULATION_PRIORITY.includes(markName)) articulations.push(markName);
+        }
+      } else if (name === "fermata") fermata = true;
+      else if (name === "arpeggiate") arpeggiate = true;
+      else if (name === "ornaments") ornament = true;
+    }
+  }
+  let lyric = "";
+  for (const lyricNode of childrenNamed(note, "lyric")) {
+    const text = textOf(lyricNode, "text");
+    if (text) { lyric = text; break; }
+  }
+  return {
+    slurStart, slurStop, articulations,
+    articulation: ARTICULATION_PRIORITY.find((name) => articulations.includes(name)) || "",
+    fermata, arpeggiate, ornament, lyric,
+    tuplet: Boolean(childNamed(note, "time-modification")),
+  };
+}
+
 function mergeTiedNotes(notes) {
   const merged = [], tiedNotes = new Map();
   for (const note of notes) {
@@ -119,11 +184,37 @@ export function parseMusicXmlText(source, options = {}) {
   const tempoMarks = [], dynamicsMarks = [], timeSignatures = new Set(), keySignatures = new Set();
   const warnings = new Set();
   let measureCount = 0, skippedNotes = 0;
+  // 谱面记号计数：识别结果里如实告诉用户「哪些符号真的读出来了」。
+  const symbols = {
+    slurs: 0, ties: 0, articulations: 0, staccato: 0, accent: 0, tenuto: 0,
+    fermatas: 0, arpeggiates: 0, ornaments: 0, tuplets: 0, lyrics: 0, marcato: 0, staccatissimo: 0,
+    dynamics: 0, wedges: 0, words: 0, rehearsals: 0, repeats: 0, endings: 0,
+  };
+  // 力度/渐强渐弱记号的原始事件（拍位在小节内，最后统一换算成全局拍位）。
+  const wedgeEvents = [];
   // 调用方传入的「已知拍号」（通常来自第 1 页）：只作为没有印拍号页面的兜底。
   const inheritedTime = plainTimeSignature(options && options.timeSignature);
-  const inheritedOnly = Boolean(inheritedTime) && !descendantsNamed(root, "time").some(hasContent);
+  // 逐系统识别专用：调用方从 PDF 文字层读到了每个小节真正印刷的拍号（含弱起/变拍子），
+  // 直接按「第 N 小节 = 某拍号」覆盖，避免 Audiveris 在变拍子处漏读后把整段时值算错。
+  const meterMap = Array.isArray(options && options.meterMap)
+    ? options.meterMap.map((value) => plainTimeSignature(value))
+    : null;
+  const forcedMeters = Boolean(meterMap && meterMap.some(Boolean));
+  // strictMeters：拍号已知时，小节长度严格按拍号算（不因 Audiveris 多读出的音而变长），
+  // 否则多读一个音就会把整小节拉长、后面所有音整体后移（用户听感就是「节拍跟不上、莫名空拍」）。
+  const strictMeters = Boolean(options && options.strictMeters && forcedMeters);
+  // assumeFirstMeasurePickup：旧行为——把每页第一小节的短内容当弱起。
+  // 逐系统识别时不能这么做：每个系统的第一小节并不是乐曲开头，短只是识别没读全。
+  const assumeFirstMeasurePickup = !(options && options.assumeFirstMeasurePickup === false);
+  const inheritedOnly = Boolean(inheritedTime) && !descendantsNamed(root, "time").some(hasContent) && !forcedMeters;
   // 只有本页确实没印拍号时才把继承值写进结果（本页自己印了拍号时以谱面为准）。
   if (inheritedOnly) timeSignatures.add(inheritedTime);
+  // 小节属性（弱起 implicit / 印刷小节号）：即使弱起小节里只有休止符、一个音符都没有，
+  // 调用方也要能判断出「第 0 小节是弱起」——所以从 MusicXML 结构里单独记一份。
+  const measureAttributes = (childrenNamed(musicParts[0], "measure")).map((measure, index) => ({
+    number: measure.getAttribute("number") || String(index + 1),
+    implicit: measure.getAttribute("implicit") === "yes",
+  }));
 
   // 第一遍：解析各声部的音符（记录"小节内起拍"）与该声部推算出的各小节长度。
   // 不在这里决定全局起拍，因为多声部/多谱表必须共享同一份小节长度表才能对齐。
@@ -141,6 +232,12 @@ export function parseMusicXmlText(source, options = {}) {
       measureNumber++;
       measureCount = Math.max(measureCount, measureNumber);
       const measureIndex = measureNumber - 1;
+      // PDF 文字层给出的「这一小节真正印刷的拍号」：变拍子就靠它逐小节纠正。
+      const mappedMeter = meterMap ? meterMap[measureIndex] : "";
+      if (mappedMeter) {
+        currentTime = mappedMeter;
+        timeSignatures.add(mappedMeter);
+      }
       let cursor = 0, maxCursor = 0, previousNoteStart = 0;
       for (const item of Array.from(measure.children)) {
         const itemName = localName(item);
@@ -192,15 +289,45 @@ export function parseMusicXmlText(source, options = {}) {
             if (perMinute > 0 && beatUnit) tempo = perMinute * beatUnit * unitMultiplier;
           }
           if (Number.isFinite(tempo) && tempo > 0) tempoMarks.push({ measureIndex, beatInMeasure: cursor + offset, bpm: tempo });
-          // Audiveris 等引擎用 <sound dynamics="89"> 给出强弱数值（近似 MIDI velocity），
-          // 采集后在播放时按音符起拍设置音量（P1-3）。
-          const dynamicsValue = sound?.hasAttribute("dynamics") ? Number(sound.getAttribute("dynamics")) : NaN;
-          if (Number.isFinite(dynamicsValue)) dynamicsMarks.push({ measureIndex, beatInMeasure: cursor + offset, dynamics: dynamicsValue });
-          else if (descendantsNamed(item, "dynamics").some(hasContent)) warnings.add("部分力度记号没有可用的音量数值，试听未体现其强弱。");
-          if (descendantsNamed(item, "words").some(hasContent)) warnings.add("文字演奏指示（如 rit./accel.）暂不改变合成试听。");
+          const directionType = childNamed(item, "direction-type");
+          // Audiveris 等引擎用 <sound dynamics="89"> 给出强弱数值（近似 MIDI velocity）；
+          // 没有 <sound dynamics> 时按印刷写着 p/mf/f… 的记号名换算，不再当"没有数值"丢掉。
+          let dynamicsValue = sound?.hasAttribute("dynamics") ? Number(sound.getAttribute("dynamics")) : NaN;
+          const dynamicsNode = directionType ? childNamed(directionType, "dynamics") : descendantsNamed(item, "dynamics")[0];
+          if (!Number.isFinite(dynamicsValue)) dynamicsValue = dynamicValueFromMark(dynamicsNode);
+          if (Number.isFinite(dynamicsValue)) {
+            dynamicsMarks.push({ measureIndex, beatInMeasure: cursor + offset, dynamics: dynamicsValue });
+            symbols.dynamics++;
+          } else if (dynamicsNode) {
+            warnings.add("部分力度记号没有可用的音量数值，试听未体现其强弱。");
+          }
+          // 渐强/渐弱（wedge）：记下起止与幅度，播放时按拍位线性过渡（P1-3 扩展）。
+          const wedge = directionType ? childNamed(directionType, "wedge") : null;
+          if (wedge) {
+            const type = wedge.getAttribute("type") || "";
+            if (type === "crescendo" || type === "diminuendo" || type === "stop") {
+              wedgeEvents.push({
+                measureIndex, beatInMeasure: cursor + offset, type,
+                spread: Number(wedge.getAttribute("spread")) || 0, partId,
+              });
+              symbols.wedges++;
+            }
+          }
+          if (directionType && childNamed(directionType, "rehearsal")) symbols.rehearsals++;
+          if (descendantsNamed(item, "words").some(hasContent)) {
+            symbols.words++;
+            warnings.add("文字演奏指示（如 rit./accel.）已识别，但合成试听不会跟着变速或朗读。");
+          }
           continue;
         }
-        if (itemName === "barline" && descendantsNamed(item, "repeat").length) warnings.add("乐谱含反复记号；当前播放按文件顺序播放一次。");
+        if (itemName === "barline") {
+          if (descendantsNamed(item, "repeat").length) {
+            warnings.add("乐谱含反复记号；当前播放按文件顺序播放一次。");
+            symbols.repeats++;
+          }
+          if (descendantsNamed(item, "ending").length) symbols.endings++;
+          continue;
+        }
         if (itemName !== "note") continue;
 
         const duration = noteDurationBeats(item, divisions);
@@ -248,6 +375,18 @@ export function parseMusicXmlText(source, options = {}) {
           continue;
         }
         const ties = readTieTypes(item);
+        const decoration = readNoteDecoration(item);
+        if (ties.start) symbols.ties++;
+        if (decoration.slurStart) symbols.slurs++;
+        if (decoration.articulation) {
+          symbols.articulations++;
+          if (Object.prototype.hasOwnProperty.call(symbols, decoration.articulation)) symbols[decoration.articulation]++;
+        }
+        if (decoration.fermata) symbols.fermatas++;
+        if (decoration.arpeggiate) symbols.arpeggiates++;
+        if (decoration.ornament) symbols.ornaments++;
+        if (decoration.tuplet) symbols.tuplets++;
+        if (decoration.lyric) symbols.lyrics++;
         const imagePositionComment = Array.from(item.childNodes || []).find((node) => node.nodeType === 8 && /imgpos\s*:/i.test(node.data || ""));
         const imagePosition = imagePositionComment && /imgpos\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i.exec(imagePositionComment.data);
         trackNotes.push({
@@ -258,6 +397,10 @@ export function parseMusicXmlText(source, options = {}) {
           x: imagePosition ? Number(imagePosition[1]) : Number.NaN,
           y: imagePosition ? Number(imagePosition[2]) : Number.NaN,
           tieStart: ties.start, tieStop: ties.stop,
+          slurStart: decoration.slurStart, slurStop: decoration.slurStop,
+          articulation: decoration.articulation, articulations: decoration.articulations,
+          fermata: decoration.fermata, arpeggiate: decoration.arpeggiate,
+          lyric: decoration.lyric,
         });
       }
       if (descendantsNamed(measure, "repeat").length) warnings.add("乐谱含反复记号；当前播放按文件顺序播放一次。");
@@ -265,9 +408,13 @@ export function parseMusicXmlText(source, options = {}) {
       let nominal = measureLength(currentTime, maxCursor, implicit);
       // 弱起（anacrusis）小节：制谱软件常标 implicit="yes"，但也有不少文件不标。
       // 首小节未标 implicit 且实际内容短于标称长度时，按实际内容计，否则后面所有小节都会整体右移。
-      if (!implicit && measureNumber === 1 && maxCursor > 0 && maxCursor < nominal) nominal = maxCursor;
+      // （逐系统识别时关掉这个猜测：每个系统的第一小节并不是乐曲开头。）
+      if (assumeFirstMeasurePickup && !implicit && measureNumber === 1 && maxCursor > 0 && maxCursor < nominal) nominal = maxCursor;
       let length = Math.max(nominal, maxCursor);
       let scale = 1;
+      // 拍号已知（来自 PDF 文字层）：严格按拍号算小节长度。Audiveris 偶尔多读出一个音，
+      // 旧逻辑会因此把这一小节拉长，导致后面整段节拍错位——这里宁可按拍号来。
+      if (strictMeters && mappedMeter && !implicit) length = nominal;
       // 拍号是从前面几页「借」来的、本页并没有印：Audiveris 的时值是按谱面宽度猜的，
       // 常把整小节休止/长音猜长。这里把超出标称拍数的小节等比缩回标称长度，
       // 否则页与页之间的起拍会越飘越远（实测 8 页累计漂移 30+ 拍，整曲节奏就散了）。
@@ -327,8 +474,49 @@ export function parseMusicXmlText(source, options = {}) {
     .sort((a, b) => a.beat - b.beat)
     .filter((mark, index, all) =>
       index === 0 || Math.abs(mark.beat - all[index - 1].beat) > 0.00001 || Math.abs(mark.dynamics - all[index - 1].dynamics) > 0.01);
-  if (descendantsNamed(root, "lyric").some(hasContent)) warnings.add("歌词保留在原 MusicXML 文件中，但当前音色不能演唱歌词。");
-  if (descendantsNamed(root, "articulations").some(hasContent) || descendantsNamed(root, "ornaments").some(hasContent)) warnings.add("奏法和装饰记号保留在源文件中，当前试听不会模拟这些效果。");
+  // 渐强/渐弱（wedge）：把成对的「起 → 止」换算成全局拍位区间，播放时在区间内线性过渡音量。
+  const wedgeMarks = [];
+  const openWedges = new Map();
+  for (const event of wedgeEvents) {
+    const beat = (globalBaseBeats[event.measureIndex] || 0) + event.beatInMeasure;
+    const open = openWedges.get(event.partId);
+    if (event.type === "stop") {
+      if (open && beat - open.startBeat > 0.01) {
+        wedgeMarks.push({ startBeat: open.startBeat, endBeat: beat, type: open.type, spread: open.spread });
+      }
+      openWedges.delete(event.partId);
+      continue;
+    }
+    if (open && beat - open.startBeat > 0.01) {
+      wedgeMarks.push({ startBeat: open.startBeat, endBeat: beat, type: open.type, spread: open.spread });
+    }
+    openWedges.set(event.partId, { startBeat: beat, type: event.type, spread: event.spread });
+  }
+  for (const open of openWedges.values()) {
+    if (runningBeat - open.startBeat > 0.01) {
+      wedgeMarks.push({ startBeat: open.startBeat, endBeat: runningBeat, type: open.type, spread: open.spread });
+    }
+  }
+  wedgeMarks.sort((left, right) => left.startBeat - right.startBeat);
+  // 小节结构（含弱起）：即使弱起小节里一个音符都没有，调用方也能据此把拍位/小节号排对。
+  const measures = (measureAttributes.length ? measureAttributes : []).map((item, index) => ({
+    number: item.number,
+    implicit: item.implicit,
+    lengthBeats: globalMeasureLengths[index] || 0,
+    startBeat: globalBaseBeats[index] || 0,
+  }));
+  for (let index = measures.length; index < measureCount; index++) {
+    measures.push({
+      number: String(index + 1),
+      implicit: false,
+      lengthBeats: globalMeasureLengths[index] || 0,
+      startBeat: globalBaseBeats[index] || 0,
+    });
+  }
+  // 记号提示：能演奏的（断奏/重音/保持音/延长号/圆滑线/渐强渐弱）不再说"不模拟"；
+  // 确实不模拟的（装饰音、琶音的先后、反复/一房二房）如实说明。
+  // 歌词/装饰音/琶音的提示统一放到装配完成后按「全曲总数」说一次（逐页各说一次会刷屏）。
+  if (symbols.endings && symbols.repeats) warnings.add("谱面有一房/二房等反复结尾记号，当前按文件顺序播放一次。");
   const tempo = uniqueTempoMarks.find((mark) => mark.beat <= 0.00001)?.bpm || 84;
   // tempoDetected：速度是不是**从谱面读到的**（而不是兜底的 84）。
   // 扫描谱要靠 OCR 才能读出「♩ = 66」这类文字；没读到时界面要如实提醒用户手动填 BPM。
@@ -351,10 +539,16 @@ export function parseMusicXmlText(source, options = {}) {
   const keySummary = keySignatures.size === 1 ? [...keySignatures][0] : keySignatures.size ? "有多种调性" : "调号未标明";
   return {
     title, notes: mergedNotes, tempo, tempoDetected, measureCount, partNames: musicParts.map((part) => partNames.get(part.getAttribute("id")) || part.getAttribute("id") || "声部"),
+    // partIds：与 partNames 同序的声部标识（逐系统装配时要按顺序把音符归到 P1..Pn）。
+    partIds: musicParts.map((part, index) => part.getAttribute("id") || `part-${index + 1}`),
     // totalBeats：本页总时长（拍），供跨页合并时把后一页整体平移。
     totalBeats: runningBeat,
-    // tempoMarks（中途速度变化）/ dynamicsMarks（力度）供播放调度按拍取用。
-    tempoMarks: uniqueTempoMarks, dynamicsMarks: uniqueDynamicsMarks,
+    // tempoMarks（中途速度变化）/ dynamicsMarks（力度）/ wedgeMarks（渐强渐弱）供播放调度按拍取用。
+    tempoMarks: uniqueTempoMarks, dynamicsMarks: uniqueDynamicsMarks, wedgeMarks,
+    // 小节结构：number/implicit/lengthBeats/startBeat。逐系统识别时靠它判断弱起、对齐小节号。
+    measures,
+    // 谱面记号统计：界面上如实告诉用户"读到了哪些符号"。
+    symbolCounts: { ...symbols },
     timeSummary, keySummary, warnings: [...warnings], clef: scoreClef,
   };
 }

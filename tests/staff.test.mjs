@@ -305,3 +305,235 @@ test("节奏量化：起拍吸附网格、时值补到下一个音、同音重�
     assert.ok(Math.abs(note.startBeat * 4 - Math.round(note.startBeat * 4)) < 1e-6, "起拍应在 1/4 拍网格上");
   }
 });
+// —— 2026-11-01：逐系统识别（《敕勒歌》特调）新增的纯函数 ——
+import {
+  detectBarlines,
+  canonicalPartRole,
+  resolveSystemRoles,
+  beatsPerMeter,
+  assignLayoutToSystems,
+  assembleSystemScores,
+  summarizeMeterChanges,
+} from "../staff.js";
+import { DOMParser } from "@xmldom/xmldom";
+globalThis.DOMParser = DOMParser;
+const { parseMusicXmlText } = await import("../musicxml.js");
+
+function staffSpec(top, spaced = 10) {
+  return { top, bottom: top + spaced * 4, spacing: spaced };
+}
+
+test("detectBarlines：跨谱表对齐的竖线才算小节线，符干不算", () => {
+  const width = 400, height = 260;
+  const binary = new Uint8Array(width * height);
+  const staves = [staffSpec(20), staffSpec(80), staffSpec(140)];
+  for (const staff of staves) {
+    for (let index = 0; index < 5; index++) {
+      const y = Math.round(staff.top + index * staff.spacing);
+      for (let x = 0; x < width; x++) binary[y * width + x] = 1;
+    }
+  }
+  // 三条真实小节线：贯穿三行谱表（含行间空隙）
+  for (const x of [40, 160, 300]) {
+    for (let y = 20; y <= 180; y++) binary[y * width + x] = 1;
+  }
+  // 两根符干：只在一行谱表范围内，不应被当成小节线
+  for (const [x, top] of [[100, 20], [230, 80]]) {
+    for (let y = top - 10; y <= top + 50; y++) binary[y * width + x] = 1;
+  }
+  const barlines = detectBarlines(binary, width, height, staves);
+  assert.equal(barlines.length, 3, "只保留三行谱表都有的竖线");
+  assert.deepEqual(barlines.map((barline) => Math.round(barline.x)), [40, 160, 300]);
+});
+
+test("canonicalPartRole：把谱面缩写/中英文标签归一成稳定声部名", () => {
+  assert.equal(canonicalPartRole("S."), "Soprano");
+  assert.equal(canonicalPartRole("Soprano"), "Soprano");
+  assert.equal(canonicalPartRole("A."), "Alto");
+  assert.equal(canonicalPartRole("Bar."), "Baritone");
+  assert.equal(canonicalPartRole("Pno."), "Piano");
+  assert.equal(canonicalPartRole("Piano"), "Piano");
+  assert.equal(canonicalPartRole("陶笛"), "陶笛");
+  assert.equal(canonicalPartRole("Ocarina"), "陶笛");
+  assert.equal(canonicalPartRole("女高音"), "Soprano");
+  assert.equal(canonicalPartRole("自定义声部"), "自定义声部", "认不出的标签原样保留");
+  assert.equal(canonicalPartRole(""), "");
+});
+
+test("resolveSystemRoles：标签够用时按谱面自上而下命名，不够时用兜底补齐", () => {
+  assert.deepEqual(resolveSystemRoles(["S.", "A.", "Bar.", "陶笛", "Pno."], [], ["Voice"], 5),
+    ["Soprano", "Alto", "Baritone", "陶笛", "Piano"]);
+  assert.deepEqual(resolveSystemRoles([], ["Soprano", "Alto", "Baritone", "陶笛", "Piano"], ["Voice", "Voice"], 5),
+    ["Soprano", "Alto", "Baritone", "陶笛", "Piano"]);
+  assert.deepEqual(resolveSystemRoles([], [], ["Voice", "Voice", "Bar."], 3),
+    ["Voice", "Voice 2", "Baritone"]);
+});
+
+test("beatsPerMeter：普通/加合拍号换算成每小节拍数", () => {
+  assert.equal(beatsPerMeter("4/4"), 4);
+  assert.equal(beatsPerMeter("6/4"), 6);
+  assert.equal(beatsPerMeter("6/8"), 3);
+  assert.equal(beatsPerMeter("3+2/8"), 2.5);
+  assert.equal(beatsPerMeter("拍号未标明"), 0);
+});
+
+test("assignLayoutToSystems：标签/印刷小节号/拍号字形落到正确的系统", () => {
+  const layout = {
+    labels: [
+      { text: "S.", x: 60, y: 90, height: 20 },
+      { text: "Pno.", x: 60, y: 250, height: 20 },
+      { text: "S.", x: 60, y: 490, height: 20 },
+      { text: "Pno.", x: 60, y: 650, height: 20 },
+    ],
+    bars: [
+      { bar: 54, x: 70, y: 50 },
+      { bar: 58, x: 70, y: 450 },
+    ],
+    timeGlyphs: [
+      { meter: "6/4", x: 100, y: 80, height: 20 },
+      { meter: "4/4", x: 230, y: 80, height: 20 },
+      { meter: "4/4", x: 100, y: 480, height: 20 },
+    ],
+  };
+  const systems = [
+    { top: 60, bottom: 340, firstStaffTop: 70, lastStaffBottom: 330, barlines: [40, 220, 400, 700] },
+    { top: 440, bottom: 720, firstStaffTop: 460, lastStaffBottom: 710, barlines: [40, 500, 800] },
+  ];
+  const result = assignLayoutToSystems(layout, systems);
+  assert.equal(result.length, 2);
+  assert.deepEqual(result[0].labels, ["S.", "Pno."]);
+  assert.equal(result[0].anchorBar, 54);
+  assert.deepEqual(result[0].meterMap, ["6/4", "4/4", "4/4"], "第二个小节起转 4/4（小节线 4 条 → 3 小节）");
+  assert.equal(result[1].anchorBar, 58);
+  // 第一节系统 4 条小节线 → 3 小节；印刷小节号差 58-54 = 4 只作检测失败时的兜底。
+  assert.equal(result[0].measureCount, 3);
+  assert.equal(result[0].anchorMeasureCount, 4);
+  assert.equal(result[1].measureCount, 2, "最后一个系统没有下一个印刷小节号，退回数小节线");
+  assert.deepEqual(result[1].meterMap, ["4/4", "4/4"], "拍号跨系统延续");
+});
+
+function systemXml(options) {
+  const { measures, time = "4/4", parts = 2, noteCount = 2, firstNumber = 1, pickup = false } = options;
+  const divisions = 4;
+  const partList = Array.from({ length: parts }, (_, index) =>
+    `<score-part id="P${index + 1}"><part-name>${index === 0 ? "S." : index === 1 ? "A." : "Pno."}</part-name></score-part>`).join("");
+  const measureXml = (index) => {
+    const number = index + (pickup && options.firstSystem ? 0 : firstNumber);
+    const attributes = index === 0 ? `<attributes><divisions>${divisions}</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` : "";
+    const body = index === 0 && pickup
+      ? `<note><rest/><duration>4</duration><voice>1</voice><staff>1</staff></note>`
+      : Array.from({ length: noteCount }, (_, noteIndex) => {
+        const step = ["C", "D", "E", "F", "G", "A", "B"][(noteIndex + index) % 7];
+        return `<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>`;
+      }).join("");
+    return `<measure number="${number}"${index === 0 && pickup ? ' implicit="yes"' : ""}>${attributes}${body}</measure>`;
+  };
+  return `<score-partwise><part-list>${partList}</part-list>` +
+    Array.from({ length: parts }, (_, partIndex) => `<part id="P${partIndex + 1}">` +
+      Array.from({ length: measures }, (_, index) => measureXml(index)).join("") + "</part>").join("") +
+    `</score-partwise>`;
+}
+
+test("assembleSystemScores：两系统首尾相接、声部按标签命名、弱起小节记 0", () => {
+  const first = parseMusicXmlText(systemXml({ measures: 2, pickup: true, firstSystem: true, noteCount: 2 }));
+  const second = parseMusicXmlText(systemXml({ measures: 2, firstNumber: 1, noteCount: 2 }));
+  const score = assembleSystemScores([
+    { scoreInfo: first, labels: ["S.", "A."], meterMap: ["4/4", "4/4"], measureCount: 2 },
+    { scoreInfo: second, labels: ["S.", "A."], meterMap: ["4/4", "4/4"], measureCount: 2 },
+  ], { measureBase: 1 });
+  assert.deepEqual(score.partNames, ["Soprano", "Alto"], "标签归一成谱面声部名");
+  const partIds = [...new Set(score.notes.map((note) => note.partId))].sort();
+  assert.deepEqual(partIds, ["P1", "P2"], "跨系统同名声部合并，不会因每系统重新编号而分裂");
+  // 第 1 系统：弱起 1 拍 + 1 个满小节；第 2 系统从第 5 拍开始
+  const secondSystemNote = score.notes.find((note) => note.startBeat >= 5);
+  assert.equal(secondSystemNote.startBeat, 5, "第二系统紧接第一系统（1 + 4 拍）");
+  assert.deepEqual(score.notes.filter((note) => note.measure === "0").map((note) => note.partId), [], "弱起小节里只有休止符，没有可演奏音符");
+  assert.equal(score.notes[0].measure, "1", "第一个正规小节是第 1 小节");
+  assert.equal(score.measureCount, 3, "两个系统共 3 个正规小节（弱起不算小节数）");
+  assert.equal(score.totalBeats, 13, "弱起 1 拍 + 3 个正规小节 × 4 拍");
+  assert.equal(score.notes.find((note) => note.startBeat === 1).measure, "1");
+  assert.equal(score.notes.find((note) => note.startBeat === 5).measure, "2");
+});
+
+test("assembleSystemScores：小节数按印刷小节线补齐/截断，并给出如实提示", () => {
+  const parsed = parseMusicXmlText(systemXml({ measures: 3, noteCount: 4 }));
+  // 原谱有 4 小节，Audiveris 只识别出 3 小节（漏掉一条小节线）
+  const score = assembleSystemScores([
+    { scoreInfo: parsed, labels: ["S.", "A."], meterMap: ["6/4", "4/4", "4/4", "4/4"], measureCount: 4 },
+  ], { measureBase: 1 });
+  assert.equal(score.measureCount, 4, "以印刷小节线为准：4 小节");
+  assert.equal(score.totalBeats, 18, "6 + 4 + 4 + 4");
+  assert.ok(score.warnings.some((warning) => warning.includes("多 1 个小节")), "补小节要如实告知用户");
+});
+
+test("assembleSystemScores：变拍子写进拍号说明（第几小节是 6/4）", () => {
+  const parsed = parseMusicXmlText(systemXml({ measures: 2, noteCount: 4 }));
+  const score = assembleSystemScores([
+    { scoreInfo: parsed, labels: ["S.", "A."], meterMap: ["6/4", "4/4"], measureCount: 2 },
+  ], { measureBase: 54 });
+  assert.equal(score.totalBeats, 10, "6/4 小节 6 拍 + 4/4 小节 4 拍");
+  assert.match(score.timeSummary, /6\/4/);
+  assert.deepEqual(score.meterChanges.map((change) => change.measure), [54, 55]);
+});
+
+test("summarizeMeterChanges：一句话说清变拍子在哪几小节", () => {
+  assert.equal(summarizeMeterChanges([{ measure: 1, meter: "4/4" }]), "4/4");
+  assert.equal(
+    summarizeMeterChanges([
+      { measure: 1, meter: "4/4" },
+      { measure: 54, meter: "6/4" },
+      { measure: 55, meter: "4/4" },
+      { measure: 66, meter: "6/4" },
+      { measure: 67, meter: "4/4" },
+    ]),
+    "4/4（第 54、66 小节为 6/4）",
+  );
+  assert.equal(summarizeMeterChanges([], "拍号未标明"), "拍号未标明");
+});
+
+test("mergePageScores：变拍子说明随跨页小节偏移一起平移", () => {
+  const page1 = { notes: [], warnings: [], partNames: ["S."], tempo: 68, tempoDetected: true, measureCount: 10, totalBeats: 41, timeSummary: "4/4", meterChanges: [{ measure: 1, meter: "4/4" }], symbolCounts: { slurs: 2 } };
+  const page2 = { notes: [], warnings: [], partNames: ["S."], tempo: 68, tempoDetected: true, measureCount: 7, totalBeats: 28, timeSummary: "4/4", meterChanges: [{ measure: 1, meter: "4/4" }, { measure: 5, meter: "6/4" }], symbolCounts: { slurs: 3 } };
+  const merged = mergePageScores([page1, page2]);
+  assert.deepEqual(merged.meterChanges.map((change) => change.measure), [1, 11, 15], "第 2 页的小节号整体 +10");
+  assert.equal(merged.symbolCounts.slurs, 5, "记号统计跨页累加");
+  assert.equal(merged.measureCount, 17);
+});
+
+test("assembleSystemScores：离谱的速度值（OCR 把 68 读成 6）不进入结果", () => {
+  const xml = `<score-partwise>
+    <part-list><score-part id="P1"><part-name>S.</part-name></score-part></part-list>
+    <part id="P1">
+      <measure number="1"><attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>6</per-minute></metronome></direction-type></direction>
+        <note><pitch><step>C</step><octave>4</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note>
+      </measure>
+    </part>
+  </score-partwise>`;
+  const parsed = parseMusicXmlText(xml);
+  const score = assembleSystemScores([{ scoreInfo: parsed, labels: ["S."], meterMap: ["4/4"], measureCount: 1 }]);
+  assert.equal(score.tempoMarks.length, 0, "小于 20 BPM 的『速度』是误读，不应保留");
+  assert.equal(score.tempoDetected, false);
+});
+
+test("assignLayoutToSystems：单页识别时用已知主拍号起步（本页没印拍号也不会被猜成 6/4）", () => {
+  const layout = {
+    labels: [{ text: "S.", x: 60, y: 90, height: 20 }],
+    bars: [{ bar: 61, x: 70, y: 50 }],
+    timeGlyphs: [],
+  };
+  const systems = [{ top: 60, bottom: 340, firstStaffTop: 70, lastStaffBottom: 330, barlines: [40, 220, 400, 700] }];
+  const result = assignLayoutToSystems(layout, systems, { initialMeter: "4/4" });
+  assert.deepEqual(result[0].meterMap, ["4/4", "4/4", "4/4"], "整页没印拍号时应沿用已知的 4/4");
+  assert.equal(result[0].anchorBar, 61);
+});
+
+test("mergePageScores：补/裁小节与溢出音符统计跨页累加，roleCount 不累加", () => {
+  const page1 = { notes: [], warnings: [], partNames: ["S."], measureCount: 10, totalBeats: 41, systemStats: { appendedMeasures: 0, trimmedMeasures: 1, overflowNotes: 2, roleCount: 5 } };
+  const page2 = { notes: [], warnings: [], partNames: ["S."], measureCount: 7, totalBeats: 28, systemStats: { appendedMeasures: 1, trimmedMeasures: 0, overflowNotes: 3, roleCount: 5 } };
+  const merged = mergePageScores([page1, page2]);
+  assert.equal(merged.systemStats.appendedMeasures, 1);
+  assert.equal(merged.systemStats.trimmedMeasures, 1);
+  assert.equal(merged.systemStats.overflowNotes, 5);
+  assert.equal(merged.systemStats.roleCount, undefined, "roleCount 没有累加意义，不应出现");
+});

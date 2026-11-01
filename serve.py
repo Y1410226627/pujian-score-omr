@@ -87,6 +87,49 @@ def read_tempo_marks_from_pdf(pdf_bytes):
         return []
 
 
+def read_pdf_layout_from_pdf(pdf_bytes):
+    """从 PDF 文字层读「排版信息」：声部标签、印刷小节号、拍号字形。
+
+    逐系统识别要用它把「这一行是第几小节开始」「哪几个小节转拍号」对齐；
+    文字层拿不到（扫描件/图片型 PDF）时返回空结构，由调用方退回按识别结果推断。
+    """
+    try:
+        sys.path.insert(0, str(PROJECT_DIR / "tools"))
+        import pdf_score_layout  # noqa: F401
+    except Exception as error:  # noqa: BLE001
+        print("[pujian] PDF 排版读取不可用：{!r}".format(error))
+        return {"pages": []}
+    try:
+        with tempfile.TemporaryDirectory(prefix="pujian-layout-") as tmp:
+            pdf_path = Path(tmp) / "score.pdf"
+            pdf_path.write_bytes(pdf_bytes)
+            return pdf_score_layout.extract_layout(pdf_path)
+    except Exception as error:  # noqa: BLE001
+        print("[pujian] PDF 排版读取失败：{!r}".format(error))
+        return {"pages": []}
+
+
+def handle_pdf_layout_request(handler):
+    """POST /api/omr/pdf-layout：接收 PDF 字节，返回文字层里的排版信息。"""
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0 or length > MAX_MUSICXML_BYTES:
+        handler.send_json(413, {"error": "PDF 数据为空或超过上限。"})
+        return
+    try:
+        payload = handler.rfile.read(length)
+    except Exception:  # noqa: BLE001
+        handler.send_json(400, {"error": "PDF 数据未完整接收。"})
+        return
+    if not payload.startswith(b"%PDF-"):
+        handler.send_json(400, {"error": "这不是 PDF 文件。"})
+        return
+    layout = read_pdf_layout_from_pdf(payload)
+    handler.send_json(200, {"pages": layout.get("pages", [])})
+
+
 def handle_tempo_text_request(handler):
     """POST /api/omr/tempo-text：接收 PDF 字节，返回文字层里的速度标记。"""
     try:
@@ -520,6 +563,9 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/omr/tempo-text":
             handle_tempo_text_request(self)
+            return
+        if route == "/api/omr/pdf-layout":
+            handle_pdf_layout_request(self)
             return
         if route == "/api/jianpu/recognize":
             self.handle_jianpu()

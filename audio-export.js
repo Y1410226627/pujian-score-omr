@@ -102,7 +102,12 @@ export function buildAudioPlan(options) {
     const key = String(note.partId || note.partName || "旋律");
     if (enabled && !enabled.has(key)) continue;
     const startBeat = Number(note.startBeat) || 0;
-    const durationBeats = Number.isFinite(note.durationBeats) ? note.durationBeats : 1;
+    // playBeats：识别时按断奏/保持音/延长号/圆滑线算出的「实际发声时长」；
+    // 没有就退回谱面时值（MusicXML/创作室等来源）。
+    const playBeats = Number(note.playBeats);
+    const durationBeats = Number.isFinite(playBeats) && playBeats > 0
+      ? playBeats
+      : (Number.isFinite(note.durationBeats) ? note.durationBeats : 1);
     const endBeat = startBeat + durationBeats;
     if (endBeat <= fromBeat || startBeat >= toBeat) continue;
 
@@ -116,6 +121,12 @@ export function buildAudioPlan(options) {
     const endSeconds = secondsAtBeat(tempoSegments, startBpm, clippedEnd - offset);
     const durationSeconds = Math.max(0.05, endSeconds - startSeconds);
     const volume = Number.isFinite(Number(partVolumes.get(key))) ? Number(partVolumes.get(key)) : 1;
+    // 力度：识别时按 p/mf/f、渐强渐弱、重音算出的逐音 velocity（30–108），
+    // 换算成峰值和后端实时试听一致（gainForDynamics：0.16 × velocity/80，限幅 0.05–0.3）。
+    const velocity = Number(note.velocity);
+    const peak = Number.isFinite(velocity) && velocity > 0
+      ? Math.min(0.3, Math.max(0.05, 0.16 * (velocity / 80)))
+      : 0.16;
     plan.push({
       midi,
       startSeconds,
@@ -123,7 +134,7 @@ export function buildAudioPlan(options) {
       partKey: key,
       timbre: partTimbres.get(key) || globalTimbre,
       volume: Math.max(0, Math.min(1, volume)),
-      peak: 0.16,
+      peak,
       // 人性化参数在**建计划时**就固定下来，而不是播放时取随机数。
       // 两个原因：
       //   1) 同一份谱导出的音频要完全一致（用户重复导出不该得到不同结果）；

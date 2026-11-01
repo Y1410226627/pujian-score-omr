@@ -117,7 +117,7 @@ test("E4 全休止乐谱返回空音符并给出提示，而不是抛异常", ()
   assert.ok(result.warnings.some((message) => message.includes("没有找到可演奏的带音高音符")));
 });
 
-test("空标记元素不产生假警告，带内容的标记元素仍会警告", () => {
+test("空标记元素不产生假警告；真实奏法记号会被解析并进入试听（不再只是警告）", () => {
   const empty = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
     <measure number="1">${measureAttributes(4, 4)}
       <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff>
@@ -126,6 +126,7 @@ test("空标记元素不产生假警告，带内容的标记元素仍会警告",
   </part></score-partwise>`;
   const emptyResult = parseMusicXmlText(empty);
   assert.ok(!emptyResult.warnings.some((message) => message.includes("奏法")), "空 <articulations/> 不应触发奏法警告");
+  assert.equal(emptyResult.symbolCounts.articulations, 0);
 
   const filled = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
     <measure number="1">${measureAttributes(4, 4)}
@@ -134,7 +135,12 @@ test("空标记元素不产生假警告，带内容的标记元素仍会警告",
     </measure>
   </part></score-partwise>`;
   const filledResult = parseMusicXmlText(filled);
-  assert.ok(filledResult.warnings.some((message) => message.includes("奏法")), "带 <staccato/> 时仍应警告");
+  assert.equal(filledResult.symbolCounts.staccato, 1, "断奏记号应被统计");
+  assert.equal(filledResult.notes[0].articulation, "staccato", "断奏应落到音符上（试听时缩短发声）");
+  assert.ok(
+    !filledResult.warnings.some((message) => message.includes("奏法") && message.includes("不支持")),
+    "断奏已经接入试听，不应再提示「不支持奏法」",
+  );
 });
 
 test("P1-3 解析中途速度变化与力度记号，不再声称不支持", () => {
@@ -209,4 +215,86 @@ test("本页自己印了拍号时，不套用继承的拍号（中途变拍号�
   assert.equal(result.timeSummary, "3/4", "本页印的 3/4 优先，继承值只做兜底");
   assert.equal(result.totalBeats, 6);
   assert.equal(result.notes.find((item) => item.pitch === "D4").startBeat, 3);
+});
+
+// —— 2026-11-01：逐系统识别（《敕勒歌》特调）带来的解析能力 ——
+
+test("逐系统：measures 元数据能标出「弱起小节」，即使弱起里一个音符都没有", () => {
+  const score = `<score-partwise>${partList([["P1", "女高"]])}<part id="P1">
+    <measure number="0" implicit="yes"><attributes><divisions>4</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><rest/><duration>4</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+    <measure number="1">${note("C", 4, 4)}</measure>
+  </part></score-partwise>`;
+  const result = parseMusicXmlText(score);
+  assert.equal(result.measures.length, 2);
+  assert.equal(result.measures[0].implicit, true, "第 0 小节是弱起");
+  assert.equal(result.measures[0].lengthBeats, 1, "弱起小节只有 1 拍（内容就是 1 拍休止）");
+  assert.equal(result.measures[1].startBeat, 1, "正规小节从第 1 拍开始");
+});
+
+test("逐系统：meterMap + strictMeters 能把变拍子（6/4 → 4/4）按印刷拍号算准", () => {
+  // Audiveris 在变拍子的系统里只认到开头的 6/4，第二个小节的 4/4 漏读了；
+  // 用 PDF 文字层给出的逐小节拍号覆盖后，各小节长度必须是 6/4、4/4、4/4、4/4。
+  const score = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1">${measureAttributes(6, 4)}
+      ${note("C", 4, 4)}${note("D", 4, 4)}${note("E", 4, 4)}${note("F", 4, 4)}${note("G", 4, 4)}${note("A", 4, 4)}
+    </measure>
+    <measure number="2">${note("B", 4, 4)}${note("C", 5, 4)}${note("D", 5, 4)}${note("E", 5, 4)}</measure>
+    <measure number="3">${note("F", 5, 4)}${note("G", 5, 4)}${note("A", 5, 4)}${note("B", 5, 4)}</measure>
+    <measure number="4">${note("C", 6, 4)}${note("D", 6, 4)}${note("E", 6, 4)}${note("F", 6, 4)}</measure>
+  </part></score-partwise>`;
+  const result = parseMusicXmlText(score, {
+    meterMap: ["6/4", "4/4", "4/4", "4/4"],
+    strictMeters: true,
+  });
+  assert.equal(result.totalBeats, 18, "6 + 4 + 4 + 4 = 18 拍");
+  assert.deepEqual(result.measures.map((measure) => measure.lengthBeats), [6, 4, 4, 4]);
+  assert.equal(result.notes.find((item) => item.pitch === "B4").startBeat, 6, "第 2 小节从第 6 拍开始");
+  assert.equal(result.notes.find((item) => item.pitch === "C6").startBeat, 14, "第 4 小节从第 14 拍开始");
+  assert.equal(result.timeSummary, "有多种拍号", "变拍子要如实显示");
+});
+
+test("力度：p/mf/f 只有印刷记号、没有 sound 数值时也能换算成力度", () => {
+  const score = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1">${measureAttributes(4, 4)}
+      <direction><direction-type><dynamics><p/></dynamics></direction-type></direction>
+      ${note("C", 4, 1)}
+      <direction><direction-type><dynamics><mf/></dynamics></direction-type></direction>
+      ${note("D", 4, 1)}
+      <direction><direction-type><dynamics><f/></dynamics></direction-type></direction>
+      ${note("E", 4, 1)}
+      ${note("F", 4, 1)}
+    </measure>
+  </part></score-partwise>`;
+  const result = parseMusicXmlText(score);
+  assert.equal(result.dynamicsMarks.length, 3);
+  const values = result.dynamicsMarks.map((mark) => mark.dynamics);
+  assert.deepEqual(values, [48, 70, 84], "p=48、mf=70、f=84（近似 MIDI 力度）");
+  assert.equal(result.symbolCounts.dynamics, 3);
+});
+
+test("渐强/渐弱、圆滑线、延长号、歌词都被解析并统计", () => {
+  const score = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1">${measureAttributes(4, 4)}
+      <direction><direction-type><wedge type="crescendo" spread="15"/></direction-type></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff>
+        <notations><slur type="start" number="1"/><fermata/></notations><lyric number="1"><text>敕勒</text></lyric></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff>
+        <notations><slur type="stop" number="1"/></notations></note>
+      <direction><direction-type><wedge type="stop"/></direction-type></direction>
+    </measure>
+  </part></score-partwise>`;
+  const result = parseMusicXmlText(score);
+  assert.equal(result.symbolCounts.slurs, 1);
+  assert.equal(result.symbolCounts.fermatas, 1);
+  assert.equal(result.symbolCounts.lyrics, 1);
+  assert.equal(result.notes[0].slurStart, true);
+  assert.equal(result.notes[1].slurStop, true);
+  assert.equal(result.notes[0].fermata, true);
+  assert.equal(result.notes[0].lyric, "敕勒");
+  assert.equal(result.wedgeMarks.length, 1, "成对的渐强记号应合成一个区间");
+  assert.equal(result.wedgeMarks[0].startBeat, 0);
+  assert.equal(result.wedgeMarks[0].endBeat, 4);
+  assert.equal(result.wedgeMarks[0].type, "crescendo");
 });

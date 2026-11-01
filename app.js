@@ -2,6 +2,7 @@ import { parseMusicXmlText, readMusicXmlFile } from "./musicxml.js";
 import {
   binarize, detectStaves, groupSystems, staffCropBox,
   mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN, quantizeScoreRhythm,
+  detectBarlines, assignLayoutToSystems, assembleSystemScores,
 } from "./staff.js";
 import {
   TIMBRE_LABELS, TIMBRE_GAIN, TIMBRE_ORDER, TIMBRE_GROUPS, PIANO_HARMONICS, PIANO_STRINGS,
@@ -176,6 +177,9 @@ const OMR_VECTOR_LONG_EDGE = 2600;
 const OMR_VECTOR_MAX_SCALE = 3.8;
 const OMR_TARGET_LONG_EDGE = 3400;   // 图片文件放大到约这个长边
 const OMR_MAX_LONG_EDGE = 4200;      // 页面再大也不超过这个长边（内存/请求体上限）
+// 逐系统识别：一次批量请求最多送多少个系统图（服务端上限 32，这里留余量控制内存）。
+const MAX_OMR_BATCH_IMAGES = 32;
+const OMR_BATCH_CHUNK = 24;
 const durations = [
   ["breve", "倍全音符", 8], ["dottedWhole", "附点全音符", 6], ["whole", "全音符", 4],
   ["doubleDottedHalf", "双附点二分音符", 3.5], ["dottedHalf", "附点二分音符", 3], ["half", "二分音符", 2],
@@ -224,8 +228,8 @@ function updateEngineHint() {
   if (!els.engineHint) return;
   if (audiverisAvailable === true) {
     els.engineHint.textContent = audiverisOcr && audiverisOcr.length
-      ? "已检测到 Audiveris 整页识别引擎（多声部 + OCR：能读谱面速度标记与歌词）；识别结果仍建议逐音校对后再使用。"
-      : "已检测到 Audiveris 整页识别引擎（多声部）；未装 OCR 语言包，谱面速度/歌词读不到，速度请按谱面的 ♩=?? 手动填 BPM。识别结果仍建议逐音校对。";
+      ? "已检测到 Audiveris 识别引擎（逐系统识别：声部/小节/变拍号对齐，OCR 还能读谱面速度）；识别结果仍建议逐音校对后再使用。"
+      : "已检测到 Audiveris 识别引擎（逐系统识别：声部/小节/变拍号对齐）；未装 OCR 语言包，谱面速度读不到，速度请按谱面的 ♩=?? 手动填 BPM。识别结果仍建议逐音校对。";
   } else if (homrAvailable === true) {
     els.engineHint.textContent = "已检测到 homr 逐谱表识别引擎；识别结果仍建议逐音校对后再使用。";
   } else if (audiverisAvailable === false && homrAvailable === false) {
@@ -588,6 +592,7 @@ async function loadFile(file) {
       const scoreInfo = await readMusicXmlFile(file);
       if (token !== state.loadToken) return;
       for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
+      applyScoreExpression(scoreInfo);
       state.scoreInfo = scoreInfo;
       state.notes = scoreInfo.notes;
       state.recognitionSource = scoreInfo.notes.length ? "musicxml" : null;
@@ -600,7 +605,7 @@ async function loadFile(file) {
       els.scoreInfo.hidden = false;
       els.staffSelectField.hidden = true;
       els.scoreTitle.textContent = scoreInfo.title;
-      els.scoreDetails.textContent = `${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary} · ${scoreInfo.keySummary}${scoreInfo.tempoDetected ? " · ♩=" + Math.round(scoreInfo.tempo) : ""}${selfCheckSummary(scoreInfo)}`;
+      els.scoreDetails.textContent = describeScoreDetails(scoreInfo);
       els.scoreWarnings.textContent = scoreInfo.warnings.join(" ");
       els.scoreWarnings.hidden = scoreInfo.warnings.length === 0;
       applyDetectedTempo(scoreInfo);
@@ -819,13 +824,13 @@ function sharpenCanvas(canvas, { amount = 1.3, threshold = 4, blurPx = 2.2 } = {
 }
 
 /**
- * 识谱用的整页图片：分辨率比显示画面高得多（见 OMR_RENDER_SCALE），并且用 PNG 无损。
+ * 识谱用的整页画布（高分辨率）：逐系统识别要把系统从这张图上裁下来，所以直接返回画布。
  *
  * 为什么不能直接用显示画布：显示画布长边只有 2600px，缩编谱的符头只有几个像素；
  * 而且显示画布导出的是 JPEG（0.92），小音符上的压缩噪点会让引擎认错符头/符干。
  * 实测这份文件（《有我》）：JPEG 2600px 时第 1 页连拍号都读丢；PNG + 4.5× 后拍号、8vb 谱号都能读对。
  */
-async function omrPageBlob(number, token = state.loadToken) {
+async function omrPageCanvas(number, token = state.loadToken) {
   if (state.pdf) {
     const page = await state.pdf.getPage(Math.max(1, Math.min(number, state.pageCount)));
     const base = page.getViewport({ scale: 1 });
@@ -838,7 +843,7 @@ async function omrPageBlob(number, token = state.loadToken) {
     // 因为谱面的速度标记（♩ = 66）只印在第 1 页、要靠 OCR 读出来，而锐化会让 OCR 读丢它；
     // 后面的页没有速度标记，锐化只会让符头/符干更清楚（实测 p2 43%→86%、p5 25%→96% 的「4 拍小节」占比）。
     if (canvas && state.lowResPdf && number > 1) canvas = sharpenCanvas(canvas);
-    return canvas ? canvasToBlob(canvas, "image/png") : null;
+    return canvas;
   }
   if (state.image) {
     // 图片文件：用原图重新缩放（放大到约 OMR_TARGET_LONG_EDGE；特别大的图缩到上限），
@@ -855,9 +860,73 @@ async function omrPageBlob(number, token = state.loadToken) {
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(state.image, 0, 0, canvas.width, canvas.height);
     // 图片只有一页：用较轻的锐化，兼顾音符识别与「谱面速度文字」的 OCR。
-    return canvasToBlob(sharpenCanvas(canvas, { amount: 1.0 }), "image/png");
+    return sharpenCanvas(canvas, { amount: 1.0 });
   }
-  return canvasToBlob(els.scoreCanvas, "image/png");
+  return els.scoreCanvas;
+}
+
+async function omrPageBlob(number, token = state.loadToken) {
+  const canvas = await omrPageCanvas(number, token);
+  return canvas ? canvasToBlob(canvas, "image/png") : null;
+}
+
+/** 把一张画布二值化（供谱表/小节线检测）。 */
+function binaryFromCanvas(canvas) {
+  const width = canvas.width, height = canvas.height;
+  const pixels = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, width, height).data;
+  const gray = new Uint8Array(width * height);
+  for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+    gray[i] = Math.round(pixels[p] * 0.299 + pixels[p + 1] * 0.587 + pixels[p + 2] * 0.114);
+  }
+  return { binary: binarize(gray), width, height };
+}
+
+/** 从画布裁一块并转成 PNG（逐系统识别用；PNG 无损，符头/符干边缘不会被压糊）。 */
+function cropCanvasToBlob(canvas, box) {
+  const offscreen = document.createElement("canvas");
+  offscreen.width = Math.max(1, Math.round(box.width));
+  offscreen.height = Math.max(1, Math.round(box.height));
+  const context = offscreen.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, offscreen.width, offscreen.height);
+  context.drawImage(canvas, box.x, box.y, box.width, box.height, 0, 0, offscreen.width, offscreen.height);
+  return canvasToBlob(offscreen, "image/png");
+}
+
+/**
+ * 把一页的谱表按「系统」切块（裁剪框带上下留白：上面放速度/力度/排练记号，下面放歌词/力度）。
+ *
+ * 为什么逐系统送识谱：整页送给 Audiveris 时，它会把一页里的两个系统当成「同一声部的连续小节」，
+ * 声部互相错位（《敕勒歌》实测 8 个声部、钢琴被拆成 2 个、中间出现整段空拍）；
+ * 一个系统单独裁出来识别，系统内所有声部天然对齐，钢琴也稳定合成一个声部。
+ */
+function detectSystemCrops(staves, width, height) {
+  const systems = groupSystems(staves);
+  const crops = [];
+  systems.forEach((system, index) => {
+    if (!system.length) return;
+    const first = system[0], last = system[system.length - 1];
+    const spacing = Number(first.spacing) || 10;
+    const nextFirst = index + 1 < systems.length ? systems[index + 1][0] : null;
+    const previousLast = index > 0 ? systems[index - 1][systems[index - 1].length - 1] : null;
+    let top = Math.max(0, Math.round(first.top - Math.max(42, spacing * 7)));
+    let bottom = Math.min(height, Math.round(last.bottom + Math.max(52, spacing * 9)));
+    // 相邻系统之间从空隙中线切开，避免裁到邻系统的音符。
+    if (previousLast) top = Math.max(top, Math.round((previousLast.bottom + first.top) / 2));
+    if (nextFirst) bottom = Math.min(bottom, Math.round((last.bottom + nextFirst.top) / 2));
+    crops.push({
+      index,
+      staves: system,
+      x: 0,
+      y: top,
+      width,
+      height: Math.max(1, bottom - top),
+      firstStaffTop: first.top,
+      lastStaffBottom: last.bottom,
+      spacing,
+    });
+  });
+  return crops;
 }
 
 async function renderPdfPage(number, token = state.loadToken) {
@@ -2335,65 +2404,396 @@ function blobToBase64(blob) {
 }
 
 /**
- * 整本识别（Audiveris 批量）：把 N 页图片**一次**送到 `/api/omr/recognize-batch`。
+ * 把一组图片分块送到 `/api/omr/recognize-batch`，返回与输入同序的 MusicXML 字符串数组（失败的为 null）。
  *
- * 为什么要批量：Audiveris 每次启动有约 3 秒的 JVM/引擎初始化开销。逐页调用时 16 页要付 16 次；
- * 合并成一次调用只付 1 次。实测（3 页、2600px）：单页 9.19 秒/页 → 批量 6.02 秒/页。
- *
- * 返回按页索引的数组，元素是 `{ scoreInfo }` 或 `null`（该页失败）；失败页不中断整批。
+ * 为什么分块：服务端一次最多 32 页；逐系统识别时一页有 2 个系统，整本 20 页就是 40 张图。
+ * 分块请求既不超过上限，也让进度条能按「第 N/M 个系统」刷新。
  */
-async function recognizePagesInBatch(blobs, { superseded = () => false, onProgress = () => {} } = {}) {
+async function recognizeImageBlobsInBatch(blobs, { superseded = () => false, onProgress = () => {}, unit = "页" } = {}) {
   if (!blobs.length) return [];
-  onProgress({ done: 0, total: blobs.length, label: "正在一次送出整本识别（省去每页的引擎启动）…" });
-  const images = [];
-  for (let index = 0; index < blobs.length; index++) {
+  const chunkSize = Math.max(1, Math.min(OMR_BATCH_CHUNK, MAX_OMR_BATCH_IMAGES));
+  const results = new Array(blobs.length).fill(null);
+  let done = 0;
+  for (let start = 0; start < blobs.length; start += chunkSize) {
     if (superseded()) return [];
-    images.push(await blobToBase64(blobs[index]));
-  }
-  if (superseded()) return [];
-  let response;
-  try {
-    response = await fetch("/api/omr/recognize-batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ images }),
-    });
-  } catch {
-    // 网络/服务异常：交给调用方退回逐页流程，而不是整批失败。
-    return [];
-  }
-  if (!response.ok) {
-    if (response.status === 503) audiverisAvailable = false;
-    return [];
-  }
-  let payload;
-  try {
-    payload = await response.json();
-  } catch {
-    return [];
-  }
-  const pages = Array.isArray(payload.pages) ? payload.pages : [];
-  const results = [];
-  // 逐页解析时「继承拍号」：第 1 页通常印了 `4/4`，后面几页不再印；
-  // 把第 1 页读到的拍号传给后面几页，它们的小节长度才能按拍号算（否则会越往后越飘）。
-  let contextTime = "";
-  for (let index = 0; index < blobs.length; index++) {
-    if (superseded()) return [];
-    const page = pages[index];
-    onProgress({ done: index + 1, total: blobs.length, label: `第 ${index + 1} / ${blobs.length} 页已识别` });
-    if (!page || !page.musicxml) {
-      results.push(null);
-      continue;
+    const chunk = blobs.slice(start, start + chunkSize);
+    onProgress({ done, total: blobs.length, label: `正在送出第 ${start + 1}–${start + chunk.length} 个${unit}…` });
+    const images = [];
+    for (const blob of chunk) {
+      if (superseded()) return [];
+      images.push(await blobToBase64(blob));
     }
+    if (superseded()) return [];
+    let response;
     try {
-      const scoreInfo = parseMusicXmlText(page.musicxml, contextTime ? { timeSignature: contextTime } : undefined);
-      if (scoreInfo && /^\d+\/\d+$/.test(scoreInfo.timeSummary || "")) contextTime = scoreInfo.timeSummary;
-      results.push(scoreInfo && scoreInfo.notes.length ? { scoreInfo } : null);
+      response = await fetch("/api/omr/recognize-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ images }),
+      });
     } catch {
-      results.push(null);
+      return [];
     }
+    if (!response.ok) {
+      if (response.status === 503) audiverisAvailable = false;
+      return [];
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      return [];
+    }
+    const pages = Array.isArray(payload.pages) ? payload.pages : [];
+    for (let index = 0; index < chunk.length; index++) {
+      if (superseded()) return [];
+      const page = pages[index];
+      results[start + index] = page && page.musicxml ? page.musicxml : null;
+      done += 1;
+    }
+    onProgress({ done, total: blobs.length, label: `已识别 ${done} / ${blobs.length} 个${unit}` });
   }
   return results;
+}
+
+/** 读取 PDF 文字层里的排版信息（声部标签/印刷小节号/拍号字形），整个文件只请求一次。 */
+let pdfLayoutCache = { token: -1, promise: null };
+function pdfLayoutForFile() {
+  if (!state.pdfBytes || state.lowResPdf) return Promise.resolve(null);
+  if (pdfLayoutCache.token === state.loadToken) return pdfLayoutCache.promise;
+  const token = state.loadToken;
+  const promise = (async () => {
+    try {
+      const response = await fetch("/api/omr/pdf-layout", {
+        method: "POST",
+        headers: { "Content-Type": "application/pdf" },
+        body: state.pdfBytes.slice(0),
+      });
+      if (!response.ok) return null;
+      const payload = await response.json();
+      if (token !== state.loadToken) return null;
+      const pages = Array.isArray(payload.pages) ? payload.pages : [];
+      return pages.length ? pages : null;
+    } catch (error) {
+      console.info("PDF 文字层排版读取失败，退回按识别结果推断：", error);
+      return null;
+    }
+  })();
+  pdfLayoutCache = { token, promise };
+  return promise;
+}
+
+/** 把 PDF 点坐标的排版信息换算到识谱图像素坐标（谱表几何/小节线都在像素坐标系里）。 */
+function layoutInImagePixels(pageLayout, scaleX, scaleY) {
+  const mapItem = (item) => ({
+    ...item,
+    x: (Number(item.x) || 0) * scaleX,
+    y: (Number(item.y) || 0) * scaleY,
+    width: (Number(item.width) || 0) * scaleX,
+    height: (Number(item.height) || 0) * scaleY,
+  });
+  return {
+    labels: (pageLayout.labels || []).map(mapItem),
+    bars: (pageLayout.bars || []).map(mapItem),
+    timeGlyphs: (pageLayout.timeGlyphs || []).map(mapItem),
+  };
+}
+
+/**
+ * 准备一页的「逐系统识别任务」：高分辨率画布 → 检测谱表/系统/小节线 → 裁系统图，
+ * 并用 PDF 文字层把每个系统的声部标签、印刷小节号、逐小节拍号配好。
+ *
+ * @returns {Promise<{systems: object[], staves: object[], width: number, height: number, scaleToDisplay: number}|null>}
+ */
+async function preparePageSystems(number, token, { displayStaves = null, initialMeter = "" } = {}) {
+  const canvas = await omrPageCanvas(number, token);
+  if (!canvas) return null;
+  const { binary, width, height } = binaryFromCanvas(canvas);
+  const staves = detectStaves(binary, width, height);
+  if (!staves.length) return { systems: [], staves: [], width, height, scaleToDisplay: 1 };
+  const crops = detectSystemCrops(staves, width, height);
+  // 小节线：用来核对「这个系统实际有几小节」以及给变拍号定位（第几小节开始变）。
+  for (const crop of crops) {
+    crop.barlines = detectBarlines(binary, width, height, crop.staves);
+  }
+  let metas = crops.map(() => ({ labels: [], anchorBar: null, measureCount: null, meterMap: [] }));
+  const layoutPages = await pdfLayoutForFile();
+  const pageLayout = layoutPages && layoutPages[number - 1];
+  if (pageLayout && (pageLayout.width || pageLayout.labels?.length || pageLayout.timeGlyphs?.length)) {
+    const scaleX = width / Math.max(1, Number(pageLayout.width) || width);
+    const scaleY = height / Math.max(1, Number(pageLayout.height) || height);
+    const layoutPixels = layoutInImagePixels(pageLayout, scaleX, scaleY);
+    metas = assignLayoutToSystems(layoutPixels, crops.map((crop) => ({
+      top: crop.y,
+      bottom: crop.y + crop.height,
+      firstStaffTop: crop.firstStaffTop,
+      lastStaffBottom: crop.lastStaffBottom,
+      barlines: crop.barlines,
+    })), { initialMeter });
+  }
+  const systems = [];
+  for (let index = 0; index < crops.length; index++) {
+    if (token !== state.loadToken) return null;
+    const crop = crops[index];
+    const meta = metas[index] || {};
+    const blob = await cropCanvasToBlob(canvas, crop);
+    if (!blob) continue;
+    systems.push({
+      page: number,
+      index: crop.index,
+      blob,
+      box: { x: crop.x, y: crop.y, width: crop.width, height: crop.height },
+      staves: crop.staves,
+      firstStaffTop: crop.firstStaffTop,
+      lastStaffBottom: crop.lastStaffBottom,
+      labels: meta.labels || [],
+      anchorBar: Number.isFinite(meta.anchorBar) ? meta.anchorBar : null,
+      measureCount: Number.isFinite(meta.measureCount) ? meta.measureCount : null,
+      meterMap: Array.isArray(meta.meterMap) ? meta.meterMap : [],
+    });
+  }
+  // 谱表框（给谱面高亮用）：显示画布坐标系。
+  let displayBoxes = displayStaves;
+  let scaleToDisplay = 1;
+  if (!displayBoxes && els.scoreCanvas.width) {
+    scaleToDisplay = els.scoreCanvas.width / width;
+    displayBoxes = staves.map((staff) => ({ ...staff, top: staff.top * scaleToDisplay, bottom: staff.bottom * scaleToDisplay, left: (staff.left || 0) * scaleToDisplay, right: (staff.right || width) * scaleToDisplay, spacing: staff.spacing * scaleToDisplay }));
+  }
+  return { systems, staves: displayBoxes || staves, width, height, scaleToDisplay };
+}
+
+/** 逐系统解析：每个系统用自己那套「拍号地图」，拍号未知时继承上一系统的拍号。 */
+function parseSystemBatch(systemJobs, xmlList, { superseded = () => false } = {}) {
+  const parsed = [];
+  let contextTime = "";
+  for (let index = 0; index < systemJobs.length; index++) {
+    if (superseded()) return [];
+    const xml = xmlList[index];
+    const job = systemJobs[index];
+    if (!xml) { parsed.push(null); continue; }
+    const meterMap = Array.isArray(job.meterMap) && job.meterMap.length ? job.meterMap : null;
+    try {
+      const scoreInfo = parseMusicXmlText(xml, {
+        timeSignature: contextTime || undefined,
+        meterMap: meterMap || undefined,
+        // 印了拍号（或从 PDF 文字层读到拍号）时严格按拍号算小节长度：
+        // 否则 Audiveris 多读一个音就会把整小节拉长，后面所有音整体后移（用户听到的就是「节拍跟不上」）。
+        strictMeters: Boolean(meterMap),
+        // 每个系统的第一小节不是乐曲开头，不能当弱起处理。
+        assumeFirstMeasurePickup: false,
+      });
+      if (/^\d+\/\d+$/.test(scoreInfo.timeSummary || "")) contextTime = scoreInfo.timeSummary;
+      parsed.push(scoreInfo);
+    } catch (error) {
+      console.info("系统识别结果解析失败：", error);
+      parsed.push(null);
+    }
+  }
+  return parsed;
+}
+
+/** 把一页的「系统 → 解析结果」装配成这一页的 scoreInfo（小节号页内连续，跨页由 mergePageScores 平移）。 */
+function assemblePageFromSystems(systemJobs, parsedList, { measureBase = 1, fallbackRoles = [], deferStatsWarnings = false } = {}) {
+  const systems = [];
+  for (let index = 0; index < systemJobs.length; index++) {
+    const scoreInfo = parsedList[index];
+    if (!scoreInfo) continue;
+    const job = systemJobs[index];
+    systems.push({
+      scoreInfo,
+      labels: job.labels,
+      meterMap: job.meterMap,
+      measureCount: job.measureCount,
+      anchorBar: job.anchorBar,
+    });
+  }
+  if (!systems.length) return null;
+  // 拍号变化会影响小节长度：取第一个系统里第一个「印刷拍号」作为本页/本曲主拍号。
+  const assembled = assembleSystemScores(systems, { measureBase, beatBase: 0, fallbackRoles, deferStatsWarnings });
+  assembled.title = "";
+  return assembled;
+}
+
+/**
+ * 单页「逐系统识别」：把当前页切成系统 → 一次批量送识谱引擎 → 按系统装配成多声部乐谱。
+ *
+ * 相比整页识别：声部不会错位、钢琴不会被拆开、小节数和原谱（印刷小节线）一致。
+ *
+ * @returns {{scoreInfo, staves, diagnostics}|null} 失败/取消返回 null
+ */
+async function recognizePageBySystems(number, { displayStaves = null, superseded = () => false, onProgress = () => {} } = {}) {
+  // 单页识别时这一页可能整页都没印拍号（拍号只在第 1 页印）：用整曲已知的主拍号起步。
+  // 来源优先级：本文件之前的识别结果 → PDF 文字层里出现过的第一个拍号字形。
+  let initialMeter = /^\d+\/\d+$/.test(state.timeSignatureHint || "") ? state.timeSignatureHint : "";
+  if (!initialMeter) {
+    try {
+      const layoutPages = await pdfLayoutForFile();
+      const glyph = (layoutPages || []).flatMap((page) => page.timeGlyphs || [])[0];
+      if (glyph && /^\d+(?:\+\d+)*\/\d+$/.test(glyph.meter || "")) initialMeter = glyph.meter;
+    } catch { /* 排版信息只是辅助 */ }
+  }
+  const prepared = await preparePageSystems(number, state.loadToken, { displayStaves, initialMeter });
+  if (!prepared) return null;
+  if (superseded()) return null;
+  if (!prepared.systems.length) return null;
+  const jobs = prepared.systems;
+  const xmls = await recognizeImageBlobsInBatch(jobs.map((job) => job.blob), {
+    superseded,
+    onProgress: ({ done, total, label }) => onProgress({ done, total, label: label || `正在识别第 ${done + 1} / ${total} 个系统` }),
+    unit: "系统",
+  });
+  if (superseded() || !xmls.length || !xmls.some(Boolean)) return null;
+  const parsed = parseSystemBatch(jobs, xmls, { superseded });
+  if (superseded()) return null;
+  // 单页识别：小节号尽量按「原谱印刷的小节号」显示（第 2 页就是从 11 开始），
+  // 这样用户对着纸谱校对时不会错位。拿不到印刷小节号时就从 1 开始。
+  const firstAnchor = jobs.find((job) => Number.isFinite(job.anchorBar) && job.anchorBar > 0)?.anchorBar;
+  const measureBase = Number.isFinite(firstAnchor) ? firstAnchor : 1;
+  const scoreInfo = assemblePageFromSystems(jobs, parsed, { measureBase });
+  if (!scoreInfo || !scoreInfo.notes.length) return null;
+  // 速度：PDF 文字层的 ♩=68 是精确值，单页识别也优先用它。
+  // （识别引擎偶尔把速度读成 6/68 之类的怪值；文字层读不到时再用这一页的识谱图跑速度 OCR 兜底。）
+  let tempoResolved = false;
+  try {
+    const marks = await requestTempoFromPdfText(state.pdfBytes);
+    const first = (marks || []).find((mark) => Number(mark.bpm) >= 20 && Number(mark.bpm) <= 320);
+    if (first) {
+      scoreInfo.tempo = Number(first.bpm);
+      scoreInfo.tempoDetected = true;
+      scoreInfo.tempoMarks = [{ beat: 0, bpm: Number(first.bpm) }];
+      tempoResolved = true;
+    }
+  } catch { /* 文字层读不到就走 OCR */ }
+  if (!tempoResolved && !scoreInfo.tempoDetected) {
+    try {
+      const blob = await omrPageBlob(number, state.loadToken);
+      if (blob) {
+        const ocrPages = await requestTempoOcr([blob]);
+        const tempos = (ocrPages && ocrPages[0] && ocrPages[0].tempos) || [];
+        const first = tempos.find((item) => Number(item.bpm) >= 20 && Number(item.bpm) <= 320);
+        if (first) {
+          scoreInfo.tempo = Number(first.bpm);
+          scoreInfo.tempoDetected = true;
+          scoreInfo.tempoMarks = [{ beat: 0, bpm: Number(first.bpm) }];
+        }
+      }
+    } catch { /* 读不到就保持默认，界面会提示手填 BPM */ }
+  }
+  const systemStats = scoreInfo.systemStats || {};
+  return {
+    scoreInfo,
+    staves: prepared.staves,
+    diagnostics: {
+      staves: prepared.staves,
+      targets: jobs.flatMap((job) => job.staves.map((_, staffIndex) => staffIndex)),
+      singleStaff: false,
+      systemCount: jobs.length,
+      wholePage: true,
+      systemMode: true,
+      wholePageError: "",
+      estimatedCount: 0,
+      emptyCount: 0,
+      failedCount: jobs.length - parsed.filter(Boolean).length,
+      source: "engine",
+      systemStats,
+    },
+  };
+}
+
+/**
+ * 整本「逐系统识别」：逐页切成系统（共 N 个系统图）→ 一次批量送引擎 →
+ * 用 PDF 文字层的小节号/拍号/声部标签把每个系统对回原位 → 按页装配。
+ *
+ * @returns {{entries: (object|null)[], skippedNoStaff: number[], stats: object}|null}
+ */
+async function recognizeBookBySystems({ totalPages, superseded = () => false, onProgress = () => {} } = {}) {
+  const layoutPromise = pdfLayoutForFile();
+  const pageJobs = new Map();       // 页码 → {systems, staves}
+  const skippedNoStaff = [];
+  const jobs = [];
+  let preparedPages = 0;
+  try {
+    for (let number = 1; number <= totalPages; number++) {
+      if (superseded()) return null;
+      onProgress({ done: 0, total: totalPages, label: `正在准备第 ${number} / ${totalPages} 页（切系统）…` });
+      const prepared = await preparePageSystems(number, state.loadToken);
+      if (superseded()) return null;
+      if (!prepared) continue;
+      if (!prepared.systems.length) {
+        skippedNoStaff.push(number);
+        continue;
+      }
+      pageJobs.set(number, prepared);
+      for (const job of prepared.systems) jobs.push(job);
+      preparedPages += 1;
+      onProgress({ done: number, total: totalPages, label: `已切好第 ${number} / ${totalPages} 页（${prepared.systems.length} 个系统）` });
+    }
+    if (superseded()) return null;
+    if (!jobs.length) {
+      // 整本都没有五线谱：交给调用方按「简谱页」处理。
+      return { entries: new Array(totalPages).fill(null), skippedNoStaff, stats: { systemCount: 0 } };
+    }
+    // 一次性批量识别所有系统图（服务端会自动按 32 张上限分批跑）。
+    const xmls = await recognizeImageBlobsInBatch(jobs.map((job) => job.blob), {
+      superseded,
+      onProgress: ({ done, total, label }) => onProgress({ done, total, label: label || `已识别 ${done} / ${total} 个系统` }),
+      unit: "系统",
+    });
+    if (superseded()) return null;
+    if (!xmls.length) return null;
+    const parsed = parseSystemBatch(jobs, xmls, { superseded });
+    if (superseded()) return null;
+    // 按页装配：每页内的系统依次相接（小节号页内从 1 开始，跨页由 mergePageScores 平移）。
+    const entries = new Array(totalPages).fill(null);
+    let fallbackRoles = [];
+    let jobOffset = 0;
+    let failedSystems = 0;
+    for (let number = 1; number <= totalPages; number++) {
+      if (superseded()) return null;
+      const prepared = pageJobs.get(number);
+      if (!prepared) continue;
+      const count = prepared.systems.length;
+      const pageJobsSlice = prepared.systems;
+      const pageParsed = parsed.slice(jobOffset, jobOffset + count);
+      jobOffset += count;
+      try {
+        const scoreInfo = assemblePageFromSystems(pageJobsSlice, pageParsed, { measureBase: 1, fallbackRoles, deferStatsWarnings: true });
+        if (!scoreInfo || !scoreInfo.notes.length) { failedSystems += 1; continue; }
+        fallbackRoles = scoreInfo.partNames.slice();
+        // 诊断日志：逐系统对比「小节线数 / 印刷拍号 / 解析小节数」，出问题时能一眼看出是哪一页哪个系统。
+        const systemTrace = pageJobsSlice.map((job, index) => {
+          const info = pageParsed[index];
+          return `p${number}s${job.index + 1}[线${job.measureCount}/解析${info ? info.measureCount : "失败"}]`;
+        }).join(" ");
+        console.info(`逐系统识别：第 ${number} 页 → ${scoreInfo.notes.length} 音 ${scoreInfo.measureCount} 小节 ${scoreInfo.timeSummary} | ${systemTrace}`);
+        entries[number - 1] = {
+          scoreInfo,
+          staves: prepared.staves,
+          diagnostics: {
+            wholePage: true, source: "engine", emptyCount: 0, failedCount: 0, estimatedCount: 0,
+            systemCount: prepared.systems.length,
+          },
+        };
+      } catch (error) {
+        console.info(`第 ${number} 页装配失败：`, error);
+      }
+      onProgress({ done: number, total: totalPages, label: `已装配第 ${number} / ${totalPages} 页` });
+    }
+    try { await layoutPromise; } catch { /* 排版信息只是辅助，失败不影响识别 */ }
+    return {
+      entries,
+      skippedNoStaff,
+      stats: {
+        pageCount: preparedPages,
+        systemCount: jobs.length,
+        failedSystems,
+        meterSummary: (entries.find(Boolean) || {}).scoreInfo?.timeSummary || "",
+      },
+    };
+  } catch (error) {
+    console.info("逐系统整本识别失败，退回逐页识别：", error);
+    return null;
+  }
 }
 
 /**
@@ -2496,9 +2896,25 @@ async function collectPageScore({ pickStaff = () => "all", superseded = () => fa
     estimatedCount: 0, emptyCount: 0, failedCount: 0, source: "engine",
   };
 
-  // Audiveris 整页识别：一次调用即得到完整的多声部结构（各声部并行而非首尾串接）。
-  // 只在"识别全部谱表"且本机装有 Audiveris 时走这条路；单行重试仍走逐行流程。
+  // Audiveris 逐系统识别（主路径）：一页里的每个「行」单独识别，天然保证同一行各声部对齐，
+  // 钢琴也不会被拆成两个声部；再用 PDF 文字层的小节号/拍号把各系统接回去。
+  // 失败时退回老的「整页识别」，再失败才逐行（homr/粗略估算）。
   if (!singleStaff && audiverisAvailable !== false) {
+    onProgress({ done: 0, total: 1, label: "正在逐系统识别（Audiveris）…" });
+    let systemOutcome = null;
+    try {
+      systemOutcome = await recognizePageBySystems(state.pageNumber, {
+        displayStaves: staves,
+        superseded,
+        onProgress: ({ done, total, label }) => onProgress({ done, total, label: label || "正在逐系统识别…" }),
+      });
+    } catch (error) {
+      console.info("逐系统识别失败，退回整页识别：", error);
+    }
+    if (superseded()) return null;
+    if (systemOutcome && systemOutcome.scoreInfo && systemOutcome.scoreInfo.notes.length) {
+      return { ...systemOutcome, staves: systemOutcome.staves || staves };
+    }
     onProgress({ done: 0, total: 1, label: "正在整页识别（Audiveris，约 10–20 秒）…" });
     const engineResult = await recognizeWholePage();
     if (superseded()) return null;
@@ -2585,6 +3001,156 @@ async function collectPageScore({ pickStaff = () => "all", superseded = () => fa
   return { scoreInfo: merged, staves, diagnostics };
 }
 
+/**
+ * 把「全曲级别」的提醒合并进 scoreInfo.warnings：
+ *  - 记号类的（歌词、装饰音、琶音）按全曲总数说一次，不逐页刷屏；
+ *  - 识别结构类的（补小节/裁小节/音符超出小节）按全曲总数说一次。
+ * 逐系统识别是一页页装配的，这些提示若不合并会出现十几条几乎一样的文字。
+ */
+function mergeScoreWarnings(scoreInfo) {
+  if (!scoreInfo) return;
+  const warnings = new Set(scoreInfo.warnings || []);
+  const counts = scoreInfo.symbolCounts || {};
+  if (counts.lyrics) warnings.add(`识别到歌词（${counts.lyrics} 处），试听不演唱歌词。`);
+  if (counts.ornaments) warnings.add("装饰音（波音/颤音/回音等）已识别，但试听不会模拟这些效果。");
+  if (counts.arpeggiates) warnings.add("琶音记号已识别，试听按和弦同时发声处理。");
+  const stats = scoreInfo.systemStats || {};
+  if (stats.trimmedMeasures) warnings.add(`有 ${stats.trimmedMeasures} 个多识别出来的小节没有并入结果（已按印刷小节线为准）。`);
+  if (stats.appendedMeasures) warnings.add(`原谱比识别结果多 ${stats.appendedMeasures} 个小节（识别漏读了小节线），已按印刷拍号补齐空小节。`);
+  if (stats.overflowNotes) warnings.add(`有 ${stats.overflowNotes} 个音符超出了一小节的范围（识别误差），试听时它们会挤到下一小节开头。`);
+  scoreInfo.warnings = [...warnings];
+}
+
+/** 谱面记号的中文摘要：让用户看到「圆滑线/连音线/力度/渐强渐弱…确实被识别出来了」。 */
+function symbolSummaryText(scoreInfo) {
+  const counts = (scoreInfo && scoreInfo.symbolCounts) || {};
+  const items = [];
+  const push = (label, value) => {
+    const count = Math.round(Number(value) || 0);
+    if (count > 0) items.push(`${label} ${count}`);
+  };
+  push("圆滑线", counts.slurs);
+  push("连音线", counts.ties);
+  push("断奏", (counts.staccato || 0) + (counts.staccatissimo || 0));
+  push("重音", (counts.accent || 0) + (counts.marcato || 0));
+  push("保持音", counts.tenuto);
+  push("延长号", counts.fermatas);
+  push("力度记号", counts.dynamics);
+  push("渐强/渐弱", Math.round((counts.wedges || 0) / 2));
+  push("三连音", counts.tuplets);
+  push("琶音", counts.arpeggiates);
+  push("装饰音", counts.ornaments);
+  push("歌词", counts.lyrics);
+  if (!items.length) return "";
+  return `识别到谱面记号：${items.join(" · ")}`;
+}
+
+/** 识别结果详情行（单页/整本共用的中文说明）。 */
+function describeScoreDetails(scoreInfo, extra = "") {
+  if (!scoreInfo) return "";
+  const parts = [
+    `${scoreInfo.notes.length} 个音符`,
+    `${(scoreInfo.partNames || []).length} 个声部`,
+    `${scoreInfo.measureCount} 小节`,
+    scoreInfo.timeSummary,
+    scoreInfo.keySummary,
+    scoreInfo.tempoDetected ? `♩=${Math.round(scoreInfo.tempo)}` : "",
+    symbolSummaryText(scoreInfo),
+  ].filter(Boolean);
+  return parts.join(" · ") + selfCheckSummary(scoreInfo) + (extra || "");
+}
+
+/**
+ * 把谱面上的演奏记号落到「试听/MIDI 导出真正用到的字段」上：
+ *  - playBeats：断奏变短、保持音/延长号变长、圆滑线连到下一个音（连奏不中断）；
+ *  - velocity：力度记号 p/mf/f、渐强渐弱、重音 → 每个音的强弱。
+ * 只改演奏用的派生字段，不改 durationBeats（谱面显示的时值保持原样）。
+ */
+function applyScoreExpression(scoreInfo) {
+  if (!scoreInfo || !Array.isArray(scoreInfo.notes) || !scoreInfo.notes.length) return;
+  const notes = scoreInfo.notes;
+  const dynamics = (scoreInfo.dynamicsMarks || [])
+    .map((mark) => ({ beat: Number(mark.beat) || 0, value: Number(mark.dynamics) }))
+    .filter((mark) => Number.isFinite(mark.value))
+    .sort((left, right) => left.beat - right.beat);
+  const wedges = (scoreInfo.wedgeMarks || [])
+    .map((mark) => ({
+      start: Number(mark.startBeat) || 0,
+      end: Number(mark.endBeat) || 0,
+      direction: mark.type === "diminuendo" ? -1 : 1,
+      spread: Number(mark.spread) > 0 ? Number(mark.spread) : 12,
+    }))
+    .filter((mark) => mark.end > mark.start)
+    .sort((left, right) => left.start - right.start);
+  // 同一个「声部+行+声部号」里，下一个音的起拍（圆滑线要连到它；断奏/延长号不能盖过它）。
+  const groups = new Map();
+  for (const note of notes) {
+    const key = `${note.partId}|${note.voice || "1"}|${note.staff || "1"}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(note);
+  }
+  const nextOnset = new Map();
+  for (const list of groups.values()) {
+    list.sort((left, right) => (Number(left.startBeat) || 0) - (Number(right.startBeat) || 0));
+    for (let index = 0; index < list.length; index++) {
+      if (index + 1 < list.length) nextOnset.set(list[index], Number(list[index + 1].startBeat) || 0);
+    }
+  }
+  let dynamicsIndex = 0;
+  let wedgeIndex = 0;
+  const ordered = [...notes].sort((left, right) => (Number(left.startBeat) || 0) - (Number(right.startBeat) || 0));
+  for (const note of ordered) {
+    const start = Number(note.startBeat) || 0;
+    const duration = Number.isFinite(Number(note.durationBeats)) ? Number(note.durationBeats) : 1;
+    let value = 80;
+    while (dynamicsIndex < dynamics.length && dynamics[dynamicsIndex].beat <= start + 0.0001) {
+      value = dynamics[dynamicsIndex].value;
+      dynamicsIndex += 1;
+    }
+    while (wedgeIndex < wedges.length && wedges[wedgeIndex].end <= start + 0.0001) wedgeIndex += 1;
+    for (let index = wedgeIndex; index < wedges.length; index++) {
+      const wedge = wedges[index];
+      if (wedge.start > start) break;
+      if (start <= wedge.end) {
+        const progress = (start - wedge.start) / (wedge.end - wedge.start);
+        value += wedge.direction * wedge.spread * progress;
+        break;
+      }
+    }
+    if (note.articulation === "accent") value += 14;
+    else if (note.articulation === "marcato") value += 22;
+    note.velocity = Math.max(20, Math.min(127, Math.round(value)));
+
+    // 断奏/保持音/延长号：改变「实际发声时长」，但不改谱面时值。
+    let playBeats = duration;
+    if (note.articulation === "staccato") playBeats = duration * 0.6;
+    else if (note.articulation === "staccatissimo") playBeats = duration * 0.4;
+    else if (note.articulation === "tenuto") playBeats = duration * 1.05;
+    if (note.fermata) playBeats = Math.max(playBeats, duration) * 1.6;
+    const next = nextOnset.get(note);
+    if (Number.isFinite(next) && next > start) {
+      const reach = next - start;
+      if (note.slurStart && reach <= duration * 2.6) {
+        // 圆滑线：连到下一个音（不留缝），听感是连奏。
+        playBeats = Math.max(playBeats, reach);
+      } else if (playBeats > reach + 0.0001 && !note.fermata) {
+        // 断奏/保持音不要盖过下一个音的起拍。
+        playBeats = Math.min(playBeats, reach);
+      }
+    }
+    if (Number.isFinite(playBeats) && playBeats > 0) {
+      note.playBeats = Math.max(0.05, Math.round(playBeats * 1000) / 1000);
+    }
+  }
+}
+
+/** 试听/MIDI 真正使用的音长：优先 playBeats（带断奏/连奏/延长号处理），否则用谱面时值。 */
+function soundingBeats(note) {
+  if (!note) return 1;
+  if (Number.isFinite(Number(note.playBeats)) && Number(note.playBeats) > 0) return Number(note.playBeats);
+  return beatsForNote(note);
+}
+
 /** 把一页识别结果写进主界面（单页识别与整本识别共用的收尾步骤）。
  *  `page` = 这份结果对应哪一页（翻页时决定要不要在谱面上画音符点）；整本合并结果传 null。 */
 function commitScore(scoreInfo, staves, source, { title, page } = {}) {
@@ -2592,6 +3158,10 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   // 否则扫描谱里那些 0.375 拍、3.75 拍的零头会让整曲听起来「散」。MusicXML 导入不动。
   if (source === "engine") quantizeScoreRhythm(scoreInfo);
   for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
+  // 整曲级别的提示合并成一条条（歌词/补小节/超出小节…），避免逐页重复十几遍。
+  mergeScoreWarnings(scoreInfo);
+  // 演奏记号落地：断奏/保持音/延长号/圆滑线/力度/渐强渐弱 → 试听与 MIDI 导出的音长、强弱。
+  applyScoreExpression(scoreInfo);
   dedupePartNames(scoreInfo.notes);
   clearTimbreCache();
   state.scoreInfo = scoreInfo;
@@ -2609,7 +3179,12 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   refreshScoreOverlay();
   updateRecognitionBanner();
   // 记住这次识别到的拍号：同一份文件后面几页/后面几次识别可以复用它。
-  if (/^\d+\/\d+$/.test(scoreInfo.timeSummary || "")) state.timeSignatureHint = scoreInfo.timeSummary;
+  // 变拍子的谱（如《敕勒歌》第 54、66 小节转 6/4）timeSummary 是一句说明而不是纯拍号，
+  // 这时取「第一个拍号」当主拍号。
+  const hintMeter = /^\d+\/\d+$/.test(scoreInfo.timeSummary || "")
+    ? scoreInfo.timeSummary
+    : ((scoreInfo.meterChanges && scoreInfo.meterChanges[0] && scoreInfo.meterChanges[0].meter) || "");
+  if (hintMeter) state.timeSignatureHint = hintMeter;
   // 谱面速度（如 ♩=66）：识别/导入到就自动填进右上角 BPM。
   // 以前这里只对 MusicXML 导入生效，扫描谱识别出的速度进不了输入框，试听会退回默认 84 BPM
   // （用户反馈「怎么这么快」的根因：原谱 66，默认 84 快了 27%）。
@@ -3042,7 +3617,7 @@ async function recognizeScore() {
   els.scoreHint.textContent = audiverisAvailable === false && homrAvailable === false
     ? "未检测到专业引擎，正在逐行做粗略估算"
     : audiverisAvailable !== false
-      ? "正在整页识别；若 Audiveris 不可用则逐行谱表识别（避免多声部被压平）"
+      ? "正在逐系统识别（每个系统单独送引擎，声部/小节才对得上）；若 Audiveris 不可用则逐行谱表识别"
       : "正在逐行谱表识别（每行单独送引擎，避免多声部被压平）";
   await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 30)));
 
@@ -3063,10 +3638,13 @@ async function recognizeScore() {
       commitScore(scoreInfo, staves, "engine");
       // 详情/警告要和整本识别一样显示出来（例如「这份 PDF 是图片型文档，只有 155 DPI」）。
       els.scoreInfo.hidden = false;
-      els.scoreDetails.textContent = `${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary} · ${scoreInfo.keySummary}${selfCheckSummary(scoreInfo)}`;
+      els.scoreDetails.textContent = describeScoreDetails(scoreInfo);
       els.scoreWarnings.textContent = (scoreInfo.warnings || []).join(" ");
       els.scoreWarnings.hidden = !(scoreInfo.warnings || []).length;
-      els.scoreHint.textContent = `Audiveris 整页识别完成：${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节`;
+      const systemCount = diagnostics.systemCount || 1;
+      els.scoreHint.textContent = diagnostics.systemMode
+        ? `逐系统识别完成：${systemCount} 个系统 · ${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节 · ${scoreInfo.timeSummary}`
+        : `Audiveris 整页识别完成：${scoreInfo.notes.length} 个音符 · ${scoreInfo.partNames.length} 个声部 · ${scoreInfo.measureCount} 小节`;
       const warning = scoreInfo.warnings[0] ? ` ${scoreInfo.warnings[0]}` : "";
       showToast(`Audiveris 识别到 ${scoreInfo.notes.length} 个音符（${scoreInfo.partNames.length} 个声部），请逐音校对。${warning}`);
       return;
@@ -3151,61 +3729,33 @@ async function recognizeAllPages() {
   // 整本快路径里，速度查询在识别期间并行启动（见 startTempoLookup），结果暂存在这里
   let tempoPrefetch = null;
   try {
-    // ---- 快路径：把「有谱表的页」一次送给 Audiveris（省去每页一次的 JVM 启动）----
-    // 实测：逐页调用约 9 秒/页；一次批量约 2.5–5 秒/页。16 页的谱从 2.4 分钟降到 40 秒左右。
-    //
-    // 关键改进（用户反馈「整本识别太慢」后改）：以前要求「**每一页**都检测到五线谱」才敢批量，
-    // 于是像《敕勒歌》这种前 10 页五线谱、后 6 页简谱的书会整体退回逐页流程（16×9 秒 ≈ 2.4 分钟）。
-    // 现在改成「只把有谱表的页批量送识别，没有谱表的页（多半是简谱页）如实跳过并提示」，
-    // 混合谱也能享受到批量提速（实测 16 页混合谱 24.6 秒）。
+    // ---- 主路径：逐系统识别（准确率优先）----
+    // 逐页把每个「系统」单独裁出来识别：同一行里的各声部天然对齐、钢琴不会被拆成两个声部；
+    // 再用 PDF 文字层里的印刷小节号/拍号/声部标签把系统接回整曲。
+    // 实测《敕勒歌》10 页 19 个系统：5 个声部 / 69 小节 / ♩=68 全部对齐；
+    // 老的整页识别是 8 个声部（钢琴拆开）、速度 84、大量音符错位。
     let batchHandled = false;
     const noStaffPages = new Set();
     let skippedNoStaff = [];
+    let systemStats = null;
     if (audiverisAvailable !== false && totalPages > 1 && totalPages <= 32) {
-      const prepared = [];
-      for (let number = 1; number <= totalPages; number++) {
-        if (superseded()) return;
-        setRecognizeProgress(number - 1, totalPages, `正在准备第 ${number} / ${totalPages} 页…`);
-        await renderPdfPage(number, fileToken);
-        if (superseded()) return;
-        const { binary, width, height } = readPageBinary();
-        const hasStaves = detectStaves(binary, width, height).length > 0;
-        const blob = hasStaves ? await omrPageBlob(number, fileToken) : null;
-        prepared.push({ number, blob, hasStaves });
-        // 速度 OCR 用的 3 倍高清图不在这里串行渲染：整本快路径会在识别请求发出后的
-        // 空档里并行准备（见 startTempoLookup）；逐页兜底路径仍在下面逐页准备。
-        if (!hasStaves) noStaffPages.add(number);
-      }
-      const staffPages = prepared.filter((item) => item.hasStaves && item.blob);
-      if (staffPages.length) {
-        setRecognizeProgress(0, staffPages.length, `正在一次送出 ${staffPages.length} 页（省去每页的引擎启动）…`);
-        // 先把批量识别请求发出去（不等它返回），再趁「等 Audiveris」的空档并行准备速度 OCR：
-        // 识别一整本要几十秒，客户端原本完全空转，速度 OCR 却要等识别结束后再串行跑十几秒。
-        const batchResultsPromise = recognizePagesInBatch(staffPages.map((item) => item.blob), {
-          superseded,
-          onProgress: ({ done, total, label }) => {
-            setRecognizeProgress(done, Math.max(total, 1), label || `已完成 ${done} / ${total} 页`);
-          },
-        });
-        const tempoLookup = startTempoLookup(staffPages, fileToken, superseded);
-        const batchResults = await batchResultsPromise;
-        if (superseded()) return;
-        if (batchResults.length === staffPages.length) {
-          const byPage = new Map(staffPages.map((item, index) => [item.number, batchResults[index]]));
-          for (let number = 1; number <= totalPages; number++) {
-            if (superseded()) return;
-            const result = byPage.get(number);
-            if (!result) { entries.push(null); continue; }
-            entries.push({
-              scoreInfo: result.scoreInfo,
-              staves: [],
-              diagnostics: { wholePage: true, source: "engine", emptyCount: 0, failedCount: 0, estimatedCount: 0 },
-            });
-          }
-          skippedNoStaff = [...noStaffPages].sort((a, b) => a - b);
-          tempoPrefetch = tempoLookup;
-          batchHandled = true;
-        }
+      const bookResult = await recognizeBookBySystems({
+        totalPages,
+        superseded,
+        onProgress: ({ done, total, label }) => setRecognizeProgress(done, Math.max(total, 1), label || `已完成 ${done} / ${total}`),
+      });
+      if (superseded()) return;
+      if (bookResult && bookResult.entries && bookResult.entries.some(Boolean)) {
+        for (const entry of bookResult.entries) entries.push(entry);
+        skippedNoStaff = bookResult.skippedNoStaff || [];
+        for (const number of skippedNoStaff) noStaffPages.add(number);
+        systemStats = bookResult.stats || null;
+        // 速度 OCR 材料：有文字层的 PDF 直接读文字层（≈1 秒）；图片型 PDF 才渲染 3 倍图跑 OCR。
+        const staffPages = entries
+          .map((entry, index) => ({ number: index + 1 }))
+          .filter((item) => !noStaffPages.has(item.number));
+        tempoPrefetch = startTempoLookup(staffPages, fileToken, superseded);
+        batchHandled = true;
       }
     }
     if (!batchHandled) {
@@ -3291,11 +3841,12 @@ async function recognizeAllPages() {
       ? ` · 第 ${skippedNoStaff.join("、")} 页没有五线谱（简谱）已跳过，请用「按简谱识别全部 N 页」`
       : "";
     els.scoreInfo.hidden = false;
-    els.scoreDetails.textContent = `${merged.notes.length} 个音符 · ${merged.partNames.length} 个声部 · ${merged.measureCount} 小节 · ${merged.timeSummary} · ${merged.keySummary}${merged.tempoDetected ? " · ♩=" + Math.round(merged.tempo) : ""}`;
+    els.scoreDetails.textContent = describeScoreDetails(merged,
+      systemStats && systemStats.systemCount ? ` · 逐系统识别 ${systemStats.systemCount} 个系统` : "");
     els.scoreWarnings.textContent = (merged.warnings || []).join(" ");
     els.scoreWarnings.hidden = !(merged.warnings || []).length;
-    els.scoreHint.textContent = `整本识别完成：合并 ${mergedPages} 页 · ${merged.notes.length} 个音符 · ${merged.measureCount} 个小节${failed.length ? ` · 第 ${failed.join("、")} 页识别失败` : ""}${skippedText}`;
-    showToast(`已合并 ${mergedPages} 页共 ${merged.notes.length} 个音符，请逐音校对。${failed.length ? `（第 ${failed.join("、")} 页失败）` : ""}${skippedNoStaff.length ? `（第 ${skippedNoStaff.join("、")} 页无五线谱，已跳过）` : ""}`);
+    els.scoreHint.textContent = `整本识别完成：合并 ${mergedPages} 页 · ${merged.notes.length} 个音符 · ${merged.partNames.length} 个声部 · ${merged.measureCount} 个小节 · ${merged.timeSummary}${failed.length ? ` · 第 ${failed.join("、")} 页识别失败` : ""}${skippedText}`;
+    showToast(`已合并 ${mergedPages} 页共 ${merged.notes.length} 个音符（${merged.partNames.length} 个声部、${merged.measureCount} 小节），请逐音校对。${failed.length ? `（第 ${failed.join("、")} 页失败）` : ""}${skippedNoStaff.length ? `（第 ${skippedNoStaff.join("、")} 页无五线谱，已跳过）` : ""}`);
   } catch (error) {
     if (superseded()) return;
     console.error(error);
@@ -3503,7 +4054,7 @@ function buildMidiFile(notes = getPlaybackNotes(), offset = 0) {
     if (!Number.isFinite(note.midi)) continue;
     const midi = Math.min(127, Math.max(0, Math.round(note.midi)));
     const startTick = Math.max(0, Math.round(((note.startBeat || 0) - offset) * ticksPerBeat));
-    const endTick = startTick + Math.max(1, Math.round(beatsForNote(note) * ticksPerBeat));
+    const endTick = startTick + Math.max(1, Math.round(soundingBeats(note) * ticksPerBeat));
     if (!byPitch.has(midi)) byPitch.set(midi, []);
     byPitch.get(midi).push({ start: startTick, end: endTick });
   }
@@ -5901,7 +6452,7 @@ async function playMelody() {
   for (const partKey of timbrePlan.partTimbre.keys()) busByPart.set(partKey, partBus(partKey));
   for (const event of events) {
     const onset = Math.max(0, event.startBeat);
-    const firstBeats = event.notes[0] ? beatsForNote(event.notes[0]) : 1;
+    const firstBeats = event.notes[0] ? soundingBeats(event.notes[0]) : 1;
     const eventSeconds = Math.max(0.05, timeline.secondsAtBeat(onset + firstBeats) - timeline.secondsAtBeat(onset));
     const dynamics = gainForDynamics(timeline.dynamicsAtBeat(onset));
     const secondsCache = new Map([[firstBeats, eventSeconds]]);
@@ -5909,17 +6460,20 @@ async function playMelody() {
     event.ids = event.notes.map((note) => note.id);
     event.entries = [];
     for (const note of event.notes) {
-      const noteBeats = beatsForNote(note);
+      const noteBeats = soundingBeats(note);
       let seconds = secondsCache.get(noteBeats);
       if (seconds === undefined) {
         seconds = Math.max(0.05, timeline.secondsAtBeat(onset + noteBeats) - timeline.secondsAtBeat(onset));
         secondsCache.set(noteBeats, seconds);
       }
       const partKey = voiceIdentity(note);
+      // 逐音的力度（p/mf/f、渐强渐弱、重音）优先用识别时算好的 velocity；
+      // 没有（例如老识别结果）就沿用整段时间线上的力度。
+      const velocity = Number(note.velocity);
       event.entries.push({
         midi: note.midi,
         seconds: seconds * 0.99,     // 留 1% 间隙，连奏段落里不会听成「莫名的停顿」
-        peak: dynamics,
+        peak: Number.isFinite(velocity) ? gainForDynamics(velocity) : dynamics,
         bus: busByPart.get(partKey) || null,
         partKey,
         timbre: timbrePlan.partTimbre.get(partKey) || null,

@@ -23,6 +23,8 @@ except ImportError:  # pragma: no cover
 
 NUMBER_RE = re.compile(r"^\s*(\d{2,3})\s*$")
 BAR_RE = re.compile(r"^\s*(\d{1,3})\s*$")
+# Sibelius 把「=68」写成一个 word（MuseScore 则拆成 "=" 和 "68" 两个 word）。
+EQ_NUMBER_RE = re.compile(r"[=＝]\s*(\d{2,3})\s*$")
 
 
 def extract(pdf_path):
@@ -34,21 +36,25 @@ def extract(pdf_path):
     for index in range(document.page_count):
         page = document[index]
         words = page.get_text("words")  # [(x0,y0,x1,y1,word,block,line,word_no)]
-        # 1) 速度标记：「=」word 紧跟着一个 2–3 位数字 word（同一行、水平相邻）
+        # 1) 速度标记：
+        #    · MuseScore 风格：先一个 "=" word，再紧跟一个 2–3 位数字 word；
+        #    · Sibelius 风格：把 "=68" 写成**同一个 word**（前面还有一个四分音符字形 "q"）。
+        #    （《敕勒歌》就是后者；以前只认第一种，文字层明明有 ♩=68 却读不到，退回图片 OCR 还读成 66。）
         for position, word in enumerate(words):
-            if word[4].strip() != "=":
-                continue
-            following = words[position + 1] if position + 1 < len(words) else None
-            if not following:
-                continue
-            matched = NUMBER_RE.match(following[4].strip())
-            if not matched:
-                continue
-            value = int(matched.group(1))
-            if not (20 <= value <= 320):
-                continue
-            # 必须在同一行（y 差 < 5）且水平相邻（x 差 < 40）
-            if abs(word[1] - following[1]) > 6 or abs(following[0] - word[2]) > 40:
+            text = word[4].strip()
+            value = None
+            if text == "=":
+                following = words[position + 1] if position + 1 < len(words) else None
+                if following:
+                    matched = NUMBER_RE.match(following[4].strip())
+                    # 必须在同一行（y 差 < 6）且水平相邻（x 差 < 40）
+                    if matched and abs(word[1] - following[1]) <= 6 and abs(following[0] - word[2]) <= 40:
+                        value = int(matched.group(1))
+            else:
+                matched = EQ_NUMBER_RE.search(text)
+                if matched:
+                    value = int(matched.group(1))
+            if value is None or not (20 <= value <= 320):
                 continue
             marks.append({
                 "page": index + 1,
@@ -56,7 +62,7 @@ def extract(pdf_path):
                 "x": round(word[0], 1),
                 "y": round(word[1], 1),
                 "bar": None,
-                "raw": f"= {value}",
+                "raw": text if text.startswith("=") else f"= {value}",
             })
         # 2) 小节号：孤立的窄数字（页面左缘，字宽 < 30px）
         numbers = []
