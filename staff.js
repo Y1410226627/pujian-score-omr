@@ -362,16 +362,38 @@ export function mergeSystemScores(systems, results) {
  *
  * 为什么需要：扫描谱识别出的时值常带零头（某小节 3.75 拍、某个音 0.375 拍），
  * 直接播放会「散」；而且扫描谱的拍号只印在第一页，后面各页的时值是引擎猜的。
- * 这里按拍号（如 4/4 = 每小节 4 拍）：
+ * 这里按**每个小节自己的拍号**（scoreInfo.meterChanges；没有时用整曲拍号）：
  *   · 起拍吸附到最近的网格（该声部最小时值 < 半拍就按 1/4 拍，否则按 1/2 拍）；
  *   · 时值改为「到下一个音（或小节末）的间隔」，且保留原时值的取整结果（短音不会被拉成长音）；
  *   · 同声部、同小节、同起拍、同音高的重复音去重。
  * 弱起小节不受影响：每个音都按它自己的「小节内相对位置」吸附，不假设第 1 小节是整小节。
+ *
+ * 逐小节拍号很重要：以前这里用整曲拍号（4/4）算所有小节，6/4 小节的第 5、6 拍音会被
+ * `Math.min(measureBeats - grid, …)` 压到第 4 拍附近，听觉上就是「变拍子处节奏不对 + 后面莫名空拍」。
  */
 export function quantizeScoreRhythm(scoreInfo) {
   const matched = /^(\d+)\/(\d+)$/.exec(String((scoreInfo && scoreInfo.timeSummary) || ""));
-  const measureBeats = matched ? (Number(matched[1]) * 4) / Number(matched[2]) : 4;
-  if (!(measureBeats > 0) || !scoreInfo || !Array.isArray(scoreInfo.notes)) return scoreInfo;
+  const defaultBeats = matched ? (Number(matched[1]) * 4) / Number(matched[2]) : 4;
+  if (!(defaultBeats > 0) || !scoreInfo || !Array.isArray(scoreInfo.notes)) return scoreInfo;
+  // 逐小节拍号表（scoreInfo.meterChanges 是跨页合并后带全局小节号的）。按小节号缓存查询结果。
+  const meterChanges = (Array.isArray(scoreInfo.meterChanges) ? scoreInfo.meterChanges : [])
+    .map((change) => ({ measure: Number(change.measure), beats: beatsPerMeter(change.meter) }))
+    .filter((change) => Number.isFinite(change.measure) && change.beats > 0)
+    .sort((left, right) => left.measure - right.measure);
+  const beatsCache = new Map();
+  const measureBeatsFor = (measureText) => {
+    if (!meterChanges.length) return defaultBeats;
+    const measureNumber = Number(measureText);
+    if (!Number.isFinite(measureNumber)) return defaultBeats;
+    if (beatsCache.has(measureNumber)) return beatsCache.get(measureNumber);
+    let beats = defaultBeats;
+    for (const change of meterChanges) {
+      if (change.measure <= measureNumber) beats = change.beats;
+      else break;
+    }
+    beatsCache.set(measureNumber, beats);
+    return beats;
+  };
 
   // 分组键要带上 voice/staff：钢琴这类多声部谱表里，两个声部同时进行时
   // 若按「声部 + 小节」一起量化，长音会被另一个声部的短音截断（听感是音莫名变短）。
@@ -387,7 +409,8 @@ export function quantizeScoreRhythm(scoreInfo) {
 
   const quantized = [];
   for (const byMeasure of groups.values()) {
-    for (const notes of byMeasure.values()) {
+    for (const [voiceKey, notes] of byMeasure) {
+      const measureBeats = measureBeatsFor(voiceKey.slice(voiceKey.lastIndexOf("|") + 1));
       // 该组（同声部同小节）的网格：有比八分音符更短的音就用 1/4 拍，否则 1/2 拍。
       let smallest = Infinity;
       for (const note of notes) {
@@ -398,13 +421,19 @@ export function quantizeScoreRhythm(scoreInfo) {
       const onsets = new Map();   // 吸附后的起拍 -> 该起拍上的音
       for (const note of notes) {
         const relative = relativeOffset(note, measureBeats);
-        const snapped = Math.min(measureBeats - grid, Math.round(relative / grid) * grid);
+        // 超过小节长度（识别误差）的音：留在原小节里、不挪到小节外，也不压到小节最后抢拍。
+        const snapped = relative > measureBeats
+          ? Math.round(relative / grid) * grid
+          : Math.min(measureBeats - grid, Math.round(relative / grid) * grid);
         if (!onsets.has(snapped)) onsets.set(snapped, []);
         onsets.get(snapped).push(note);
       }
       const ordered = [...onsets.keys()].sort((a, b) => a - b);
       ordered.forEach((onset, index) => {
-        const nextOnset = index + 1 < ordered.length ? ordered[index + 1] : measureBeats;
+        // 正常情况：时值补到下一个音/小节末；超出小节的识别误差音不压缩到 0。
+        const nextOnset = index + 1 < ordered.length
+          ? ordered[index + 1]
+          : Math.max(measureBeats, onset + grid);
         const gap = Math.max(grid, nextOnset - onset);
         const seen = new Set();
         for (const note of onsets.get(onset)) {
@@ -429,10 +458,11 @@ export function quantizeScoreRhythm(scoreInfo) {
   return scoreInfo;
 }
 
-/** 取这个音原来的「小节内相对起拍」；没有 startInMeasure 时用 startBeat 对拍号取模兜底。 */
+/** 取这个音原来的「小节内相对起拍」；没有 startInMeasure 时用 startBeat 对拍号取模兜底。
+ *  故意不把上限压到小节长度：识别误差可能出现「超出小节」的起拍，量化时要让它留在原位而不是挤到小节末尾。 */
 function relativeOffset(note, measureBeats) {
   const raw = Number(note.startInMeasure);
-  if (Number.isFinite(raw)) return Math.max(0, Math.min(measureBeats, raw));
+  if (Number.isFinite(raw)) return Math.max(0, raw);
   const beat = Number(note.startBeat) || 0;
   return beat - Math.floor(beat / measureBeats) * measureBeats;
 }
@@ -540,6 +570,9 @@ export function mergePageScores(pages, skippedPages = null) {
     notes,
     warnings: [...warnings],
     partNames: first && first.partNames ? [...first.partNames] : [],
+    partIds: first && first.partIds
+      ? [...first.partIds]
+      : (first && first.partNames ? first.partNames.map((_, index) => `P${index + 1}`) : []),
     tempo: (first && first.tempo) || 84,
     // 速度是否是从谱面读到的（合并结果沿用第 1 页的判断）。
     tempoDetected: Boolean(first && first.tempoDetected),
@@ -957,6 +990,9 @@ export function assembleSystemScores(systems, options = {}) {
     notes: sorted,
     warnings: [...warnings],
     partNames,
+    // partIds：与 partNames 同序（P1..Pn）。界面用它把「本页没有音符的声部」也显示出来
+    // （例如《敕勒歌》第 1 页陶笛整页休止，不能显示成「陶笛被裁掉了」）。
+    partIds: partNames.map((_, index) => `P${index + 1}`),
     tempo: mergedTempo.find((mark) => mark.beat <= 0.00001)?.bpm || 84,
     tempoDetected: mergedTempo.length > 0,
     measureCount: stats.measureCount,

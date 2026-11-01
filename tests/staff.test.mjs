@@ -537,3 +537,29 @@ test("mergePageScores：补/裁小节与溢出音符统计跨页累加，roleCou
   assert.equal(merged.systemStats.overflowNotes, 5);
   assert.equal(merged.systemStats.roleCount, undefined, "roleCount 没有累加意义，不应出现");
 });
+
+// —— 2026-11-01 修复：变拍子小节的节奏量化不能按整曲拍号算 ——
+
+test("quantizeScoreRhythm：6/4 小节的第 5、6 拍不被压到第 4 拍（变拍子处不再被量化挤成空拍）", () => {
+  const scoreInfo = {
+    timeSummary: "4/4（第 2 小节为 6/4）",
+    meterChanges: [{ measure: 1, meter: "4/4" }, { measure: 2, meter: "6/4" }, { measure: 3, meter: "4/4" }],
+    notes: [
+      // 第 1 小节（4/4）
+      { partId: "P1", measure: "1", voice: "1", staff: "1", midi: 60, startBeat: 0, startInMeasure: 0, durationBeats: 4 },
+      // 第 2 小节（6/4）：第 5、6 拍上的音
+      { partId: "P1", measure: "2", voice: "1", staff: "1", midi: 62, startBeat: 4, startInMeasure: 0, durationBeats: 2 },
+      { partId: "P1", measure: "2", voice: "1", staff: "1", midi: 64, startBeat: 8, startInMeasure: 4, durationBeats: 1 },
+      { partId: "P1", measure: "2", voice: "1", staff: "1", midi: 65, startBeat: 9, startInMeasure: 5, durationBeats: 1 },
+      // 第 3 小节（4/4）
+      { partId: "P1", measure: "3", voice: "1", staff: "1", midi: 67, startBeat: 10, startInMeasure: 0, durationBeats: 4 },
+    ],
+  };
+  quantizeScoreRhythm(scoreInfo);
+  const measure2 = scoreInfo.notes.filter((note) => note.measure === "2").sort((a, b) => a.startBeat - b.startBeat);
+  // 第 2 小节从第 4 拍开始，6/4 小节内相对落拍应为 0 / 4 / 5
+  assert.deepEqual(measure2.map((note) => Number((note.startBeat - 4).toFixed(3))), [0, 4, 5], "第 5、6 拍的音必须留在第 5、6 拍");
+  assert.ok(measure2.every((note) => note.startBeat >= 4 && note.startBeat < 10), "不能挪出小节");
+  // 第 3 小节起拍不受影响（第 4 小节总长 = 6 拍）
+  assert.equal(scoreInfo.notes.find((note) => note.measure === "3").startBeat, 10);
+});

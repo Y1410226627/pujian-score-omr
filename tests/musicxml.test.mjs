@@ -298,3 +298,16 @@ test("渐强/渐弱、圆滑线、延长号、歌词都被解析并统计", () =
   assert.equal(result.wedgeMarks[0].endBeat, 4);
   assert.equal(result.wedgeMarks[0].type, "crescendo");
 });
+
+test("逐系统：PDF 文字层的拍号优先于 MusicXML 里识别错的 <time>（6/4 被读成 3/4 时不跟着错）", () => {
+  // 实测浏览器渲染的裁片里 Audiveris 把印刷 6/4 读成 3/4；以 PDF 文字层的 6/4 为准。
+  const score = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1"><attributes><divisions>4</divisions><time><beats>3</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>16</duration><voice>1</voice><staff>1</staff></note>
+    </measure>
+    <measure number="2">${note("D", 4, 16)}</measure>
+  </part></score-partwise>`;
+  const result = parseMusicXmlText(score, { meterMap: ["6/4", "4/4"], strictMeters: true });
+  assert.deepEqual(result.measures.map((measure) => measure.lengthBeats), [6, 4], "第一小节按印刷 6/4 算 6 拍");
+  assert.equal(result.totalBeats, 10);
+});

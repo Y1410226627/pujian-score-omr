@@ -37,7 +37,10 @@ page.on("console", (message) => { if (message.type() === "error") errors.push(me
 page.on("pageerror", (error) => errors.push("pageerror: " + error.message));
 const started = Date.now();
 try {
-  await page.goto(appUrl + (appUrl.includes("?") ? "&" : "?") + "debug=1", { waitUntil: "networkidle" });
+  await page.goto(appUrl + (appUrl.includes("?") ? "&" : "?") + "debug=1",
+    { waitUntil: "domcontentloaded", timeout: 60000 });
+  // 不能等 networkidle：页面空闲时会后台预加载全部音源（83 个 bank），网络一直有请求。
+  await page.waitForFunction(() => Boolean(window.__pujian), null, { timeout: 30000 });
   await page.setInputFiles("#fileInput", pdfPath);
   await page.waitForFunction(() => window.__pujian?.state?.pageCount === 10, null, { timeout: 60000 });
   console.log("PDF 已载入，10 页");
@@ -69,6 +72,14 @@ try {
     for (const note of scoreInfo.notes || []) {
       beatEnds[note.partId] = Math.max(beatEnds[note.partId] || 0, note.startBeat + (note.playBeats || note.durationBeats || 0));
     }
+    // 变拍子小节（第 54、66 小节是 6/4）：看小节的「相对落拍」有没有被错误压到第 4 拍以内。
+    const measureRelative = (measure) => {
+      const list = (scoreInfo.notes || []).filter((note) => Number(note.measure) === measure);
+      if (!list.length) return { count: 0, maxRelative: null };
+      const base = Math.min(...list.map((note) => note.startBeat - (Number(note.startInMeasure) || 0)));
+      const maxRelative = Math.max(...list.map((note) => Number((note.startBeat - base).toFixed(2))));
+      return { count: list.length, maxRelative };
+    };
     return {
       hints,
       notes: (scoreInfo.notes || []).length,
@@ -83,7 +94,10 @@ try {
       symbolCounts: scoreInfo.symbolCounts || {},
       warnings: scoreInfo.warnings || [],
       meterChanges: scoreInfo.meterChanges || [],
+      systemStats: scoreInfo.systemStats || {},
       beatEnds,
+      bar54: measureRelative(54),
+      bar66: measureRelative(66),
       gridded: (scoreInfo.notes || []).every((note) => {
         const value = note.startBeat * 4;
         return Math.abs(value - Math.round(value)) < 0.01;
@@ -122,6 +136,18 @@ try {
   assert.ok((state.symbolCounts.dynamics || 0) >= 30, "力度记号应被识别（>=30 处）");
   assert.ok((state.symbolCounts.wedges || 0) >= 60, "渐强/渐弱记号应被识别（>=60 个端点）");
   assert.ok(state.gridded, "所有起拍都应落在 1/4 拍网格上");
+  // 变拍子：第 54、66 小节是 6/4，音符必须能落在第 5、6 拍，不能被量化挤回第 4 拍（以前的老 bug）。
+  console.log("变拍子小节落拍：bar54 =", JSON.stringify(state.bar54), " bar66 =", JSON.stringify(state.bar66));
+  assert.ok(state.bar54.count >= 18, `第 54 小节（6/4）应有足够音符（实际 ${state.bar54.count}）`);
+  assert.ok(state.bar66.count >= 18, `第 66 小节（6/4）应有足够音符（实际 ${state.bar66.count}）`);
+  // 修复前的量化 bug 会把 6/4 小节里第 5/6 拍的音压到 3.5 拍；修复后 bar54 最远到 5.75、bar66 到 4。
+  assert.ok(state.bar54.maxRelative >= 4.5 && state.bar54.maxRelative < 6.01,
+    `第 54 小节是 6/4：应有音落在第 5 拍之后（实际最远相对落拍 ${state.bar54.maxRelative}）`);
+  assert.ok(state.bar66.maxRelative >= 3.99 && state.bar66.maxRelative < 6.01,
+    `第 66 小节是 6/4：第 4 拍的音不能被压到 3.5（实际最远相对落拍 ${state.bar66.maxRelative}）`);
+  // 放大 2× 后 Audiveris 的小节线也读回来了：不应再有「补小节/裁小节」
+  assert.equal(state.systemStats.trimmedMeasures || 0, 0, "不应有被裁掉的小节（放大后小节线读全了）");
+  assert.equal(state.systemStats.appendedMeasures || 0, 0, "不应有需要补的小节");
   // 每页之间的起拍应连续：整曲最后一声不能早于总拍数太多（有 2 个空小节属正常结尾）
   const maxBeatEnd = Math.max(...Object.values(state.beatEnds));
   assert.ok(maxBeatEnd > state.totalBeats - 8, `最后一个音应接近曲末（${maxBeatEnd.toFixed(1)} / ${state.totalBeats}）`);
@@ -163,6 +189,38 @@ try {
   assert.ok(Math.abs(singleState.beats - 24) < 0.01, "第 5 页应为 24 拍（6×4）");
   assert.equal(singleState.measureLabels[0], 35, "单页小节号应按原谱印刷号从第 35 小节开始");
   console.log("✅ 单页逐系统识别回归通过");
+
+  // ===== 单页识别（第 1 页：陶笛整页休止，声部面板必须仍然显示「陶笛 0音（休止）」）=====
+  // 用户反馈过「我的陶笛呢？被裁掉了？」——第 1 页陶笛在谱面上全是整小节休止，
+  // 以前声部面板只按「有音符的声部」列行，看起来就像陶笛丢了。
+  for (let index = 0; index < 4; index++) await page.click("#prevPage");
+  await page.waitForFunction(() => document.querySelector("#pageLabel")?.textContent?.startsWith("1 /"), null, { timeout: 30000 });
+  await page.click("#recognizeButton");
+  await page.waitForFunction(
+    () => {
+      const hint = document.querySelector("#scoreHint")?.textContent || "";
+      return hint.includes("逐系统识别完成") || hint.includes("识别失败") || hint.includes("整页识别完成");
+    },
+    null,
+    { timeout: 180000, polling: 500 },
+  );
+  const page1State = await page.evaluate(() => ({
+    hint: document.querySelector("#scoreHint")?.textContent || "",
+    details: document.querySelector("#scoreDetails")?.textContent || "",
+    bpm: document.querySelector("#tempoInput")?.value || "",
+    partRows: [...document.querySelectorAll("#partList .part-row")].map((row) => ({
+      name: row.querySelector(".part-name-select")?.value || "",
+      count: row.querySelector("small")?.textContent || "",
+    })),
+  }));
+  console.log("单页第 1 页：", JSON.stringify(page1State));
+  assert.equal(page1State.partRows.length, 5, "声部面板应显示 5 行（陶笛本页休止也要列出来，不能像被裁掉）");
+  const ocarinaRow = page1State.partRows.find((row) => row.name === "陶笛");
+  assert.ok(ocarinaRow, "声部面板里必须有陶笛");
+  assert.match(ocarinaRow.count, /0音.*休止/, "陶笛这一页应为 0 音（休止）而不是消失");
+  assert.match(page1State.details, /陶笛当前整段休止/, "详情行要说明陶笛本页整段休止、不是被裁掉");
+  assert.equal(Math.round(Number(page1State.bpm)), 68, "单页第 1 页也应读到 ♩=68");
+  console.log("✅ 单页第 1 页「陶笛休止不丢声部」回归通过");
 } finally {
   await browser.close();
 }

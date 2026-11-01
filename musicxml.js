@@ -248,10 +248,13 @@ export function parseMusicXmlText(source, options = {}) {
           if (time) {
             const beats = textOf(time, "beats");
             const beatType = textOf(time, "beat-type");
-            if (beats && beatType) {
+            if (beats && beatType && !mappedMeter) {
               currentTime = `${beats}/${beatType}`;
               timeSignatures.add(currentTime);
             }
+            // mappedMeter 存在时以 PDF 文字层读到的印刷拍号为准：
+            // 实测 Audiveris 会把印刷的 6/4 读成 3/4（浏览器渲染的裁片比 pymupdf 裁片更容易读错），
+            // 若让 XML 里的 <time> 覆盖，这一行的小节长度就会被算错。
           }
           const key = childNamed(item, "key");
           if (key) {
@@ -408,8 +411,9 @@ export function parseMusicXmlText(source, options = {}) {
       let nominal = measureLength(currentTime, maxCursor, implicit);
       // 弱起（anacrusis）小节：制谱软件常标 implicit="yes"，但也有不少文件不标。
       // 首小节未标 implicit 且实际内容短于标称长度时，按实际内容计，否则后面所有小节都会整体右移。
-      // （逐系统识别时关掉这个猜测：每个系统的第一小节并不是乐曲开头。）
-      if (assumeFirstMeasurePickup && !implicit && measureNumber === 1 && maxCursor > 0 && maxCursor < nominal) nominal = maxCursor;
+      // （逐系统识别时关掉这个猜测：每个系统的第一小节并不是乐曲开头；
+      //   有印刷拍号 meterMap 时也不猜——拍号说 6 拍就是 6 拍。）
+      if (assumeFirstMeasurePickup && !mappedMeter && !implicit && measureNumber === 1 && maxCursor > 0 && maxCursor < nominal) nominal = maxCursor;
       let length = Math.max(nominal, maxCursor);
       let scale = 1;
       // 拍号已知（来自 PDF 文字层）：严格按拍号算小节长度。Audiveris 偶尔多读出一个音，

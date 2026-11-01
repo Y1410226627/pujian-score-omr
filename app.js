@@ -18,6 +18,10 @@ import {
   buildAudioPlan, normalizePeak, stereoChannels, audioFileName, formatDuration, secondsAtBeat,
 } from "./audio-export.js";
 
+// 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
+// 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
+const APP_BUILD = "2026-11-01·提速12";
+
 const byId = (id) => document.getElementById(id);
 const els = {
   fileInput: byId("fileInput"), dropzone: byId("dropzone"), currentFile: byId("currentFile"),
@@ -124,6 +128,10 @@ const state = {
   // 上一次识别成功得到的拍号（同一份文件内复用）：后面几页通常不印拍号，
   // 交给解析器当「已知拍号」，小节长度才不会按识别出来的内容瞎猜。
   timeSignatureHint: "",
+  // 当前乐谱「应该有」的声部（含本页整页休止、0 个音的声部，例如《敕勒歌》第 1 页的陶笛），
+  // 声部面板据此显示 0 音行，避免用户以为声部被裁掉了。
+  expectedParts: [],
+  expectedPartsSource: null,
 };
 // 粗略估算得到的符头置信分低于此值即标为"待校对"
 const LOW_CONFIDENCE_THRESHOLD = 0.5;
@@ -180,6 +188,12 @@ const OMR_MAX_LONG_EDGE = 4200;      // 页面再大也不超过这个长边（�
 // 逐系统识别：一次批量请求最多送多少个系统图（服务端上限 32，这里留余量控制内存）。
 const MAX_OMR_BATCH_IMAGES = 32;
 const OMR_BATCH_CHUNK = 24;
+// 系统裁片送引擎前放大几倍（实测 2× 能把 6/4 读对、把漏读的小节线读回来；见 cropCanvasToBlob 注释）。
+const OMR_CROP_UPSCALE = 2;
+// 放大后的裁片宽度上限（再大就不划算，也避免请求体过大）。
+const OMR_CROP_MAX_WIDTH = 5000;
+// 一次批量请求的 base64 数据量上限（服务端上限 64MB，留一半余量给 JSON 外壳）。
+const OMR_BATCH_MAX_BASE64_BYTES = 32 * 1024 * 1024;
 const durations = [
   ["breve", "倍全音符", 8], ["dottedWhole", "附点全音符", 6], ["whole", "全音符", 4],
   ["doubleDottedHalf", "双附点二分音符", 3.5], ["dottedHalf", "附点二分音符", 3], ["half", "二分音符", 2],
@@ -203,11 +217,11 @@ function makeId() {
     ? window.crypto.randomUUID()
     : "note-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
 }
-function showToast(message) {
+function showToast(message, duration = 2600) {
   els.toast.textContent = message;
   els.toast.classList.add("is-visible");
   clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => els.toast.classList.remove("is-visible"), 2600);
+  state.toastTimer = setTimeout(() => els.toast.classList.remove("is-visible"), duration);
 }
 function formatSize(bytes) {
   return bytes < 1048576 ? Math.max(1, Math.round(bytes / 1024)) + " KB" : (bytes / 1048576).toFixed(1) + " MB";
@@ -236,7 +250,27 @@ function updateEngineHint() {
     els.engineHint.textContent = "未检测到本机专业识别引擎：图片只会做粗略估算，结果可能明显不准，请务必逐音校对。";
   }
 }
+/** 检查浏览器里运行的 app.js 是否就是服务端最新那份；旧缓存页面必须提示刷新，否则会一直用旧逻辑。 */
+let buildCheckPromise = null;
+function checkAppBuild() {
+  if (buildCheckPromise) return buildCheckPromise;
+  buildCheckPromise = (async () => {
+    try {
+      const response = await fetch("/api/version");
+      if (!response.ok) return;
+      const payload = await response.json();
+      const serverBuild = String((payload && payload.build) || "");
+      if (!serverBuild || serverBuild === APP_BUILD) return;
+      const message = `谱见已更新到「${serverBuild}」，当前页面还在用旧版本（${APP_BUILD}）。请按 Ctrl+F5 强制刷新页面后再识别，否则识别结果仍是旧逻辑。`;
+      if (els.scoreHint) els.scoreHint.textContent = message;
+      showToast(message, 15000);
+      console.warn(message);
+    } catch { /* 离线或旧服务端没有这个接口时不打扰用户 */ }
+  })();
+  return buildCheckPromise;
+}
 async function refreshEngineStatus() {
+  checkAppBuild();
   try {
     const response = await fetch("/api/omr/status");
     const payload = await response.json();
@@ -272,6 +306,8 @@ function clearScore() {
   state.selectedParts = null;
   state.partNames = new Map();
   state.pianoKeys = new Set();
+  state.expectedParts = [];
+  state.expectedPartsSource = null;
   if (els.transposeInput) els.transposeInput.value = "0";
   if (els.recognizeProgress) els.recognizeProgress.hidden = true;
   els.scoreInfo.hidden = true;
@@ -595,6 +631,8 @@ async function loadFile(file) {
       applyScoreExpression(scoreInfo);
       state.scoreInfo = scoreInfo;
       state.notes = scoreInfo.notes;
+      state.expectedParts = expectedPartsForScore(scoreInfo);
+      state.expectedPartsSource = scoreInfo;
       state.recognitionSource = scoreInfo.notes.length ? "musicxml" : null;
       state.scorePage = null;   // 符号乐谱没有谱面坐标，不画点
       updatePartControls(true);
@@ -882,11 +920,25 @@ function binaryFromCanvas(canvas) {
 }
 
 /** 从画布裁一块并转成 PNG（逐系统识别用；PNG 无损，符头/符干边缘不会被压糊）。 */
-function cropCanvasToBlob(canvas, box) {
+/**
+ * 从画布裁一块并转成 PNG（逐系统识别用；PNG 无损，符头/符干边缘不会被压糊）。
+ *
+ * 关键：默认把裁片**放大 2 倍**再送引擎。实测（《敕勒歌》第 8 页系统1）同一张裁片：
+ *   · 原尺寸：Audiveris 把印刷的 6/4 读成 **3/4**、漏掉小节末的音（71 个音）；
+ *   · 放大 2×：读对 **6/4 + 4/4**、内容到第 6 拍、112 个音；
+ *   · 整本 19 个系统放大 2× 后：末页原本漏读的小节线也读出来了（4 小节 vs 3 小节），
+ *     第 9 页第 2 系统恢复成 2 小节，总发声音符 1780（原尺寸约 1660）。
+ * 放大只是像素插值，不改变谱面内容；代价是请求体变大、识别慢一些（本机约 1.5–2 倍），
+ * 但准确率提升是值得的（用户明确要求「再多 token 都在所不惜」）。
+ */
+function cropCanvasToBlob(canvas, box, { scale = OMR_CROP_UPSCALE } = {}) {
+  const safeScale = Math.max(1, Math.min(scale, OMR_CROP_MAX_WIDTH / Math.max(1, box.width)));
   const offscreen = document.createElement("canvas");
-  offscreen.width = Math.max(1, Math.round(box.width));
-  offscreen.height = Math.max(1, Math.round(box.height));
+  offscreen.width = Math.max(1, Math.round(box.width * safeScale));
+  offscreen.height = Math.max(1, Math.round(box.height * safeScale));
   const context = offscreen.getContext("2d");
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
   context.fillStyle = "#fff";
   context.fillRect(0, 0, offscreen.width, offscreen.height);
   context.drawImage(canvas, box.x, box.y, box.width, box.height, 0, 0, offscreen.width, offscreen.height);
@@ -1858,7 +1910,9 @@ function partSortKey(key) {
 function collectParts() {
   // 缓存：播放（声部总线/声像）和分块导出会反复要声部列表；几十声部 × 几万音符时
   // 旧实现每次重扫全部音符 → O(声部数 × 音符数)，是「几十声部就卡死」的直接原因之一。
-  if (state.partsCache && state.partsCacheSource === state.notes && state.partsCacheNotes === state.notes.length) {
+  if (state.partsCache && state.partsCacheSource === state.notes
+    && state.partsCacheNotes === state.notes.length
+    && state.partsCacheExpected === state.expectedParts) {
     return state.partsCache;
   }
   const groups = new Map();
@@ -1873,6 +1927,18 @@ function collectParts() {
     }
     groups.get(key).count += 1;
   }
+  // 本页/本曲应该有、但这批音符里一个音都没有的声部（例如第 1 页的陶笛整页休止）：
+  // 也列成 0 音行，用户才不会以为「陶笛被裁掉了」。
+  if (state.expectedPartsSource && state.expectedPartsSource === state.scoreInfo) {
+    for (const expected of state.expectedParts || []) {
+      if (!expected || !expected.key || groups.has(expected.key)) continue;
+      const fallback = expected.name || "乐谱";
+      groups.set(expected.key, {
+        key: expected.key, fallback, count: 0, name: partDisplayName(expected.key, fallback),
+        piano: looksLikePiano(fallback), silent: true,
+      });
+    }
+  }
   const parts = [...groups.values()];
   parts.sort((a, b) => {
     const [aHead, aNum] = partSortKey(a.key);
@@ -1882,6 +1948,7 @@ function collectParts() {
   state.partsCache = parts;
   state.partsCacheNotes = state.notes.length;
   state.partsCacheSource = state.notes;
+  state.partsCacheExpected = state.expectedParts;
   return parts;
 }
 
@@ -2213,8 +2280,10 @@ function updatePartControls(reset = false) {
     });
 
     const count = document.createElement("small");
-    count.textContent = `${part.count}音`;
-    count.title = `${part.name}：${part.count} 个音`;
+    count.textContent = part.silent ? "0音（休止）" : `${part.count}音`;
+    count.title = part.silent
+      ? `「${part.name}」在这里是整段休止（0 个音），不是被裁掉了`
+      : `${part.name}：${part.count} 个音`;
 
     row.append(checkbox, select, timbreSelect, octaveSelect, volume, count);
     els.partList.append(row);
@@ -2411,17 +2480,36 @@ function blobToBase64(blob) {
  */
 async function recognizeImageBlobsInBatch(blobs, { superseded = () => false, onProgress = () => {}, unit = "页" } = {}) {
   if (!blobs.length) return [];
-  const chunkSize = Math.max(1, Math.min(OMR_BATCH_CHUNK, MAX_OMR_BATCH_IMAGES));
+  // 分块要同时看「张数」和「base64 体积」：放大 2× 的系统裁片单张可达 1MB+，
+  // 24 张就可能超过服务端 64MB 上限，所以按实际体积切块（留一半余量给 JSON 外壳）。
+  const chunks = [];
+  let current = [];
+  let currentBytes = 0;
+  for (let index = 0; index < blobs.length; index++) {
+    const estimated = Math.max(1, blobs[index].size) * 1.37;
+    if (current.length && (current.length >= Math.min(OMR_BATCH_CHUNK, MAX_OMR_BATCH_IMAGES)
+      || currentBytes + estimated > OMR_BATCH_MAX_BASE64_BYTES)) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(index);
+    currentBytes += estimated;
+  }
+  if (current.length) chunks.push(current);
   const results = new Array(blobs.length).fill(null);
   let done = 0;
-  for (let start = 0; start < blobs.length; start += chunkSize) {
+  for (const indices of chunks) {
     if (superseded()) return [];
-    const chunk = blobs.slice(start, start + chunkSize);
-    onProgress({ done, total: blobs.length, label: `正在送出第 ${start + 1}–${start + chunk.length} 个${unit}…` });
+    onProgress({
+      done,
+      total: blobs.length,
+      label: `正在送出第 ${indices[0] + 1}–${indices[indices.length - 1] + 1} 个${unit}…`,
+    });
     const images = [];
-    for (const blob of chunk) {
+    for (const index of indices) {
       if (superseded()) return [];
-      images.push(await blobToBase64(blob));
+      images.push(await blobToBase64(blobs[index]));
     }
     if (superseded()) return [];
     let response;
@@ -2436,6 +2524,7 @@ async function recognizeImageBlobsInBatch(blobs, { superseded = () => false, onP
     }
     if (!response.ok) {
       if (response.status === 503) audiverisAvailable = false;
+      console.info("批量识别请求失败：", response.status, await response.text().catch(() => ""));
       return [];
     }
     let payload;
@@ -2445,10 +2534,10 @@ async function recognizeImageBlobsInBatch(blobs, { superseded = () => false, onP
       return [];
     }
     const pages = Array.isArray(payload.pages) ? payload.pages : [];
-    for (let index = 0; index < chunk.length; index++) {
+    for (let local = 0; local < indices.length; local++) {
       if (superseded()) return [];
-      const page = pages[index];
-      results[start + index] = page && page.musicxml ? page.musicxml : null;
+      const page = pages[local];
+      results[indices[local]] = page && page.musicxml ? page.musicxml : null;
       done += 1;
     }
     onProgress({ done, total: blobs.length, label: `已识别 ${done} / ${blobs.length} 个${unit}` });
@@ -3045,9 +3134,47 @@ function symbolSummaryText(scoreInfo) {
   return `识别到谱面记号：${items.join(" · ")}`;
 }
 
+/**
+ * 「这份/这页应该有哪些声部」——包含整段休止、0 个音的声部。
+ *
+ * 逐系统识别会把整页休止的声部也保留下来（例如《敕勒歌》第 1 页陶笛全是整小节休止），
+ * 但如果声部面板只按「有音符的 partId」列行，用户会以为「陶笛被裁掉了」。
+ * 只有标准 P1..Pn 标识才做这个推断；简谱等自定义标识不猜。
+ */
+function expectedPartsForScore(scoreInfo) {
+  if (!scoreInfo) return [];
+  const partNames = Array.isArray(scoreInfo.partNames) ? scoreInfo.partNames : [];
+  if (!partNames.length) return [];
+  let partIds = Array.isArray(scoreInfo.partIds) ? [...scoreInfo.partIds] : [];
+  if (partIds.length !== partNames.length) {
+    const notes = scoreInfo.notes || [];
+    const standard = notes.length > 0 && notes.every((note) => /^P\d+$/.test(String(note.partId || "")));
+    if (!standard) return [];
+    partIds = partNames.map((_, index) => `P${index + 1}`);
+  }
+  const nameByPart = new Map();
+  for (const note of scoreInfo.notes || []) {
+    if (note.partId && !nameByPart.has(note.partId)) nameByPart.set(note.partId, note.partName || "");
+  }
+  return partIds.map((key, index) => ({
+    key: String(key),
+    name: nameByPart.get(key) || partNames[index] || `声部 ${index + 1}`,
+  }));
+}
+
+/** 本页/本曲「整段休止、一个音都没有」的声部名（用于详情行提醒，避免误会成声部丢失）。 */
+function silentPartNames(scoreInfo) {
+  if (!scoreInfo) return [];
+  const sounding = new Set((scoreInfo.notes || []).map((note) => note.partId));
+  return expectedPartsForScore(scoreInfo)
+    .filter((part) => !sounding.has(part.key))
+    .map((part) => part.name);
+}
+
 /** 识别结果详情行（单页/整本共用的中文说明）。 */
 function describeScoreDetails(scoreInfo, extra = "") {
   if (!scoreInfo) return "";
+  const silentParts = silentPartNames(scoreInfo);
   const parts = [
     `${scoreInfo.notes.length} 个音符`,
     `${(scoreInfo.partNames || []).length} 个声部`,
@@ -3055,6 +3182,7 @@ function describeScoreDetails(scoreInfo, extra = "") {
     scoreInfo.timeSummary,
     scoreInfo.keySummary,
     scoreInfo.tempoDetected ? `♩=${Math.round(scoreInfo.tempo)}` : "",
+    silentParts.length ? `${silentParts.join("、")}当前整段休止（不是被裁掉）` : "",
     symbolSummaryText(scoreInfo),
   ].filter(Boolean);
   return parts.join(" · ") + selfCheckSummary(scoreInfo) + (extra || "");
@@ -3163,6 +3291,10 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   // 演奏记号落地：断奏/保持音/延长号/圆滑线/力度/渐强渐弱 → 试听与 MIDI 导出的音长、强弱。
   applyScoreExpression(scoreInfo);
   dedupePartNames(scoreInfo.notes);
+  // 「这份/这页应该有哪些声部」：含整段休止、0 个音的声部（例如《敕勒歌》第 1 页陶笛）。
+  // 声部面板会把它们列成「0音（休止）」，避免用户以为声部被裁掉了。
+  state.expectedParts = expectedPartsForScore(scoreInfo);
+  state.expectedPartsSource = scoreInfo;
   clearTimbreCache();
   state.scoreInfo = scoreInfo;
   state.notes = scoreInfo.notes;

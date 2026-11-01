@@ -7,6 +7,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,21 @@ import zipfile
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
+
+# 页面代码版本号的唯一来源是 app.js 里的 `const APP_BUILD = "..."`。
+# 服务端在请求时现读一次（文件只有几百 KB，开销可忽略），保证两边永远不会写歪。
+APP_BUILD_RE = re.compile(r'APP_BUILD\s*=\s*"([^"]+)"')
+
+
+def read_app_build():
+    """读 app.js 里的版本号；读不到时返回空串（旧版 app.js 没有这个常量）。"""
+    try:
+        source = (PROJECT_DIR / "app.js").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    matched = APP_BUILD_RE.search(source)
+    return matched.group(1) if matched else ""
+
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_MUSICXML_BYTES = 50 * 1024 * 1024
 # 整本识别（多页一次交给 Audiveris）：页数上限与请求体上限。
@@ -503,6 +519,11 @@ class ProjectHandler(SimpleHTTPRequestHandler):
                 "audiverisOcr": audiveris_ocr_languages(),
                 "jianpuAvailable": jianpu_available(),
             })
+            return
+        if self.path.split("?", 1)[0] == "/api/version":
+            # 页面代码版本：app.js 里的 APP_BUILD。浏览器会拿它和自己那份比对，
+            # 不一致就提示「按 Ctrl+F5 刷新」——避免用户拿着旧缓存页面判断「怎么还是不准」。
+            self.send_json(200, {"build": read_app_build()})
             return
         if not self.path_is_servable():
             self.send_error(404, "Not Found")
