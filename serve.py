@@ -37,12 +37,15 @@ def read_app_build():
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_MUSICXML_BYTES = 50 * 1024 * 1024
 # 整本识别（多页一次交给 Audiveris）：页数上限与请求体上限。
+# 页数上限 64：客户端会把「系统裁片」也走同一个批量接口，一整本缩编谱常有 40–60 个系统；
+# 把整本系统图并成一批能少起一整组 Audiveris 进程（每组约 5 秒），所以上限放宽到 64，
+# 真正防请求过大的是下面的 64 MB 体积上限。
 # 16 页 × 约 1.5 MB 的 PNG（base64 后约 2 MB）= 约 32 MB，所以给到 64 MB 余量。
-MAX_BATCH_PAGES = 32
+MAX_BATCH_PAGES = 64
 MAX_BATCH_BYTES = 64 * 1024 * 1024
-# 整本识别的总超时：Audiveris 实测约 2.5–5 秒/页（一 JVM 多页），32 页给到 15 分钟。
-MAX_BATCH_SECONDS = 900
-# 整本简谱识别：实测约 0.1 秒/页，32 页理论上几秒，给 5 分钟足够。
+# 整本识别的总超时：Audiveris 实测约 2.5–5 秒/页（一 JVM 多页），64 页给到 20 分钟。
+MAX_BATCH_SECONDS = 1200
+# 整本简谱识别：实测约 0.1 秒/页，64 页理论上几秒，给 5 分钟足够。
 MAX_JIANPU_BATCH_SECONDS = 300
 
 

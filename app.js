@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-04·提速15";
+const APP_BUILD = "2026-11-04·提速16";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -190,9 +190,11 @@ const OMR_VECTOR_LONG_EDGE = 2600;
 const OMR_VECTOR_MAX_SCALE = 3.8;
 const OMR_TARGET_LONG_EDGE = 3400;   // 图片文件放大到约这个长边
 const OMR_MAX_LONG_EDGE = 4200;      // 页面再大也不超过这个长边（内存/请求体上限）
-// 逐系统识别：一次批量请求最多送多少个系统图（服务端上限 32，这里留余量控制内存）。
-const MAX_OMR_BATCH_IMAGES = 32;
-const OMR_BATCH_CHUNK = 24;
+// 逐系统识别：一次批量请求最多送多少个系统图。上限 64 = 服务端 MAX_BATCH_PAGES；
+// 把整本的系统图尽量放进**一个**批量请求：每多一批就要多起一组 Audiveris 进程（约 5 秒），
+// 实测《Goodbye Mr Lawrence》52 个系统从 3 批变 1 批、引擎总耗时约省 15%。体积仍由下面的 base64 上限兜底。
+const MAX_OMR_BATCH_IMAGES = 64;
+const OMR_BATCH_CHUNK = 64;
 // 系统裁片送引擎前放大几倍（实测 2× 能把 6/4 读对、把漏读的小节线读回来；见 cropCanvasToBlob 注释）。
 const OMR_CROP_UPSCALE = 2;
 // 图片型 PDF：识谱图已经按 4200px 长边渲染（约 360 DPI），裁片基本不用再放大；
@@ -2961,7 +2963,16 @@ async function retrySuspiciousSystems(systemJobs, xmlList, parsed, { superseded 
   if (!pending.length) return parsed;
   console.info(`可疑系统重识别：${pending.length} 个（${pending.map((index) => `p${systemJobs[index].page}s${systemJobs[index].index + 1}`).join("、")}）`);
   const describe = (index) => `p${systemJobs[index].page}s${systemJobs[index].index + 1}`;
-  for (const scale of [1.5, 2.0]) {
+  // 放大复核的「倍数方案」：每个方案给出「对某个系统用多大的绝对放大倍数」。
+  //   · 普通系统：第一轮直接 2.0× —— 实测 1.5× 有一半系统仍读不出（《Goodbye Mr Lawrence》的
+  //     p7s4 / p10s5），而 2× 一轮就能修好；比起「先 1.5× 再 2×」省掉一整批引擎调用（约 20 秒）。
+  //   · 每页第一个系统原本按 1.35× 裁（页顶速度记号），用「相对 1.5×」（≈ 绝对 2.0×）才是验证过的倍数。
+  //   · 万一某个系统恰好只有 1.5× 读得对：第一轮没变好的系统会在第二轮换另一个倍数再试（通常不触发）。
+  const retryPlans = [
+    { label: "2.0×", scaleFor: (job) => ((Number(job.scale) || 1) > 1 ? (Number(job.scale) || 1) * 1.5 : 2.0) },
+    { label: "1.5×", scaleFor: (job) => ((Number(job.scale) || 1) > 1 ? (Number(job.scale) || 1) * 2.0 : 1.5) },
+  ];
+  for (const plan of retryPlans) {
     if (superseded() || !pending.length) break;
     onProgress({ done: 0, total: 1, label: `正在放大复核 ${pending.length} 个可疑系统（${pending.map(describe).join("、")}）…` });
     const canvases = new Map();
@@ -2978,9 +2989,7 @@ async function retrySuspiciousSystems(systemJobs, xmlList, parsed, { superseded 
         if (canvas) canvases.set(job.page, canvas);
       }
       if (!canvas) continue;
-      // 放大倍数按「相对这个系统原来的裁片」算：每页第一个系统原本就按 1.35× 裁（为了页顶速度记号），
-      // 重识别时直接给 1.5× 反而比它原来的裁片还小，等于没放大——所以乘上 job.scale。
-      const retryScale = Math.max(1, (Number(job.scale) || 1) * scale);
+      const retryScale = Math.max(1, plan.scaleFor(job));
       const blob = await cropCanvasToBlob(canvas, box, { scale: retryScale, maxWidth: Math.max(OMR_CROP_MAX_WIDTH, 6400) });
       if (!blob) continue;
       blobs.push(blob);
@@ -2989,6 +2998,7 @@ async function retrySuspiciousSystems(systemJobs, xmlList, parsed, { superseded 
     if (!blobs.length) break;
     const retryXmls = await recognizeImageBlobsInBatch(blobs, { superseded, unit: "系统" });
     if (superseded() || !retryXmls.length) break;
+    const improvedThisRound = new Set();
     for (let local = 0; local < targets.length; local++) {
       const index = targets[local];
       const xml = retryXmls[local];
@@ -3003,17 +3013,20 @@ async function retrySuspiciousSystems(systemJobs, xmlList, parsed, { superseded 
         const newError = systemContentError(retried, contexts[index], printedMeters);
         // 采用条件：可疑原因变少，或「内容拍数总偏差」变小（更接近原谱）。
         if (newReasons.length < reasons[index].length || newError < errors[index] - 0.001) {
-          console.info(`可疑系统重识别：${describe(index)} 用 ${scale.toFixed(1)}× 重识别后从「${reasons[index].join("；") || "正常"}，内容偏差 ${errors[index].toFixed(2)}」变成「${newReasons.join("；") || "正常"}，内容偏差 ${newError.toFixed(2)}」`);
+          console.info(`可疑系统重识别：${describe(index)} 用 ${plan.label} 重识别后从「${reasons[index].join("；") || "正常"}，内容偏差 ${errors[index].toFixed(2)}」变成「${newReasons.join("；") || "正常"}，内容偏差 ${newError.toFixed(2)}」`);
           parsed[index] = retried;
           reasons[index] = newReasons;
           errors[index] = newError;
+          improvedThisRound.add(index);
         }
       } catch (error) {
         console.info("可疑系统重识别结果解析失败：", error);
       }
     }
-    // 下一轮继续重试「仍有可疑原因」的系统（哪怕这一轮已经变好一点：2× 可能读得更准）。
-    pending = pending.filter((index) => reasons[index].length > 0);
+    // 第二轮只重试「这一轮没有任何改善」的系统（换另一个倍数再试一次）。
+    // 已经改善过的系统不再重试：实测 p11s1 第一轮已从「4 拍」修到「2.5 拍」（内容偏差 2.0→0.5），
+    // 再花 30 多秒换 2.7× 只会更差、白白多等——这类「残留小误差」留给用户逐音校对更划算。
+    pending = pending.filter((index) => reasons[index].length > 0 && !improvedThisRound.has(index));
   }
   if (superseded()) return parsed;
   onProgress({ done: 1, total: 1, label: "可疑系统复核完成" });
@@ -3152,20 +3165,29 @@ async function recognizeBookBySystems({ totalPages, superseded = () => false, on
   let preparedPages = 0;
   try {
     const prepareStart = performance.now();
-    for (let number = 1; number <= totalPages; number++) {
+    // 页面准备（渲染 4200px 画布 + 切系统 + 捡小节线）是一页一页的纯前端计算，
+    // 同时做 3 页能把 11 页的准备时间从 ~5 秒压到 ~2 秒（画布/二值图都是临时对象，峰值内存可控）。
+    const PREPARE_CONCURRENCY = 3;
+    for (let start = 1; start <= totalPages; start += PREPARE_CONCURRENCY) {
       if (superseded()) return null;
-      onProgress({ done: 0, total: totalPages, label: `正在准备第 ${number} / ${totalPages} 页（切系统）…` });
-      const prepared = await preparePageSystems(number, state.loadToken);
+      const group = [];
+      for (let number = start; number < Math.min(totalPages, start + PREPARE_CONCURRENCY - 1) + 1; number++) group.push(number);
+      onProgress({ done: 0, total: totalPages, label: `正在准备第 ${group[0]}–${group[group.length - 1]} / ${totalPages} 页（切系统）…` });
+      const preparedGroup = await Promise.all(group.map((number) => preparePageSystems(number, state.loadToken)));
       if (superseded()) return null;
-      if (!prepared) continue;
-      if (!prepared.systems.length) {
-        skippedNoStaff.push(number);
-        continue;
+      for (let local = 0; local < group.length; local++) {
+        const number = group[local];
+        const prepared = preparedGroup[local];
+        if (!prepared) continue;
+        if (!prepared.systems.length) {
+          skippedNoStaff.push(number);
+          continue;
+        }
+        pageJobs.set(number, prepared);
+        for (const job of prepared.systems) jobs.push(job);
+        preparedPages += 1;
+        onProgress({ done: number, total: totalPages, label: `已切好第 ${number} / ${totalPages} 页（${prepared.systems.length} 个系统）` });
       }
-      pageJobs.set(number, prepared);
-      for (const job of prepared.systems) jobs.push(job);
-      preparedPages += 1;
-      onProgress({ done: number, total: totalPages, label: `已切好第 ${number} / ${totalPages} 页（${prepared.systems.length} 个系统）` });
     }
     const prepareMs = Math.round(performance.now() - prepareStart);
     if (superseded()) return null;
