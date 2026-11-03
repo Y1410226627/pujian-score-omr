@@ -311,3 +311,70 @@ test("逐系统：PDF 文字层的拍号优先于 MusicXML 里识别错的 <time
   assert.deepEqual(result.measures.map((measure) => measure.lengthBeats), [6, 4], "第一小节按印刷 6/4 算 6 拍");
   assert.equal(result.totalBeats, 10);
 });
+
+test("速度：谱面印「♩=60-65」这种范围时取左端（Audiveris 的 sound tempo 会取中点 62）", () => {
+  // 实测《绒花》第 1 页印的是「♩=60-65」、第 6 页印「♩=72-84」；
+  // Audiveris 输出 <per-minute>60-65</per-minute> + <sound tempo="62">（中点）。
+  // 演奏应该从 60 / 72 起，而不是 62 / 78。
+  const rangeScore = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1">${measureAttributes(4, 4)}
+      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>60-65</per-minute></metronome></direction-type>
+        <sound tempo="62"></sound></direction>
+      ${note("C", 4, 4)}
+    </measure>
+    <measure number="2">${note("D", 4, 4)}</measure>
+  </part></score-partwise>`;
+  const ranged = parseMusicXmlText(rangeScore);
+  assert.equal(ranged.tempoMarks[0].bpm, 60, "范围写法取左端 60（不是中点 62）");
+  assert.equal(ranged.tempoDetected, true);
+  // 普通写法（单个数字）保持原样
+  const singleScore = `<score-partwise>${partList([["P1", "旋律"]])}<part id="P1">
+    <measure number="1">${measureAttributes(4, 4)}
+      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>72</per-minute></metronome></direction-type></direction>
+      ${note("C", 4, 4)}
+    </measure>
+  </part></score-partwise>`;
+  const single = parseMusicXmlText(singleScore);
+  assert.equal(single.tempoMarks[0].bpm, 72);
+});
+
+test("partDetails：每个声部的谱表数与谱号能被解析出来（图片型 PDF 靠它推断声部名）", () => {
+  const score = `<score-partwise>${partList([["P1", "Voice"], ["P2", "Piano"]])}
+    <part id="P1">
+      <measure number="1"><attributes><divisions>4</divisions><time><beats>2</beats><beat-type>4</beat-type></time>
+        <clef><sign>G</sign><line>2</line></clef></attributes>
+        ${note("C", 5, 4)}</measure>
+    </part>
+    <part id="P2">
+      <measure number="1"><attributes><divisions>4</divisions><staves>2</staves><time><beats>2</beats><beat-type>4</beat-type></time>
+        <clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>
+        <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><staff>1</staff></note>
+        <note><pitch><step>C</step><octave>2</octave></pitch><duration>4</duration><voice>5</voice><staff>2</staff></note>
+      </measure>
+    </part></score-partwise>`;
+  const result = parseMusicXmlText(score);
+  assert.equal(result.partDetails.length, 2);
+  assert.equal(result.partDetails[0].staves, 1);
+  assert.deepEqual(result.partDetails[0].clefs, [{ sign: "G", line: "2", octaveChange: 0 }]);
+  assert.equal(result.partDetails[1].staves, 2, "钢琴大谱表是 2 行谱表");
+  assert.deepEqual(result.partDetails[1].clefs.map((clef) => clef.sign), ["G", "F"]);
+});
+
+test("速度：同一处印刷速度被两个声部各读一遍时不重复、且不被读错拍号单位的那条带偏", () => {
+  // 实测《绒花》第 4 页：同一处 ♩=68 被 P1（quarter）和钢琴声部（误读成 half+dot）各识别一次，
+  // 后者换算成 204 BPM。同一拍位应只保留第一条。
+  const score = `<score-partwise>${partList([["P1", "旋律"], ["P5", "Piano"]])}
+    <part id="P1"><measure number="1">${measureAttributes(2, 4)}
+      <direction><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>68</per-minute></metronome></direction-type>
+        <sound tempo="68"></sound></direction>
+      ${note("C", 5, 2)}
+    </measure></part>
+    <part id="P5"><measure number="1"><attributes><divisions>1</divisions><staves>2</staves></attributes>
+      <direction><direction-type><metronome><beat-unit>half</beat-unit><beat-unit-dot/><per-minute>68</per-minute></metronome></direction-type>
+        <sound tempo="204"></sound></direction>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>
+    </measure></part></score-partwise>`;
+  const result = parseMusicXmlText(score);
+  assert.deepEqual(result.tempoMarks, [{ beat: 0, bpm: 68 }], "只留 quarter 换算的 68，不要 204");
+  assert.equal(result.tempo, 68);
+});

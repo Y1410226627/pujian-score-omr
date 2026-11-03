@@ -197,8 +197,154 @@ function bestFiveLineWindow(lines) {
 }
 
 /**
+ * 扫描整页的「长竖线」：系统起始小节线、方括号/大括号的竖笔画、钢琴跨行的小节线。
+ * 返回每根竖线的 x 范围与 y 范围（同一根线跨 2–4 列像素，这里合并成一条）。
+ *
+ * 为什么不用固定像素间隔分系统：缩编合唱谱的版面很不规整（一页里可能有
+ * 钢琴独奏 2 行、Solo+piano 3 行、四声部+钢琴 6 行混排），系统内谱表间距
+ * 有时反而比系统之间的间距还大（《绒花》第 2 页：系统内 199px、系统间 216px），
+ * 靠间距阈值怎么调都会切错。谱表的「连接关系」才是可靠依据。
+ */
+export function detectVerticalGuides(binary, width, height, minLength = 0) {
+  const runs = [];
+  for (let x = 0; x < width; x++) {
+    let start = -1;
+    for (let y = 0; y < height; y++) {
+      if (binary[y * width + x]) {
+        if (start < 0) start = y;
+      } else if (start >= 0) {
+        if (y - start >= minLength) runs.push({ x, y0: start, y1: y - 1 });
+        start = -1;
+      }
+    }
+    if (start >= 0 && height - start >= minLength) runs.push({ x, y0: start, y1: height - 1 });
+  }
+  // 按 x 排序后合并「相邻列上 y 范围重叠」的线段（线宽一般 2–4 像素）。
+  runs.sort((left, right) => left.x - right.x || left.y0 - right.y0);
+  const guides = [];
+  for (const run of runs) {
+    let merged = null;
+    for (let index = guides.length - 1; index >= 0; index--) {
+      const guide = guides[index];
+      if (guide.xEnd < run.x - 3) continue;
+      if (run.y1 >= guide.y0 - 3 && run.y0 <= guide.y1 + 3) { merged = guide; break; }
+    }
+    if (merged) {
+      merged.xEnd = run.x;
+      merged.y0 = Math.min(merged.y0, run.y0);
+      merged.y1 = Math.max(merged.y1, run.y1);
+    } else {
+      guides.push({ xStart: run.x, xEnd: run.x, y0: run.y0, y1: run.y1 });
+    }
+  }
+  return guides;
+}
+
+/**
+ * 把谱表按「系统」分组：同一系统内的谱表在时间上并行，不同系统在时间上先后相接。
+ *
+ * 判据是**竖线连接**，不是间距阈值：同一系统里的谱表会被一条竖线（系统起始小节线、
+ * 方括号的竖笔画、钢琴两行之间的连谱小节线）从上到下贯穿；不同系统之间没有这样的竖线。
+ * 找不到任何连接时退回按间距切分（groupSystems），保证没有括号/贯通线的谱也能用。
+ *
+ * @param {Uint8Array} binary 二值图（1=墨）
+ * @param {number} width
+ * @param {number} height
+ * @param {{top:number,bottom:number,spacing?:number}[]} staves 已检测到的谱表
+ * @returns {{top:number,bottom:number,spacing?:number}[][]} 与 groupSystems 同形（按 y 从上到下）
+ */
+export function detectSystems(binary, width, height, staves) {
+  const ordered = [...staves].sort((left, right) => left.top - right.top);
+  if (ordered.length <= 1) return ordered.length ? [ordered] : [];
+  const heights = ordered.map((staff) => staff.bottom - staff.top).filter((value) => value > 0);
+  const medianHeight = medianOf(heights) || 40;
+  // 能贯穿两行谱表的竖线至少有这么长（一行谱表的高度 + 少许余量）。
+  const minLength = Math.max(24, medianHeight * 1.5);
+  const guides = detectVerticalGuides(binary, width, height, minLength);
+
+  const parent = ordered.map((_, index) => index);
+  const find = (index) => {
+    let root = index;
+    while (parent[root] !== root) root = parent[root];
+    while (parent[index] !== root) {
+      const next = parent[index];
+      parent[index] = root;
+      index = next;
+    }
+    return root;
+  };
+  const union = (left, right) => {
+    const leftRoot = find(left), rightRoot = find(right);
+    if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot;
+  };
+
+  let links = 0;
+  for (const guide of guides) {
+    const covered = [];
+    for (let index = 0; index < ordered.length; index++) {
+      const staff = ordered[index];
+      const tolerance = Math.max(18, (Number(staff.spacing) || 10) * 2.5);
+      if (staff.top >= guide.y0 - tolerance && staff.bottom <= guide.y1 + tolerance) covered.push(index);
+    }
+    if (covered.length < 2) continue;
+    const first = ordered[covered[0]];
+    const last = ordered[covered[covered.length - 1]];
+    const toleranceUp = Math.max(36, (Number(first.spacing) || 10) * 4);
+    const toleranceDown = Math.max(36, (Number(last.spacing) || 10) * 4);
+    // 竖线必须「起于本组第一行谱表附近、止于最后一行谱表附近」。
+    // 否则可能是贯穿整页的页边框线——那会把上下两个系统错误地连成一个。
+    if (guide.y0 < first.top - toleranceUp) continue;
+    if (guide.y1 > last.bottom + toleranceDown) continue;
+    for (let index = 1; index < covered.length; index++) {
+      union(covered[index - 1], covered[index]);
+      links += 1;
+    }
+  }
+  if (!links) return groupSystems(ordered);
+
+  const groups = new Map();
+  for (let index = 0; index < ordered.length; index++) {
+    const root = find(index);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(ordered[index]);
+  }
+  const systems = [...groups.values()].sort((left, right) => left[0].top - right[0].top);
+  // 偶尔有谱表没被任何竖线覆盖（竖线检测漏了）：并进上下间隔更近的相邻系统，
+  // 否则它会被当成一个「只有一行谱表的系统」在时间上插到别的系统中间，声部就全错位了。
+  const internalGaps = [];
+  for (const system of systems) {
+    for (let index = 1; index < system.length; index++) internalGaps.push(system[index].top - system[index - 1].bottom);
+  }
+  const medianInternal = medianOf(internalGaps.filter((gap) => gap > 0));
+  const mergeLimit = Math.max(2.2 * medianHeight, (medianInternal || 0) * 1.6);
+  const mergedSystems = [];
+  for (let index = 0; index < systems.length; index++) {
+    const system = systems[index];
+    if (system.length === 1) {
+      const previous = mergedSystems[mergedSystems.length - 1];
+      const next = systems[index + 1];
+      const previousGap = previous ? system[0].top - previous[previous.length - 1].bottom : Infinity;
+      const nextGap = next ? next[0].top - system[0].bottom : Infinity;
+      if (previousGap > 0 && previousGap <= mergeLimit && previousGap <= nextGap) {
+        previous.push(...system);
+        continue;
+      }
+      if (nextGap > 0 && nextGap <= mergeLimit) {
+        next.unshift(...system);
+        continue;
+      }
+    }
+    mergedSystems.push([...system]);
+  }
+  return mergedSystems;
+}
+
+/**
  * 把谱表按"系统"分组：同一系统内的谱表在时间上并行，不同系统在时间上先后相接。
  * 依据是谱表之间的空白高度——系统之间的空白明显更大。
+ *
+ * 注意：这是**兜底**算法。真实雕版谱的版面常常不规整（系统内间距可能大于系统间距），
+ * 优先用 detectSystems() 的竖线连接判据。
  */
 export function groupSystems(staves) {
   const ordered = [...staves].sort((a, b) => a.top - b.top);
@@ -506,9 +652,16 @@ export function mergePageScores(pages, skippedPages = null) {
   const symbolCounts = {};
   const systemStats = {};
   const wedgeMarks = [];
+  const tempoMarks = [];
   let offsetBeats = 0;
   let offsetMeasures = 0;
   let first = null;
+  // 当前生效的拍号（跨页延续）：每页装配时「本页主拍号」也会被记成一条变化，
+  // 若与上一页结尾的拍号相同，那只是重复记录、不是真的变拍子（否则速度说明会出现
+  // 「6/8（第 16、32、43…小节为 2/4）」这样一长串假的变拍子）。
+  let runningMeter = "";
+  // 上一次记录的速度值：连续相同的速度标记只保留第一次（每页开头常重复印速度）。
+  let lastTempoBpm = Number.NaN;
 
   pages.forEach((page, index) => {
     if (!page) {
@@ -529,7 +682,11 @@ export function mergePageScores(pages, skippedPages = null) {
     for (const change of page.meterChanges || []) {
       const measure = Number(change.measure);
       if (!Number.isFinite(measure)) continue;
-      meterChanges.push({ ...change, measure: measure + offsetMeasures });
+      const meter = String(change.meter || "");
+      if (!meter) continue;
+      if (meter === runningMeter) continue;   // 与上一页结尾相同 → 不是真的变拍号
+      meterChanges.push({ ...change, measure: measure + offsetMeasures, meter });
+      runningMeter = meter;
     }
     for (const [key, value] of Object.entries(page.symbolCounts || {})) {
       symbolCounts[key] = (symbolCounts[key] || 0) + (Number(value) || 0);
@@ -547,9 +704,21 @@ export function mergePageScores(pages, skippedPages = null) {
         endBeat: (Number(mark.endBeat) || 0) + offsetBeats,
       });
     }
+    // 速度标记：以前只取第 1 页的，后面页面的「中途变速」（如第 78 小节 ♩=72）会被丢掉。
+    // 现在按页面拍位偏移累加；与上一次速度相同的标记只留第一次（每页开头常重复印速度）。
+    for (const mark of page.tempoMarks || []) {
+      const bpm = Number(mark.bpm);
+      const beat = Number(mark.beat);
+      if (!(bpm >= 20 && bpm <= 320) || !Number.isFinite(beat)) continue;
+      if (Number.isFinite(lastTempoBpm) && Math.abs(lastTempoBpm - bpm) < 0.5) continue;
+      tempoMarks.push({ ...mark, beat: beat + offsetBeats, bpm });
+      lastTempoBpm = bpm;
+    }
     offsetBeats += pageLengthBeats(page);
     offsetMeasures += page.measureCount || 0;
   });
+
+  tempoMarks.sort((left, right) => left.beat - right.beat);
 
   if (failedPages.length) warnings.add(`第 ${failedPages.join("、")} 页识别失败，未能并入结果。`);
 
@@ -573,9 +742,10 @@ export function mergePageScores(pages, skippedPages = null) {
     partIds: first && first.partIds
       ? [...first.partIds]
       : (first && first.partNames ? first.partNames.map((_, index) => `P${index + 1}`) : []),
-    tempo: (first && first.tempo) || 84,
-    // 速度是否是从谱面读到的（合并结果沿用第 1 页的判断）。
-    tempoDetected: Boolean(first && first.tempoDetected),
+    // 起始速度：全曲第一个速度标记优先（第 1 页没印、第 2 页才印的情况也能用上）；
+    // 一个标记都没有时沿用第 1 页的速度判断。
+    tempo: tempoMarks.length ? tempoMarks[0].bpm : ((first && first.tempo) || 84),
+    tempoDetected: tempoMarks.length > 0 || Boolean(first && first.tempoDetected),
     measureCount: offsetMeasures,
     totalBeats: offsetBeats,
     pageCount: pages.length,
@@ -583,8 +753,8 @@ export function mergePageScores(pages, skippedPages = null) {
     timeSummary: summarizeMeterChanges(meterChanges, first ? first.timeSummary : ""),
     keySummary: first ? first.keySummary : "",
     clef: first ? first.clef : "",
-    // 与前文一致：速度/力度只取第一页的记号，其余页视为延续。
-    tempoMarks: first && first.tempoMarks ? [...first.tempoMarks] : [],
+    // 速度/力度：速度标记现在跨页累加（中途变速都在），力度仍沿用「第 1 页起延续」。
+    tempoMarks,
     dynamicsMarks: first && first.dynamicsMarks ? [...first.dynamicsMarks] : [],
     wedgeMarks,
     meterChanges,
@@ -612,43 +782,96 @@ export function beatsPerMeter(timeSignature) {
 }
 
 /**
+ * 判断 x 附近、y 范围内有没有「横符杠」：一段长度 ≥ 1.8 个谱表间距的连续横线。
+ *
+ * 用来排除「符干冒充小节线」：缩编合唱谱里各声部节奏常完全对齐，同一拍的符干在
+ * 好几行谱表上落在同一个 x；当这些音符带符杠、且符干贯穿整行谱表时，逐行检测会把它
+ * 当成一条「六行都有」的小节线（实测《绒花》第 5、9 页因此多出 3 个小节）。
+ * 真小节线上下的空白处没有这样的横线，符干的顶端却连着符杠。
+ */
+function hasHorizontalBeam(binary, width, x, yFrom, yTo, needed) {
+  const start = Math.max(0, Math.min(yFrom, yTo));
+  const end = Math.min(Number.MAX_SAFE_INTEGER, Math.max(yFrom, yTo));
+  for (let y = start; y <= end; y++) {
+    const row = y * width;
+    let anchor = -1;
+    if (binary[row + x]) anchor = x;
+    else if (x > 0 && binary[row + x - 1]) anchor = x - 1;
+    else if (x + 1 < width && binary[row + x + 1]) anchor = x + 1;
+    if (anchor < 0) continue;
+    let left = 0;
+    for (let xx = anchor; xx >= 0 && binary[row + xx]; xx--) left += 1;
+    let right = 0;
+    for (let xx = anchor + 1; xx < width && binary[row + xx]; xx++) right += 1;
+    if (left + right >= needed) return true;
+  }
+  return false;
+}
+
+/**
  * 检测小节线：每行谱表里贯穿五线的竖线，再跨谱表聚类。
  *
  * 为什么需要：Audiveris 偶尔会把两条小节线之间看成一整个小节（实测《敕勒歌》最后一页
  * 4 小节被识别成 3 小节），拍位就会少算。小节线是纯几何、检测很稳，可以用来核对/纠正。
  *
+ * 两道几何校验，避免把「符干/符杠」当成小节线：
+ *  1. 竖线必须从谱表上线一直画到下线（符干只覆盖其中一段）；
+ *  2. 竖线紧邻的上方/下方及谱表内侧靠上下处不能有横符杠（符干顶端连着符杠）。
+ *
  * @param {Uint8Array} binary 二值图（1=墨）
  * @param {number} width
  * @param {number} height
- * @param {{top:number,bottom:number}[]} staves 同一系统的谱表（自上而下）
+ * @param {{top:number,bottom:number,spacing?:number}[]} staves 同一系统的谱表（自上而下）
  * @returns {{x:number, xStart:number, xEnd:number}[]} 小节线 x 坐标（升序）
  */
 export function detectBarlines(binary, width, height, staves, options = {}) {
   if (!Array.isArray(staves) || !staves.length) return [];
   const supportRatio = Number.isFinite(options.supportRatio) ? options.supportRatio : 0.5;
   const mergeGap = Number.isFinite(options.mergeGap) ? options.mergeGap : 20;
+  const checkStems = options.checkStems !== false;
   const perStaff = [];
   for (const staff of staves) {
-    const top = Math.max(0, Math.round(staff.top) - 3);
-    const bottom = Math.min(height - 1, Math.round(staff.bottom) + 3);
-    const span = Math.max(1, Math.round(staff.bottom) - Math.round(staff.top) + 1);
+    const staffTop = Math.round(staff.top);
+    const staffBottom = Math.round(staff.bottom);
+    const top = Math.max(0, staffTop - 4);
+    const bottom = Math.min(height - 1, staffBottom + 4);
+    const span = Math.max(1, staffBottom - staffTop + 1);
+    const spacing = Number(staff.spacing) > 0 ? Number(staff.spacing) : span / 4;
     const best = new Int32Array(width);
+    const bestStart = new Int32Array(width);
     const run = new Int32Array(width);
     for (let y = top; y <= bottom; y++) {
       const row = y * width;
       for (let x = 0; x < width; x++) {
         if (binary[row + x]) {
           run[x] += 1;
-          if (run[x] > best[x]) best[x] = run[x];
+          if (run[x] > best[x]) {
+            best[x] = run[x];
+            bestStart[x] = y - run[x] + 1;
+          }
         } else {
           run[x] = 0;
         }
       }
     }
     const threshold = span * 0.9;
+    const beamNeeded = Math.max(18, Math.round(spacing * 1.8));
+    const inner = Math.round(spacing * 0.6);
     const columns = [];
     for (let x = 0; x < width; x++) {
-      if (best[x] >= threshold) columns.push(x);
+      if (best[x] < threshold) continue;
+      if (checkStems) {
+        const runStart = bestStart[x];
+        const runEnd = runStart + best[x] - 1;
+        // 真小节线：从谱表上线画到下线。符干只覆盖谱表的一部分。
+        if (runStart > staffTop + 4 || runEnd < staffBottom - 4) continue;
+        // 符杠检查：谱表外上方、谱表内靠上、谱表内靠下、谱表外下方。
+        if (hasHorizontalBeam(binary, width, x, staffTop - Math.round(spacing * 0.7), staffTop - 2, beamNeeded)) continue;
+        if (hasHorizontalBeam(binary, width, x, staffTop + 2, staffTop + inner, beamNeeded)) continue;
+        if (hasHorizontalBeam(binary, width, x, staffBottom - inner, staffBottom - 2, beamNeeded)) continue;
+        if (hasHorizontalBeam(binary, width, x, staffBottom + 2, staffBottom + Math.round(spacing * 0.7), beamNeeded)) continue;
+      }
+      columns.push(x);
     }
     const groups = [];
     for (const x of columns) {
@@ -730,32 +953,126 @@ export function canonicalPartRole(text) {
   return raw;
 }
 
+// 声部在谱面上的自然顺序（自上而下）：S、A、T、Bar、B，最后才是钢琴/伴奏。
+const VOICE_ROLE_ORDER = ["Soprano", "Alto", "Tenor", "Baritone", "Bass"];
+/** 声部在界面/编号里的固定顺序：人声在前（S→A→T→Bar→B），其它乐器居中，钢琴最后。 */
+const ROLE_SORT_WEIGHTS = { Soprano: 0, Alto: 1, Tenor: 2, Baritone: 3, Bass: 4 };
+export function roleSortWeight(role) {
+  const name = String(role || "");
+  if (Object.prototype.hasOwnProperty.call(ROLE_SORT_WEIGHTS, name)) return ROLE_SORT_WEIGHTS[name];
+  if (name === "Piano") return 100;
+  return 50;
+}
+// 谱号 → 该谱号最可能对应的声部（按顺序尝试未被占用的）。
+const CLEF_ROLE_PREFERENCES = {
+  treble: ["Soprano", "Alto"],
+  treble8vb: ["Tenor"],
+  bass: ["Bass"],
+  alto: ["Alto"],
+  tenor: ["Tenor"],
+};
+
+/** MusicXML 的 clef 节点信息（sign/line/八度变化）→ 稳定的谱号标记。 */
+function clefSignature(clef) {
+  if (!clef) return "";
+  const sign = String(clef.sign || "").toUpperCase();
+  const line = String(clef.line || "");
+  const octave = Number(clef.octaveChange) || 0;
+  let base = "";
+  if (sign === "G" && line === "2") base = "treble";
+  else if (sign === "F" && (line === "4" || line === "3")) base = "bass";
+  else if (sign === "C" && line === "3") base = "alto";
+  else if (sign === "C" && line === "4") base = "tenor";
+  else if (sign) base = `${sign}${line}`;
+  if (!base) return "";
+  if (octave < 0) return `${base}8vb`;
+  if (octave > 0) return `${base}8va`;
+  return base;
+}
+
+/** 声部名去重（两个钢琴声部之类）：重复的加序号，保证全局声部表按名字唯一。 */
+function dedupeRoleNames(roles) {
+  const seen = new Map();
+  return roles.map((role) => {
+    const name = role || "";
+    const used = (seen.get(name) || 0) + 1;
+    seen.set(name, used);
+    return used > 1 ? `${name} ${used}` : name;
+  });
+}
+
+/**
+ * 没有谱面文字标签时的声部名推断（图片型 PDF 没有文字层，读不到 S./A./T./B.）。
+ *
+ * 依据是 MusicXML 里的**谱号与谱表数**（识别引擎本来就会读谱号）：
+ *  - 一个 part 带 2 行谱表（G2+F4）、或引擎已命名为 Piano → 钢琴；
+ *  - 其余单行谱表按谱号自上而下映射：G2 → S/A，G2 低八度（treble8vb）→ T，F4 → B。
+ * 实测《绒花》：6 行谱表 = [G2, G2, G2-8, F4, Piano(2行)] → Soprano/Alto/Tenor/Bass/Piano；
+ * 3 行谱表（Solo 段）= [G2, Piano(2行)] → Soprano/Piano；2 行钢琴独奏段 → Piano。
+ *
+ * @param {string[]} engineNames 识别引擎给的声部名
+ * @param {{partName?:string, staves?:number, clefs?:object[]}[]} partDetails 与声部同序的谱表信息
+ * @param {number} count 声部数
+ * @returns {string[]|null} 推断不出时返回 null（调用方走旧的兜底逻辑）
+ */
+export function inferPartRoles(engineNames, partDetails, count) {
+  if (!Array.isArray(partDetails) || partDetails.length !== count || !count) return null;
+  const names = Array.isArray(engineNames) ? engineNames : [];
+  const isPiano = partDetails.map((detail, index) => {
+    const engineName = canonicalPartRole(names[index] || detail.partName || "");
+    if (engineName === "Piano") return true;
+    return Number(detail.staves) >= 2;
+  });
+  const roles = new Array(count).fill("");
+  const vocalSlots = [];
+  for (let index = 0; index < count; index++) {
+    if (isPiano[index]) roles[index] = "Piano";
+    else vocalSlots.push(index);
+  }
+  if (!vocalSlots.length) return roles; // 整段就是钢琴独奏
+  const used = new Set();
+  for (const index of vocalSlots) {
+    const clefs = Array.isArray(partDetails[index].clefs) ? partDetails[index].clefs : [];
+    const preferences = CLEF_ROLE_PREFERENCES[clefSignature(clefs[0])] || [];
+    let role = preferences.find((candidate) => !used.has(candidate));
+    if (!role) role = VOICE_ROLE_ORDER.find((candidate) => !used.has(candidate));
+    if (!role) role = `声部 ${used.size + 1}`;
+    used.add(role);
+    roles[index] = role;
+  }
+  return dedupeRoleNames(roles);
+}
+
 /**
  * 解析一个系统的声部名：优先用 PDF 文字层读到的谱面标签（自上而下），
- * 其次沿用上一系统/整曲已知的角色，最后退回识别引擎给的声部名。
+ * 其次按谱号/谱表数推断（图片型 PDF 没有标签时用），最后退回识别引擎给的声部名。
  *
  * @param {string[]} labels 该系统自上而下的谱面标签
- * @param {string[]} fallbackRoles 之前系统已确定的角色名
+ * @param {string[]} fallbackRoles 之前系统已确定的角色名（也是跨系统稳定的声部表）
  * @param {string[]} engineNames 识别引擎给出的声部名（兜底）
  * @param {number} partCount 本系统识别出的声部数
+ * @param {{partName?:string, staves?:number, clefs?:object[]}[]} [partDetails] 每个声部的谱表/谱号信息
  * @returns {string[]} 长度 = partCount 的角色名
  */
-export function resolveSystemRoles(labels, fallbackRoles, engineNames, partCount) {
+export function resolveSystemRoles(labels, fallbackRoles, engineNames, partCount, partDetails = []) {
   const count = Math.max(1, Number(partCount) || 1);
   const canonicalLabels = (Array.isArray(labels) ? labels : [])
     .map(canonicalPartRole)
     .filter(Boolean);
-  if (canonicalLabels.length >= count) return canonicalLabels.slice(0, count);
+  const inferred = inferPartRoles(engineNames, partDetails, count);
+  if (canonicalLabels.length >= count) return dedupeRoleNames(canonicalLabels.slice(0, count));
   if (canonicalLabels.length) {
-    // 标签少于声部数：能对上的先对上，对不上的用兜底名补齐。
+    // 标签少于声部数：能对上的先对上，对不上的优先用谱号推断，再退回兜底名。
     const roles = canonicalLabels.slice();
     const fallback = (fallbackRoles && fallbackRoles.length ? fallbackRoles : engineNames) || [];
     for (let index = roles.length; index < count; index++) {
-      const candidate = canonicalPartRole(fallback[index] || "");
+      const inferredRole = inferred && inferred[index] ? inferred[index] : "";
+      const candidate = inferredRole || canonicalPartRole(fallback[index] || "");
       roles.push(candidate || `声部 ${index + 1}`);
     }
-    return roles;
+    return dedupeRoleNames(roles);
   }
+  if (inferred) return inferred;
   if (fallbackRoles && fallbackRoles.length >= count) return fallbackRoles.slice(0, count);
   const engine = (engineNames || []).map((name) => canonicalPartRole(name));
   const seen = new Map();
@@ -773,6 +1090,29 @@ export function resolveSystemRoles(labels, fallbackRoles, engineNames, partCount
 function normalizeMeter(value) {
   const matched = /(\d+(?:\+\d+)*)\s*\/\s*(\d+)/.exec(String(value || ""));
   return matched ? `${matched[1]}/${matched[2]}` : "";
+}
+
+/** 从「每小节的音符时值」推断主拍号（只在整页没有印刷拍号时兜底用）。 */
+function inferMeterFromSystems(systems) {
+  const counts = new Map();
+  for (const system of systems || []) {
+    const info = system && system.scoreInfo;
+    const measures = Array.isArray(info && info.measures) ? info.measures : [];
+    for (const measure of measures) {
+      const beats = Number(measure.lengthBeats);
+      if (!(beats > 0)) continue;
+      const rounded = Math.round(beats * 4) / 4;
+      if (rounded < 0.5 || rounded > 12) continue;
+      counts.set(rounded, (counts.get(rounded) || 0) + 1);
+    }
+  }
+  let best = 0, bestCount = 0;
+  for (const [beats, count] of counts) {
+    if (count > bestCount) { best = beats; bestCount = count; }
+  }
+  if (!best) return "";
+  if (Number.isInteger(best)) return `${best}/4`;
+  return `${Math.round(best * 2)}/8`;
 }
 
 /**
@@ -797,6 +1137,16 @@ export function assembleSystemScores(systems, options = {}) {
   // 整本识别时，每页各报一次「补了几个小节 / 多少音超出小节」会刷屏；
   // 传 true 时先不报，等跨页合并后按全曲总数说一次。
   const deferStatsWarnings = Boolean(options.deferStatsWarnings);
+  // 整页都没有印刷拍号（图片型 PDF 的单页识别常见，例如《绒花》第 4 页）：
+  // 按大多数小节的音符时值推断主拍号。不推断的话 quantizeScoreRhythm 会退回默认 4 拍，
+  // 2/4 的页面会被量化错（听感就是「节奏散 / 莫名其妙的空拍」）。
+  const hasAnyMeter = (systems || []).some((system) => {
+    const info = system && system.scoreInfo;
+    if (!info) return false;
+    if (Array.isArray(system.meterMap) && system.meterMap.some(Boolean)) return true;
+    return /^\d+\/\d+$/.test(normalizeMeter(info.timeSummary));
+  });
+  const inferredMeter = hasAnyMeter ? "" : inferMeterFromSystems(systems);
   const notes = [];
   const warnings = new Set();
   const tempoMarks = [];
@@ -818,15 +1168,28 @@ export function assembleSystemScores(systems, options = {}) {
   let clef = "";
   let title = "";
   let systemIndex = 0;
+  // 全局声部表：按「角色名」而不是「本系统第几个声部」编号。
+  // 一页里各系统的声部数可能不同（《绒花》：钢琴独奏 1 个、Solo 段 2 个、四声部段 5 个），
+  // 若按序号编号，Solo 段里的钢琴会被错算成 Alto——用户看到的就是「分不清声部」。
+  const partRoleRegistry = [...fallbackRoles];
 
   for (const system of systems) {
     if (!system || !system.scoreInfo) continue;
     const info = system.scoreInfo;
     const engineNames = info.partNames || [];
-    const partCount = Math.max(1, engineNames.length || 1);
-    const roles = resolveSystemRoles(system.labels, fallbackRoles, engineNames, partCount);
-    if (!fallbackRoles.length) fallbackRoles.push(...roles);
-    if (!partNames.length) { partNames = [...roles]; stats.roleCount = partCount; }
+    const partDetails = Array.isArray(info.partDetails) ? info.partDetails : [];
+    const partCount = Math.max(1, engineNames.length || partDetails.length || 1);
+    const roles = resolveSystemRoles(
+      system.labels,
+      partRoleRegistry.length ? partRoleRegistry : fallbackRoles,
+      engineNames,
+      partCount,
+      partDetails,
+    );
+    for (const role of roles) {
+      const name = role || `声部 ${partRoleRegistry.length + 1}`;
+      if (!partRoleRegistry.includes(name)) partRoleRegistry.push(name);
+    }
     if (!title) title = info.title || "";
     if (!clef) clef = info.clef || "";
     if (!keySummary) keySummary = info.keySummary || "";
@@ -846,6 +1209,7 @@ export function assembleSystemScores(systems, options = {}) {
     const pickupBeats = pickup ? Math.max(0, Number(parsedMeasures[0].lengthBeats) || 0) : 0;
 
     // 权威的小节长度表（用印刷拍号优先，弱起小节用识别出的实际长度）
+    const inferredBeats = beatsPerMeter(inferredMeter);
     const measureLengths = [];
     let lastLength = 0;
     for (let index = 0; index < authoritative; index++) {
@@ -854,6 +1218,7 @@ export function assembleSystemScores(systems, options = {}) {
       let length = 0;
       if (pickup && index === 0) length = pickupBeats;
       else if (meter) length = beatsPerMeter(meter);
+      else if (inferredBeats) length = inferredBeats;
       else if (parsed && parsed.lengthBeats > 0) length = parsed.lengthBeats;
       else length = lastLength || beatsPerMeter(timeSummary) || 4;
       measureLengths.push(length);
@@ -878,18 +1243,15 @@ export function assembleSystemScores(systems, options = {}) {
       if (index < 0) return 0;
       return Math.min(authoritative - 1, index);
     };
-    // 识别引擎的声部顺序 = partIds/partNames 的顺序；音符按 partId 归到 P1..Pn。
+    // 识别引擎的声部顺序 = partIds/partNames 的顺序；音符按 partId 归到对应角色。
     // （不能用「音符里第一次出现的顺序」：某个声部整段休止时没有音符，会让后面所有声部错位。）
     const mappedPartIds = Array.isArray(info.partIds) && info.partIds.length
       ? info.partIds
       : info.partNames.map((_, index) => `part-${index + 1}`);
-    const partRoleByPartId = new Map();
+    const roleByPartId = new Map();
     mappedPartIds.forEach((partId, index) => {
       const roleIndex = Math.min(index, Math.max(0, roles.length - 1));
-      partRoleByPartId.set(partId, {
-        partId: `P${roleIndex + 1}`,
-        partName: roles[roleIndex] || `声部 ${roleIndex + 1}`,
-      });
+      roleByPartId.set(partId, roles[roleIndex] || `声部 ${roleIndex + 1}`);
     });
 
     const systemStartBeat = beatOffset;
@@ -900,15 +1262,14 @@ export function assembleSystemScores(systems, options = {}) {
       const startInMeasure = Number(note.startInMeasure);
       const safeStart = Number.isFinite(startInMeasure) ? Math.max(0, startInMeasure) : 0;
       if (measureLength > 0 && safeStart >= measureLength - 0.0001) stats.overflowNotes++;
-      const mapping = partRoleByPartId.get(note.partId) || {
-        partId: "P1", partName: roles[0] || "声部 1",
-      };
+      const role = roleByPartId.get(note.partId) || roles[0] || "声部 1";
       const startBeat = systemStartBeat + localBase[localIndex] + safeStart;
       const measureLabel = labelBase + localIndex;
       notes.push({
         ...note,
-        partId: mapping.partId,
-        partName: mapping.partName,
+        // 先记角色名，等所有系统装配完再统一编成稳定的 P1..Pn（见函数末尾）。
+        partId: role,
+        partName: role,
         measure: String(measureLabel),
         startBeat,
         measureIndex: localIndex,
@@ -938,8 +1299,8 @@ export function assembleSystemScores(systems, options = {}) {
     for (const [key, value] of Object.entries(info.symbolCounts || {})) {
       symbolCounts[key] = (symbolCounts[key] || 0) + (Number(value) || 0);
     }
-    // 拍号变化记录（优先用印刷拍号；没有就沿用上一小节/上一系统）
-    let meterCursor = normalizeMeter(runningMeter) || normalizeMeter(info.timeSummary);
+    // 拍号变化记录（优先用印刷拍号；没有就沿用上一小节/上一系统；整页都没印时用推断值）
+    let meterCursor = normalizeMeter(runningMeter) || normalizeMeter(info.timeSummary) || inferredMeter;
     const meters = [];
     for (let index = 0; index < authoritative; index++) {
       const mapped = meterMap ? normalizeMeter(meterMap[index]) : "";
@@ -965,10 +1326,24 @@ export function assembleSystemScores(systems, options = {}) {
   }
 
   stats.totalBeats = beatOffset - beatBaseStart;
-  if (!partNames.length && fallbackRoles.length) partNames = [...fallbackRoles];
+  if (inferredMeter && !hasAnyMeter) {
+    warnings.add(`本页没有印刷拍号，已按谱面音符时值推断为 ${inferredMeter}；如需精确请对照纸谱。`);
+  }
   if (!deferStatsWarnings && stats.trimmedMeasures) warnings.add(`有 ${stats.trimmedMeasures} 个多识别出来的小节没有并入结果（已按印刷小节线为准）。`);
   if (!deferStatsWarnings && stats.appendedMeasures) warnings.add(`原谱比识别结果多 ${stats.appendedMeasures} 个小节（识别漏读了小节线），已按印刷拍号补齐空小节。`);
   if (!deferStatsWarnings && stats.overflowNotes) warnings.add(`有 ${stats.overflowNotes} 个音符超出了一小节的范围（识别误差），试听时它们会挤到下一小节开头。`);
+
+  // 全部系统装配完：按「S→A→T→Bar→B→其它→Piano」的固定顺序给全局声部编号 P1..Pn。
+  // 这样同一份谱里各系统的声部数不同也没关系——同名角色永远落到同一个 P 编号。
+  const sortedRoles = [...partRoleRegistry].sort((left, right) => roleSortWeight(left) - roleSortWeight(right));
+  const partIdByRole = new Map(sortedRoles.map((role, index) => [role, `P${index + 1}`]));
+  for (const note of notes) {
+    const role = String(note.partId || note.partName || "声部 1");
+    note.partId = partIdByRole.get(role) || `P${sortedRoles.length}`;
+    note.partName = role;
+  }
+  partNames = sortedRoles;
+  stats.roleCount = partNames.length;
 
   const sorted = notes.sort((left, right) => left.startBeat - right.startBeat || left.midi - right.midi);
   let eventId = -1, previousBeat = Number.NaN;

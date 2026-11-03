@@ -1,6 +1,6 @@
 import { parseMusicXmlText, readMusicXmlFile } from "./musicxml.js";
 import {
-  binarize, detectStaves, groupSystems, staffCropBox,
+  binarize, detectStaves, detectSystems, staffCropBox,
   mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN, quantizeScoreRhythm,
   detectBarlines, assignLayoutToSystems, assembleSystemScores,
 } from "./staff.js";
@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-01·提速12";
+const APP_BUILD = "2026-11-03·提速13";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -123,6 +123,11 @@ const state = {
   image: null,
   // 「图片型」低清 PDF 的检测结果：{dpi}。太低时把原因如实写进识别结果，而不是让用户对着错音猜。
   lowResPdf: null,
+  // 「整页就是一张位图」的 PDF（扫描件/截图，没有文字层、没有矢量谱）。
+  // 即使内置位图 DPI 很高（如 600+ DPI 的 1-bit 扫描），按矢量 PDF 的 2600px 渲染也会
+  // 白白丢掉一半以上细节（《绒花》：5462×7713 的 661 DPI 位图被渲染成 1838×2600）。
+  // 为真时识谱图放大到 OMR_MAX_LONG_EDGE（4200px），并跳过注定读不到东西的文字层接口。
+  imageOnlyPdf: false,
   // 当前文件的 PDF 原始字节（供速度 OCR 读文字层用；图片文件为 null）
   pdfBytes: null,
   // 上一次识别成功得到的拍号（同一份文件内复用）：后面几页通常不印拍号，
@@ -190,6 +195,9 @@ const MAX_OMR_BATCH_IMAGES = 32;
 const OMR_BATCH_CHUNK = 24;
 // 系统裁片送引擎前放大几倍（实测 2× 能把 6/4 读对、把漏读的小节线读回来；见 cropCanvasToBlob 注释）。
 const OMR_CROP_UPSCALE = 2;
+// 图片型 PDF：识谱图已经按 4200px 长边渲染（约 360 DPI），裁片基本不用再放大；
+// 但每页第一个系统上方的速度/排练记号字太小，放大 1.35× 才能读对（见 preparePageSystems）。
+const OMR_IMAGE_CROP_SCALE_TOP_SYSTEM = 1.35;
 // 放大后的裁片宽度上限（再大就不划算，也避免请求体过大）。
 const OMR_CROP_MAX_WIDTH = 5000;
 // 一次批量请求的 base64 数据量上限（服务端上限 64MB，留一半余量给 JSON 外壳）。
@@ -610,6 +618,7 @@ async function loadFile(file) {
   state.pageCount = 1;
   state.image = null;
   state.lowResPdf = null;
+  state.imageOnlyPdf = false;
   state.timeSignatureHint = "";
   state.partOctaves = new Map();
   clearScore();
@@ -724,8 +733,11 @@ async function loadPdf(file, token) {
   state.pageCount = document.numPages;
   // 图片型（扫描/截图）PDF：先量一下每页位图的有效分辨率，太低就提前提醒用户。
   state.lowResPdf = detectLowResolutionPdf(pdfBytes, state.pageCount);
+  state.imageOnlyPdf = detectImageOnlyPdf(pdfBytes, state.pageCount);
   if (state.lowResPdf) {
     showToast(`这份 PDF 是「图片型」文档：每页只是一张约 ${state.lowResPdf.dpi} DPI 的位图，谱面字号很小，识别准确率会明显下降。想更准请换 300 DPI 以上的清晰扫描件或矢量 PDF。`);
+  } else if (state.imageOnlyPdf) {
+    showToast("这份 PDF 每页是一张位图（不是矢量谱）：已自动按高分辨率识别；图片型谱的识别准确率仍会低于矢量 PDF，建议识别后逐音校对。");
   }
   els.pageControls.hidden = state.pageCount <= 1;
   await renderPdfPage(1, token);
@@ -774,6 +786,32 @@ function detectLowResolutionPdf(bytes, pageCount) {
   } catch (error) {
     console.info("PDF 分辨率检测跳过：", error);
     return null;
+  }
+}
+
+/**
+ * 判断这份 PDF 是不是「每页就是一张位图、完全没有文字/矢量谱」的图片型文档。
+ *
+ * 为什么单独判断：detectLowResolutionPdf 只认「DPI 低」的图片型 PDF；
+ * 但《绒花》这类 PDF 内嵌的是 661 DPI 的 1-bit 扫描位图——DPI 很高、细节却被
+ * 按矢量谱的 2600px 渲染白白丢掉一大半。为真时识谱图放大到 4200px，
+ * 文字层接口（pdf-layout / tempo-text）也不用再试（必然读不到）。
+ *
+ * 与低清判断共用的条件：PDF 里没有 /Font（纯图片），且图片对象数 ≥ 页数。
+ * 对象流压缩过的 PDF 找不到这些关键字时返回 false（宁可少放大，也不误判）。
+ */
+function detectImageOnlyPdf(bytes, pageCount) {
+  try {
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const text = new TextDecoder("latin1").decode(data);
+    if (/\/Font/.test(text)) return false;
+    const marker = /\/Subtype\s*\/Image/g;
+    let count = 0;
+    while (marker.exec(text) && count < 64) count += 1;
+    return count >= Math.max(1, pageCount);
+  } catch (error) {
+    console.info("PDF 图片型检测跳过：", error);
+    return false;
   }
 }
 
@@ -875,7 +913,11 @@ async function omrPageCanvas(number, token = state.loadToken) {
     // 图片型低清 PDF：放大渲染（见常量处的实测）；正常 PDF：保持原像素量、只换 PNG。
     const scale = state.lowResPdf
       ? Math.min(OMR_RENDER_SCALE, OMR_MAX_LONG_EDGE / Math.max(base.width, base.height))
-      : Math.min(OMR_VECTOR_MAX_SCALE, OMR_VECTOR_LONG_EDGE / Math.max(base.width, base.height));
+      : state.imageOnlyPdf
+        // 图片型 PDF（整页位图）：内置位图往往比 2600px 精细得多（《绒花》是 661 DPI），
+        // 按矢量谱的 2600px 渲染会把谱线/符头细节丢掉一半以上，所以直接用到上限。
+        ? Math.min(OMR_RENDER_SCALE, OMR_MAX_LONG_EDGE / Math.max(base.width, base.height))
+        : Math.min(OMR_VECTOR_MAX_SCALE, OMR_VECTOR_LONG_EDGE / Math.max(base.width, base.height));
     let canvas = await renderPdfPageCanvas(page, scale, token);
     // 图片型低清 PDF：放大后锐化——但第 1 页不锐化。
     // 因为谱面的速度标记（♩ = 66）只印在第 1 页、要靠 OCR 读出来，而锐化会让 OCR 读丢它；
@@ -951,9 +993,13 @@ function cropCanvasToBlob(canvas, box, { scale = OMR_CROP_UPSCALE } = {}) {
  * 为什么逐系统送识谱：整页送给 Audiveris 时，它会把一页里的两个系统当成「同一声部的连续小节」，
  * 声部互相错位（《敕勒歌》实测 8 个声部、钢琴被拆成 2 个、中间出现整段空拍）；
  * 一个系统单独裁出来识别，系统内所有声部天然对齐，钢琴也稳定合成一个声部。
+ *
+ * 分系统用 detectSystems（竖线连接判据）而不是固定间距：缩编合唱谱常把
+ * 「钢琴独奏 2 行 / Solo+钢琴 3 行 / 四声部+钢琴 6 行」混排在同一页，
+ * 系统内间距有时比系统间距还大（《绒花》第 2 页 199px vs 216px），按间距切必错。
  */
-function detectSystemCrops(staves, width, height) {
-  const systems = groupSystems(staves);
+function detectSystemCrops(binary, width, height, staves) {
+  const systems = detectSystems(binary, width, height, staves);
   const crops = [];
   systems.forEach((system, index) => {
     if (!system.length) return;
@@ -961,7 +1007,9 @@ function detectSystemCrops(staves, width, height) {
     const spacing = Number(first.spacing) || 10;
     const nextFirst = index + 1 < systems.length ? systems[index + 1][0] : null;
     const previousLast = index > 0 ? systems[index - 1][systems[index - 1].length - 1] : null;
-    let top = Math.max(0, Math.round(first.top - Math.max(42, spacing * 7)));
+    // 上方留白要能包住系统顶上的速度/排练/力度记号：图片型谱（如《绒花》）的
+    // 「♩=60-65」印在第一行谱表上方约 170px（4200px 渲染）处，留白太小就被切掉、读不到速度。
+    let top = Math.max(0, Math.round(first.top - Math.max(56, spacing * 9)));
     let bottom = Math.min(height, Math.round(last.bottom + Math.max(52, spacing * 9)));
     // 相邻系统之间从空隙中线切开，避免裁到邻系统的音符。
     if (previousLast) top = Math.max(top, Math.round((previousLast.bottom + first.top) / 2));
@@ -2499,19 +2547,24 @@ async function recognizeImageBlobsInBatch(blobs, { superseded = () => false, onP
   if (current.length) chunks.push(current);
   const results = new Array(blobs.length).fill(null);
   let done = 0;
-  for (const indices of chunks) {
+  const batchStart = performance.now();
+  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+    const indices = chunks[chunkIndex];
     if (superseded()) return [];
     onProgress({
       done,
       total: blobs.length,
       label: `正在送出第 ${indices[0] + 1}–${indices[indices.length - 1] + 1} 个${unit}…`,
     });
+    const encodeStart = performance.now();
     const images = [];
     for (const index of indices) {
       if (superseded()) return [];
       images.push(await blobToBase64(blobs[index]));
     }
     if (superseded()) return [];
+    const encodedMs = Math.round(performance.now() - encodeStart);
+    const requestStart = performance.now();
     let response;
     try {
       response = await fetch("/api/omr/recognize-batch", {
@@ -2533,6 +2586,7 @@ async function recognizeImageBlobsInBatch(blobs, { superseded = () => false, onP
     } catch {
       return [];
     }
+    console.info(`逐系统识别批次：第 ${chunkIndex + 1}/${chunks.length} 批 ${indices.length} 张（编码 ${encodedMs} ms，引擎 ${Math.round(performance.now() - requestStart)} ms）`);
     const pages = Array.isArray(payload.pages) ? payload.pages : [];
     for (let local = 0; local < indices.length; local++) {
       if (superseded()) return [];
@@ -2542,13 +2596,15 @@ async function recognizeImageBlobsInBatch(blobs, { superseded = () => false, onP
     }
     onProgress({ done, total: blobs.length, label: `已识别 ${done} / ${blobs.length} 个${unit}` });
   }
+  console.info(`逐系统识别批次汇总：${chunks.length} 批 ${blobs.length} 张，共 ${Math.round(performance.now() - batchStart)} ms`);
   return results;
 }
 
 /** 读取 PDF 文字层里的排版信息（声部标签/印刷小节号/拍号字形），整个文件只请求一次。 */
 let pdfLayoutCache = { token: -1, promise: null };
 function pdfLayoutForFile() {
-  if (!state.pdfBytes || state.lowResPdf) return Promise.resolve(null);
+  // 图片型 PDF 没有文字层：不用白跑一次服务端解析。
+  if (!state.pdfBytes || state.lowResPdf || state.imageOnlyPdf) return Promise.resolve(null);
   if (pdfLayoutCache.token === state.loadToken) return pdfLayoutCache.promise;
   const token = state.loadToken;
   const promise = (async () => {
@@ -2600,7 +2656,7 @@ async function preparePageSystems(number, token, { displayStaves = null, initial
   const { binary, width, height } = binaryFromCanvas(canvas);
   const staves = detectStaves(binary, width, height);
   if (!staves.length) return { systems: [], staves: [], width, height, scaleToDisplay: 1 };
-  const crops = detectSystemCrops(staves, width, height);
+  const crops = detectSystemCrops(binary, width, height, staves);
   // 小节线：用来核对「这个系统实际有几小节」以及给变拍号定位（第几小节开始变）。
   for (const crop of crops) {
     crop.barlines = detectBarlines(binary, width, height, crop.staves);
@@ -2608,24 +2664,38 @@ async function preparePageSystems(number, token, { displayStaves = null, initial
   let metas = crops.map(() => ({ labels: [], anchorBar: null, measureCount: null, meterMap: [] }));
   const layoutPages = await pdfLayoutForFile();
   const pageLayout = layoutPages && layoutPages[number - 1];
+  // 有文字层就按文字层对账；没有文字层（扫描/图片型 PDF）也要把小节线条数变成
+  // 「这个系统应该有几小节」——否则小节数完全依赖 OMR 自己数，漏一条小节线就整页错位。
+  let layoutPixels = { labels: [], bars: [], timeGlyphs: [] };
   if (pageLayout && (pageLayout.width || pageLayout.labels?.length || pageLayout.timeGlyphs?.length)) {
     const scaleX = width / Math.max(1, Number(pageLayout.width) || width);
     const scaleY = height / Math.max(1, Number(pageLayout.height) || height);
-    const layoutPixels = layoutInImagePixels(pageLayout, scaleX, scaleY);
-    metas = assignLayoutToSystems(layoutPixels, crops.map((crop) => ({
-      top: crop.y,
-      bottom: crop.y + crop.height,
-      firstStaffTop: crop.firstStaffTop,
-      lastStaffBottom: crop.lastStaffBottom,
-      barlines: crop.barlines,
-    })), { initialMeter });
+    layoutPixels = layoutInImagePixels(pageLayout, scaleX, scaleY);
   }
+  metas = assignLayoutToSystems(layoutPixels, crops.map((crop) => ({
+    top: crop.y,
+    bottom: crop.y + crop.height,
+    firstStaffTop: crop.firstStaffTop,
+    lastStaffBottom: crop.lastStaffBottom,
+    barlines: crop.barlines,
+  })), { initialMeter });
   const systems = [];
   for (let index = 0; index < crops.length; index++) {
     if (token !== state.loadToken) return null;
     const crop = crops[index];
     const meta = metas[index] || {};
-    const blob = await cropCanvasToBlob(canvas, crop);
+    // 裁片送引擎前的放大倍数：
+    // · 图片型 PDF 的识谱图已经按 4200px 长边渲染（约 360 DPI），谱表间距约 21px，
+    //   正好是 Audiveris 最擅长的 300 DPI 级别——再放大 2× 只会让它多处理约 3 倍像素、
+    //   识别慢 2–3 倍（实测《绒花》9 页 19 个系统：整本 160 秒里引擎占了大头，
+    //   改成 1× 后同样的 19 个系统只要 36 秒）。
+    //   但每页第一个系统上方的速度/排练记号字号很小：实测《绒花》第 4 页页顶的「♩=68」
+    //   要谱表间距 ≥28px 才能读对（1× 时读不到、1.2× 读成 6s），所以第一系统放 1.35×。
+    // · 矢量 PDF（2600px 渲染，谱表间距约 13px）仍然放大 2×，保证小符头读得清楚。
+    let cropScale;
+    if (!state.imageOnlyPdf) cropScale = OMR_CROP_UPSCALE;
+    else cropScale = index === 0 ? OMR_IMAGE_CROP_SCALE_TOP_SYSTEM : 1;
+    const blob = await cropCanvasToBlob(canvas, crop, cropScale ? { scale: cropScale } : undefined);
     if (!blob) continue;
     systems.push({
       page: number,
@@ -2711,16 +2781,17 @@ function assemblePageFromSystems(systemJobs, parsedList, { measureBase = 1, fall
  * @returns {{scoreInfo, staves, diagnostics}|null} 失败/取消返回 null
  */
 async function recognizePageBySystems(number, { displayStaves = null, superseded = () => false, onProgress = () => {} } = {}) {
-  // 单页识别时这一页可能整页都没印拍号（拍号只在第 1 页印）：用整曲已知的主拍号起步。
-  // 来源优先级：本文件之前的识别结果 → PDF 文字层里出现过的第一个拍号字形。
-  let initialMeter = /^\d+\/\d+$/.test(state.timeSignatureHint || "") ? state.timeSignatureHint : "";
-  if (!initialMeter) {
-    try {
-      const layoutPages = await pdfLayoutForFile();
-      const glyph = (layoutPages || []).flatMap((page) => page.timeGlyphs || [])[0];
-      if (glyph && /^\d+(?:\+\d+)*\/\d+$/.test(glyph.meter || "")) initialMeter = glyph.meter;
-    } catch { /* 排版信息只是辅助 */ }
-  }
+  // 单页识别时这一页可能整页都没印拍号（拍号只在第 1 页印）。
+  // 拍号来源**只用 PDF 文字层里真实印刷的拍号字形**：它属于「这一页/这一份谱」的确定信息。
+  // 不能用「上一次识别得到的 state.timeSignatureHint」——多段变拍子的谱（如《绒花》前半 6/8、
+  // 后半 2/4）里，识别过第 1 页后再单页识别第 5 页会把 6/8 强加给 2/4 的页面。
+  // 文字层没有字形时留空：逐系统解析会按 MusicXML 自己印的拍号 / 音符实际时值推算小节长度。
+  let initialMeter = "";
+  try {
+    const layoutPages = await pdfLayoutForFile();
+    const glyph = (layoutPages || []).flatMap((page) => page.timeGlyphs || [])[0];
+    if (glyph && /^\d+(?:\+\d+)*\/\d+$/.test(glyph.meter || "")) initialMeter = glyph.meter;
+  } catch { /* 排版信息只是辅助 */ }
   const prepared = await preparePageSystems(number, state.loadToken, { displayStaves, initialMeter });
   if (!prepared) return null;
   if (superseded()) return null;
@@ -2743,16 +2814,23 @@ async function recognizePageBySystems(number, { displayStaves = null, superseded
   // 速度：PDF 文字层的 ♩=68 是精确值，单页识别也优先用它。
   // （识别引擎偶尔把速度读成 6/68 之类的怪值；文字层读不到时再用这一页的识谱图跑速度 OCR 兜底。）
   let tempoResolved = false;
-  try {
-    const marks = await requestTempoFromPdfText(state.pdfBytes);
-    const first = (marks || []).find((mark) => Number(mark.bpm) >= 20 && Number(mark.bpm) <= 320);
-    if (first) {
-      scoreInfo.tempo = Number(first.bpm);
-      scoreInfo.tempoDetected = true;
-      scoreInfo.tempoMarks = [{ beat: 0, bpm: Number(first.bpm) }];
-      tempoResolved = true;
-    }
-  } catch { /* 文字层读不到就走 OCR */ }
+  // 速度：PDF 文字层的 ♩=68 是精确值，单页识别也优先用它。
+  // （图片型 PDF 没有文字层，跳过这个注定白跑的请求；识别引擎偶尔把速度读成 6/68 之类的怪值，
+  //  文字层读不到时再用这一页的识谱图跑速度 OCR 兜底——引擎已经把谱面 metronome 读出来时不跑。）
+  if (!state.lowResPdf && !state.imageOnlyPdf) {
+    try {
+      const marks = await requestTempoFromPdfText(state.pdfBytes);
+      const first = (marks || []).find((mark) => Number(mark.bpm) >= 20 && Number(mark.bpm) <= 320);
+      if (first) {
+        scoreInfo.tempo = Number(first.bpm);
+        scoreInfo.tempoDetected = true;
+        scoreInfo.tempoMarks = [{ beat: 0, bpm: Number(first.bpm) }];
+        tempoResolved = true;
+      }
+    } catch { /* 文字层读不到就走 OCR */ }
+  }
+  // 谱面已经读出速度范围（如 ♩=60-65 → 60）：不需要再用几何数字 OCR 去猜。
+  if (scoreInfo.tempoDetected && (scoreInfo.tempoMarks || []).length) tempoResolved = true;
   if (!tempoResolved && !scoreInfo.tempoDetected) {
     try {
       const blob = await omrPageBlob(number, state.loadToken);
@@ -2802,6 +2880,7 @@ async function recognizeBookBySystems({ totalPages, superseded = () => false, on
   const jobs = [];
   let preparedPages = 0;
   try {
+    const prepareStart = performance.now();
     for (let number = 1; number <= totalPages; number++) {
       if (superseded()) return null;
       onProgress({ done: 0, total: totalPages, label: `正在准备第 ${number} / ${totalPages} 页（切系统）…` });
@@ -2817,17 +2896,23 @@ async function recognizeBookBySystems({ totalPages, superseded = () => false, on
       preparedPages += 1;
       onProgress({ done: number, total: totalPages, label: `已切好第 ${number} / ${totalPages} 页（${prepared.systems.length} 个系统）` });
     }
+    const prepareMs = Math.round(performance.now() - prepareStart);
     if (superseded()) return null;
     if (!jobs.length) {
       // 整本都没有五线谱：交给调用方按「简谱页」处理。
       return { entries: new Array(totalPages).fill(null), skippedNoStaff, stats: { systemCount: 0 } };
     }
     // 一次性批量识别所有系统图（服务端会自动按 32 张上限分批跑）。
+    const engineStart = performance.now();
+    const blobBytes = jobs.reduce((sum, job) => sum + (job.blob?.size || 0), 0);
     const xmls = await recognizeImageBlobsInBatch(jobs.map((job) => job.blob), {
       superseded,
       onProgress: ({ done, total, label }) => onProgress({ done, total, label: label || `已识别 ${done} / ${total} 个系统` }),
       unit: "系统",
     });
+    const engineMs = Math.round(performance.now() - engineStart);
+    // 耗时诊断：页面准备（渲染/切系统/裁图编码）与识别引擎各占多少，用户反馈慢时一眼能看出来。
+    console.info(`逐系统识别耗时：切系统 ${prepareMs} ms（${preparedPages} 页 ${jobs.length} 个系统，约 ${(blobBytes / 1048576).toFixed(1)} MB）· 引擎 ${engineMs} ms`);
     if (superseded()) return null;
     if (!xmls.length) return null;
     const parsed = parseSystemBatch(jobs, xmls, { superseded });
@@ -3020,7 +3105,7 @@ async function collectPageScore({ pickStaff = () => "all", superseded = () => fa
 
   const systems = targets.length === 1
     ? [[targets[0]]]
-    : groupSystems(staves.filter((_, index) => targets.includes(index)))
+    : detectSystems(binary, width, height, staves.filter((_, index) => targets.includes(index)))
         .map((system) => system.map((staff) => staves.indexOf(staff)));
   diagnostics.systemCount = systems.length;
 
@@ -3335,6 +3420,10 @@ function commitScore(scoreInfo, staves, source, { title, page } = {}) {
   if (state.lowResPdf) {
     const note = `这份 PDF 是图片型文档（每页约 ${state.lowResPdf.dpi} DPI），谱面字号太小，识别准确率会明显下降；`
       + "建议换 300 DPI 以上的清晰扫描件或矢量 PDF，并逐音校对后再使用。";
+    if (!(scoreInfo.warnings || []).includes(note)) scoreInfo.warnings = [...(scoreInfo.warnings || []), note];
+  } else if (state.imageOnlyPdf) {
+    const note = "这份 PDF 每页是一张位图（不是矢量谱）：已按高分辨率识别；"
+      + "图片型谱的声部/节奏准确率仍会低于矢量 PDF，建议逐音校对后再使用。";
     if (!(scoreInfo.warnings || []).includes(note)) scoreInfo.warnings = [...(scoreInfo.warnings || []), note];
   }
 }
@@ -3671,7 +3760,7 @@ function mapOcrTempoMarksToBeats(ocrPages, entries, pageNumbers) {
  * @returns {{textMarksPromise: Promise<Array>, ocrPromise: Promise<{pages: Array, pageNumbers: number[]}>}}
  */
 function startTempoLookup(staffPages, fileToken, superseded) {
-  const textMarksPromise = (state.file && state.pdf && state.pdfBytes && !state.lowResPdf)
+  const textMarksPromise = (state.file && state.pdf && state.pdfBytes && !state.lowResPdf && !state.imageOnlyPdf)
     ? requestTempoFromPdfText(state.pdfBytes)
     : Promise.resolve([]);
   const ocrPromise = (async () => {
@@ -3860,6 +3949,8 @@ async function recognizeAllPages() {
   const tempoSources = [];
   // 整本快路径里，速度查询在识别期间并行启动（见 startTempoLookup），结果暂存在这里
   let tempoPrefetch = null;
+  // 图片型 PDF 且谱面已读出速度时为 true：跳过几何数字 OCR（见下方 batchHandled 分支）。
+  let skipTempoOcr = false;
   try {
     // ---- 主路径：逐系统识别（准确率优先）----
     // 逐页把每个「系统」单独裁出来识别：同一行里的各声部天然对齐、钢琴不会被拆成两个声部；
@@ -3882,11 +3973,19 @@ async function recognizeAllPages() {
         skippedNoStaff = bookResult.skippedNoStaff || [];
         for (const number of skippedNoStaff) noStaffPages.add(number);
         systemStats = bookResult.stats || null;
-        // 速度 OCR 材料：有文字层的 PDF 直接读文字层（≈1 秒）；图片型 PDF 才渲染 3 倍图跑 OCR。
+        // 速度 OCR 材料：有文字层的 PDF 直接读文字层（≈1 秒）；图片型 PDF 才渲染高倍图跑 OCR。
+        // 图片型 PDF 例外：Audiveris 自己就能读出谱面 metronome（实测《绒花》读到 ♩=60 与
+        // ♩=72-84），而几何数字 OCR 在密集钢琴谱上容易把符杠当等号（把 65 读成 286、
+        // 72 读成 286），所以谱面已读出速度时不再跑 OCR，避免拿错的覆盖对的。
+        const xmlTempoAvailable = entries.some((entry) => entry && entry.scoreInfo && (entry.scoreInfo.tempoMarks || []).length);
         const staffPages = entries
           .map((entry, index) => ({ number: index + 1 }))
           .filter((item) => !noStaffPages.has(item.number));
-        tempoPrefetch = startTempoLookup(staffPages, fileToken, superseded);
+        if (!(state.imageOnlyPdf && xmlTempoAvailable)) {
+          tempoPrefetch = startTempoLookup(staffPages, fileToken, superseded);
+        } else {
+          skipTempoOcr = true;
+        }
         batchHandled = true;
       }
     }
@@ -3937,7 +4036,10 @@ async function recognizeAllPages() {
     // —— 速度 OCR：Audiveris 的速度记号实测漏读/误读严重（Hall 曲 5 处只给 1 处、还读成 66），
     //    而谱面速度快慢数字本身用几何 OCR 能全部读对。这里在合并前补一次；
     //    整本快路径的速度查询已在识别期间并行跑（tempoPrefetch），这里只是收结果。
-    const tempoOcrApplied = await applyTempoOcr(tempoSources, entries, totalPages, superseded, tempoPrefetch);
+    //    图片型 PDF 且引擎已读出 metronome 时跳过（几何 OCR 在密集钢琴谱上会误读，见 skipTempoOcr）。
+    const tempoOcrApplied = skipTempoOcr
+      ? []
+      : await applyTempoOcr(tempoSources, entries, totalPages, superseded, tempoPrefetch);
     if (superseded()) return;
     const merged = mergePageScores(entries.map((entry) => (entry ? entry.scoreInfo : null)), new Set(skippedNoStaff));
     if (tempoOcrApplied.length) {

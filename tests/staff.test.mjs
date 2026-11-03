@@ -495,9 +495,31 @@ test("mergePageScores：变拍子说明随跨页小节偏移一起平移", () =>
   const page1 = { notes: [], warnings: [], partNames: ["S."], tempo: 68, tempoDetected: true, measureCount: 10, totalBeats: 41, timeSummary: "4/4", meterChanges: [{ measure: 1, meter: "4/4" }], symbolCounts: { slurs: 2 } };
   const page2 = { notes: [], warnings: [], partNames: ["S."], tempo: 68, tempoDetected: true, measureCount: 7, totalBeats: 28, timeSummary: "4/4", meterChanges: [{ measure: 1, meter: "4/4" }, { measure: 5, meter: "6/4" }], symbolCounts: { slurs: 3 } };
   const merged = mergePageScores([page1, page2]);
-  assert.deepEqual(merged.meterChanges.map((change) => change.measure), [1, 11, 15], "第 2 页的小节号整体 +10");
+  // 第 2 页开头那条「4/4」与上一页结尾相同，是每页装配时的重复记录、不是真的变拍号，
+  // 应被去掉（否则速度说明会变成「4/4（第 11、15 小节为…）」这种假变化）。
+  assert.deepEqual(merged.meterChanges.map((change) => change.measure), [1, 15], "只有第 15 小节是真的转 6/4");
   assert.equal(merged.symbolCounts.slurs, 5, "记号统计跨页累加");
   assert.equal(merged.measureCount, 17);
+});
+
+test("mergePageScores：速度标记跨页累加（中途变速不会被丢掉），重复速度只留第一次", () => {
+  const page1 = {
+    notes: [], warnings: [], partNames: ["S."], tempo: 60, tempoDetected: true,
+    measureCount: 15, totalBeats: 45, timeSummary: "6/8",
+    tempoMarks: [{ beat: 0, bpm: 60 }],
+  };
+  const page2 = {
+    notes: [], warnings: [], partNames: ["S."], tempo: 60, tempoDetected: true,
+    measureCount: 10, totalBeats: 20, timeSummary: "2/4",
+    tempoMarks: [{ beat: 0, bpm: 60 }, { beat: 8, bpm: 68 }],
+  };
+  const merged = mergePageScores([page1, page2]);
+  assert.deepEqual(merged.tempoMarks, [
+    { beat: 0, bpm: 60 },
+    { beat: 53, bpm: 68 },   // 第 2 页第 8 拍 → 45 + 8
+  ]);
+  assert.equal(merged.tempo, 60, "起始速度取全曲第一个标记");
+  assert.equal(merged.tempoDetected, true);
 });
 
 test("assembleSystemScores：离谱的速度值（OCR 把 68 读成 6）不进入结果", () => {

@@ -229,9 +229,11 @@ def read_after_equals(mask, equals_box):
         bc_y = (by0 + by1) / 2
         if abs(bc_y - center_y) > max(bh, 22) * 0.9:
             continue
-        # 水平位置：从等号右端往后 0.3–2.6 个等号宽（避开左侧的 ♩ 符干）
+        # 水平位置：从等号右端往后（避开左侧的 ♩ 符干）。
+        # 以前要求偏移 ≥ 0.3 个等号宽，会把紧贴等号的第一个数字（如「=60-65」的 6）漏掉，
+        # 整组数字跟着错位（实测把 60-65 读成 065）。这里只要求“在等号右侧”。
         offset = bx0 - x1
-        if offset < max(3, equals_width * 0.3):
+        if offset < 2:
             continue
         if offset > equals_width * 2.6 + 40:
             continue
@@ -244,7 +246,9 @@ def read_after_equals(mask, equals_box):
         prev = group[-1]
         gap = box[0] - prev[2]
         unit = max(10, prev[3] - prev[1] + 1)
-        if gap > unit * 0.75:
+        # 数字之间的正常间距很小；速度范围「60-65」中间的连字符会把间距撑到约 0.6 个字高，
+        # 必须在这里断开——否则会把后面的 65 也拼进来（取左端就是起始速度）。
+        if gap > unit * 0.45:
             break
         overlap = min(prev[3], box[3]) - max(prev[1], box[1]) + 1
         if overlap < unit * 0.4:

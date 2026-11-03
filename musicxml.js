@@ -219,11 +219,16 @@ export function parseMusicXmlText(source, options = {}) {
   // 第一遍：解析各声部的音符（记录"小节内起拍"）与该声部推算出的各小节长度。
   // 不在这里决定全局起拍，因为多声部/多谱表必须共享同一份小节长度表才能对齐。
   const partTracks = [];
+  // 每个声部的谱表/谱号信息：逐系统识别时用来推断声部名（图片型 PDF 没有文字层标签，
+  // 只能靠「几行谱表 + 什么谱号」判断 S/A/T/B 与钢琴）。
+  const partDetails = [];
   let scoreClef = "";
   for (const part of musicParts) {
     const partId = part.getAttribute("id") || `part-${partNames.size + 1}`;
     const partName = partNames.get(partId) || partId;
     let divisions = 1, currentTime = inheritedTime || null, transpose = 0;
+    let partStaves = 1;
+    const partClefs = [];
     let measureNumber = 0;
     const trackNotes = [], measureLengths = [];
     // 每个小节的时间缩放（只在「本页没印拍号、时值又被猜长」的小节上小于 1）。
@@ -244,6 +249,11 @@ export function parseMusicXmlText(source, options = {}) {
         if (itemName === "attributes") {
           const nextDivisions = Number(textOf(item, "divisions"));
           if (Number.isFinite(nextDivisions) && nextDivisions > 0) divisions = nextDivisions;
+          const stavesText = textOf(item, "staves");
+          if (stavesText) {
+            const staves = Number(stavesText);
+            if (Number.isFinite(staves) && staves >= 1) partStaves = Math.round(staves);
+          }
           const time = childNamed(item, "time");
           if (time) {
             const beats = textOf(time, "beats");
@@ -265,11 +275,16 @@ export function parseMusicXmlText(source, options = {}) {
           if (transposeNode) {
             transpose = (Number(textOf(transposeNode, "chromatic")) || 0) + (Number(textOf(transposeNode, "octave-change")) || 0) * 12;
           }
-          const clefNode = childNamed(item, "clef");
-          if (clefNode && !scoreClef) {
+          // 一个 attributes 里可能有多行谱表的谱号（钢琴大谱表：G2 + F4），要全部收下来。
+          for (const clefNode of childrenNamed(item, "clef")) {
             const sign = textOf(clefNode, "sign").toUpperCase();
             const line = textOf(clefNode, "line");
-            if (sign) scoreClef = sign + line;
+            const octaveChange = Number(textOf(clefNode, "clef-octave-change")) || 0;
+            if (!sign) continue;
+            if (!scoreClef) scoreClef = sign + line;
+            if (!partClefs.some((clef) => clef.sign === sign && clef.line === line && clef.octaveChange === octaveChange)) {
+              partClefs.push({ sign, line, octaveChange });
+            }
           }
           continue;
         }
@@ -283,13 +298,27 @@ export function parseMusicXmlText(source, options = {}) {
           const offset = (Number(textOf(item, "offset")) || 0) / divisions;
           const sound = childNamed(item, "sound");
           let tempo = Number(sound?.getAttribute("tempo"));
-          if (!Number.isFinite(tempo) || tempo <= 0) {
-            const metronome = descendantsNamed(item, "metronome")[0];
-            const perMinute = Number(textOf(metronome, "per-minute"));
+          // metronome 元素存在时优先用它：谱面常印速度范围「♩=60-65 / ♩=72-84」，
+          // Audiveris 的 <sound tempo> 会取中点（如 72-84 → 78），整曲会偏快；
+          // 这里取左端作为起始速度（与原谱写法一致）。
+          const metronome = descendantsNamed(item, "metronome")[0];
+          if (metronome) {
+            const perMinuteText = String(textOf(metronome, "per-minute") || "").trim();
+            const range = /^(\d+(?:\.\d+)?)\s*[-–~—]\s*(\d+(?:\.\d+)?)$/.exec(perMinuteText);
+            const perMinute = range ? Number(range[1]) : Number(perMinuteText);
             const beatUnit = durationByBeatUnit[textOf(metronome, "beat-unit")];
             const beatDots = childrenNamed(metronome, "beat-unit-dot").length;
             const unitMultiplier = beatDots ? 2 - (1 / (2 ** beatDots)) : 1;
-            if (perMinute > 0 && beatUnit) tempo = perMinute * beatUnit * unitMultiplier;
+            if (perMinute > 0 && beatUnit) {
+              const converted = perMinute * beatUnit * unitMultiplier;
+              // 拍号单位被识别错时的兜底：数字（OCR）比符头符号更可靠。
+              // 实测《绒花》第 4 页：同一处印刷的 ♩=68，钢琴声部把符头读成「二分音符+附点」，
+              // 于是 68×2×1.5 = 204 —— 明显是把符头符号认错，数字 68 才是对的。
+              // 只对「放大了 2.5 倍以上」的可疑情况生效（二分附点=3 倍），
+              // 正常的附点四分（1.5 倍）等换算不受影响。
+              const suspicious = beatDots && beatUnit * unitMultiplier >= 2.5;
+              tempo = suspicious ? perMinute : converted;
+            } else if (range && Number.isFinite(Number(range[1]))) tempo = Number(range[1]);
           }
           if (Number.isFinite(tempo) && tempo > 0) tempoMarks.push({ measureIndex, beatInMeasure: cursor + offset, bpm: tempo });
           const directionType = childNamed(item, "direction-type");
@@ -441,6 +470,17 @@ export function parseMusicXmlText(source, options = {}) {
       }
     }
     partTracks.push({ partId, partName, notes: trackNotes, measureLengths });
+    let minMidi = Infinity, maxMidi = -Infinity;
+    for (const note of trackNotes) {
+      if (!Number.isFinite(note.midi)) continue;
+      if (note.midi < minMidi) minMidi = note.midi;
+      if (note.midi > maxMidi) maxMidi = note.midi;
+    }
+    partDetails.push({
+      partId, partName, staves: partStaves, clefs: partClefs,
+      minMidi: Number.isFinite(minMidi) ? minMidi : null,
+      maxMidi: Number.isFinite(maxMidi) ? maxMidi : null,
+    });
   }
 
   // 全局小节长度表：同一小节号取各声部的最大值，保证多声部/多谱表的小节起点一致。
@@ -467,7 +507,18 @@ export function parseMusicXmlText(source, options = {}) {
   }
 
   if (skippedNotes) warnings.add(`${skippedNotes} 个装饰音、无音高或超出 MIDI 音域的项目未加入试听。`);
-  const uniqueTempoMarks = tempoMarks
+  // 速度标记去重：同一处印刷的 ♩=68 常被识别成「每个声部各一条 direction」，
+  // 而且不同声部可能把拍号单位读错（实测《绒花》第 4 页：P1 读成 quarter=68，
+  // 钢琴声部却读成 half+dot=204）。同一拍位只保留**第一条**（按声部顺序，通常是最先的旋律声部）。
+  const seenTempoBeats = new Set();
+  const dedupedTempoEvents = [];
+  for (const mark of tempoMarks) {
+    const key = `${mark.measureIndex}|${Math.round(mark.beatInMeasure * 100) / 100}`;
+    if (seenTempoBeats.has(key)) continue;
+    seenTempoBeats.add(key);
+    dedupedTempoEvents.push(mark);
+  }
+  const uniqueTempoMarks = dedupedTempoEvents
     .map((mark) => ({ beat: (globalBaseBeats[mark.measureIndex] || 0) + mark.beatInMeasure, bpm: mark.bpm }))
     .sort((a, b) => a.beat - b.beat)
     .filter((mark, index, all) =>
@@ -545,6 +596,9 @@ export function parseMusicXmlText(source, options = {}) {
     title, notes: mergedNotes, tempo, tempoDetected, measureCount, partNames: musicParts.map((part) => partNames.get(part.getAttribute("id")) || part.getAttribute("id") || "声部"),
     // partIds：与 partNames 同序的声部标识（逐系统装配时要按顺序把音符归到 P1..Pn）。
     partIds: musicParts.map((part, index) => part.getAttribute("id") || `part-${index + 1}`),
+    // partDetails：每个声部的谱表数/谱号/音域。图片型 PDF 没有文字层标签时，
+    // 逐系统装配靠它推断声部名（S/A/T/B/钢琴）。
+    partDetails,
     // totalBeats：本页总时长（拍），供跨页合并时把后一页整体平移。
     totalBeats: runningBeat,
     // tempoMarks（中途速度变化）/ dynamicsMarks（力度）/ wedgeMarks（渐强渐弱）供播放调度按拍取用。
