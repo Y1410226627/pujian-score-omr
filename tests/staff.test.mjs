@@ -309,6 +309,7 @@ test("节奏量化：起拍吸附网格、时值补到下一个音、同音重�
 import {
   detectBarlines,
   canonicalPartRole,
+  isPlausiblePartLabel,
   resolveSystemRoles,
   beatsPerMeter,
   assignLayoutToSystems,
@@ -608,4 +609,50 @@ test("quantizeScoreRhythm：6/4 小节的第 5、6 拍不被压到第 4 拍（�
   assert.ok(measure2.every((note) => note.startBeat >= 4 && note.startBeat < 10), "不能挪出小节");
   // 第 3 小节起拍不受影响（第 4 小节总长 = 6 拍）
   assert.equal(scoreInfo.notes.find((note) => note.measure === "3").startBeat, 10);
+});
+
+
+// —— 2026-11-04 修复：PDF 文字层「谱表左缘」的调号字形/歌词被当成声部标签 ——
+// 《有我_正谱》4 声部 + 钢琴被拆成 11 个声部（'b'→Bass、歌词 'wu'/'光'/'对答自' 变成新声部名）。
+
+test("isPlausiblePartLabel：只认声部缩写/名称，过滤调号字形与歌词", () => {
+  for (const label of ["S.", "A.", "T.", "B.", "Bar.", "Pno.", "Alto", "Soprano", "Piano", "陶笛", "女高音", "Vln", "Bass 1"]) {
+    assert.equal(isPlausiblePartLabel(label), true, `${label} 应被认作声部标签`);
+  }
+  for (const junk of ["b", "?b", "w", "wu", "光", "世界问你是谁来自哪", "对答自", "皓月星辰初", "燃烧的", "样子"]) {
+    assert.equal(isPlausiblePartLabel(junk), false, `${junk} 不应被认作声部标签`);
+  }
+});
+
+test("resolveSystemRoles：调号字形/歌词混在标签里时不会拆出假声部（《有我》11 声部 bug）", () => {
+  // 原 PDF 文字层里这一行标签实际是：调号字形、S.、调号字形、A.、…、歌词…
+  const junkLabels = ["b", "S.", "b", "A.", "b", "T.", "?b", "B.", "b", "Pno.", "?b"];
+  assert.deepEqual(resolveSystemRoles(junkLabels, [], ["Voice"], 5),
+    ["Soprano", "Alto", "Tenor", "Bass", "Piano"]);
+  const withLyrics = ["S.", "A.", "T.", "B.", "Pno.", "wu", "光", "对答自", "世界问你是谁来自哪"];
+  assert.deepEqual(resolveSystemRoles(withLyrics, [], ["Voice"], 5),
+    ["Soprano", "Alto", "Tenor", "Bass", "Piano"]);
+});
+
+test("assignLayoutToSystems：谱表左缘的调号字形/歌词不会被当成声部标签", () => {
+  const layout = {
+    labels: [
+      { text: "b", x: 75, y: 60, height: 12 },
+      { text: "S.", x: 39, y: 64, height: 12 },
+      { text: "b", x: 75, y: 120, height: 12 },
+      { text: "A.", x: 38, y: 124, height: 12 },
+      { text: "世界问你是谁来自哪", x: 84, y: 150, height: 12 },
+      { text: "光", x: 84, y: 205, height: 12 },
+      { text: "T.", x: 39, y: 180, height: 12 },
+      { text: "wu", x: 84, y: 240, height: 12 },
+      { text: "B.", x: 38, y: 240, height: 12 },
+      { text: "Pno.", x: 27, y: 300, height: 12 },
+    ],
+    bars: [],
+    timeGlyphs: [],
+  };
+  const systems = [{ top: 40, bottom: 340, firstStaffTop: 50, lastStaffBottom: 330, barlines: [40, 400] }];
+  const result = assignLayoutToSystems(layout, systems);
+  assert.deepEqual(result[0].labels, ["S.", "A.", "T.", "B.", "Pno."],
+    "只保留真正的声部标签（调号字形 b、歌词都不算）");
 });

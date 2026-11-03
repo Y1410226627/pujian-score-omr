@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-04·提速16";
+const APP_BUILD = "2026-11-04·提速17";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -3234,6 +3234,8 @@ async function recognizeBookBySystems({ totalPages, superseded = () => false, on
         measureContents: info.measureContents, measureMeters: info.measureMeters,
         printedMeter: info.printedMeter, timeSummary: info.timeSummary,
         measureCount: info.measureCount, totalBeats: info.totalBeats,
+        partNames: info.partNames, partIds: info.partIds,
+        partDetails: info.partDetails, clef: info.clef,
         measures: (info.measures || []).map((measure) => ({
           number: measure.number, implicit: measure.implicit, lengthBeats: measure.lengthBeats,
         })),
@@ -3275,6 +3277,21 @@ async function recognizeBookBySystems({ totalPages, superseded = () => false, on
         console.info(`第 ${number} 页装配失败：`, error);
       }
       onProgress({ done: number, total: totalPages, label: `已装配第 ${number} / ${totalPages} 页` });
+    }
+    // 调试诊断：每页装配出的声部名（「本该 5 个声部却出来 11 个」时，一眼看出是哪一页/哪个系统拆出来的）。
+    if (/[?&]debug=1/.test(location.search)) {
+      window.__pujianBookDump = entries.map((entry, index) => (entry ? {
+        page: index + 1,
+        partNames: entry.scoreInfo.partNames,
+        partIds: entry.scoreInfo.partIds,
+        noteCounts: (entry.scoreInfo.notes || []).reduce((counts, note) => {
+          counts[note.partId] = (counts[note.partId] || 0) + 1;
+          return counts;
+        }, {}),
+        measureCount: entry.scoreInfo.measureCount,
+        timeSummary: entry.scoreInfo.timeSummary,
+        systemCount: entry.diagnostics?.systemCount || 0,
+      } : null));
     }
     try { await layoutPromise; } catch { /* 排版信息只是辅助，失败不影响识别 */ }
     return {

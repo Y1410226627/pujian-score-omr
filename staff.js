@@ -969,6 +969,39 @@ export function canonicalPartRole(text) {
 
 // 声部在谱面上的自然顺序（自上而下）：S、A、T、Bar、B，最后才是钢琴/伴奏。
 const VOICE_ROLE_ORDER = ["Soprano", "Alto", "Tenor", "Baritone", "Bass"];
+// 声部标签白名单：谱表左缘那一块除了声部标签，还有调号字形（"b"）、歌词（"世界问你是谁来自哪"、
+// "光"、"wu"）、表情文字等。全当标签收进来会把「4 声部 + 钢琴」拆成 11 个声部（《有我》实测），
+// 所以只认这些缩写/完整名称。缩写（S. / Bar. / Pno.）要求带结尾点，避免把调号字形 "b" 当成 Bass。
+const PART_LABEL_ABBREVIATIONS = new Set([
+  "s", "a", "t", "b", "c", "v", "bar", "bari", "sop", "alt", "ten", "bass",
+  "pno", "pn", "pf", "piano", "vox", "voc",
+  "vln", "vla", "vc", "cb", "fl", "ob", "cl", "bn", "hn", "tpt", "tbn", "tba",
+  "gt", "dr", "perc", "sax", "timp",
+]);
+const PART_LABEL_WORDS = new Set([
+  "soprano", "alto", "tenor", "baritone", "bass", "piano", "ocarina", "voice",
+  "女高", "女高音", "女低", "女低音", "女中", "女中音", "男高", "男高音",
+  "男中", "男中音", "男低", "男低音", "高音", "中音", "低音",
+  "钢琴", "伴奏", "钢伴", "陶笛", "主旋律", "领唱", "合唱", "独唱",
+]);
+
+/** 判断一段文字是不是「声部标签」（过滤调号字形/歌词/表情文字等噪声）。 */
+export function isPlausiblePartLabel(text) {
+  const raw = String(text || "").trim();
+  if (!raw || raw.length > 24) return false;
+  const stripped = raw.replace(/[.．·]+$/g, "");
+  const hasDot = stripped !== raw;
+  const core = stripped.replace(/\s*\d+$/, "").trim().toLowerCase();
+  if (!core) return false;
+  if (PART_LABEL_WORDS.has(core)) return true;
+  if (PART_LABEL_ABBREVIATIONS.has(core)) {
+    // 单个字母/短缩写必须带结尾点（"S." "Pno."）；不带点的只收 3 个字母以上的
+    // 常见乐器缩写（"Vln"/"Perc"），避免把歌词 "wu"、调号字形 "b" 误收。
+    return hasDot || core.length >= 3;
+  }
+  return false;
+}
+
 /** 声部在界面/编号里的固定顺序：人声在前（S→A→T→Bar→B），其它乐器居中，钢琴最后。 */
 const ROLE_SORT_WEIGHTS = { Soprano: 0, Alto: 1, Tenor: 2, Baritone: 3, Bass: 4 };
 export function roleSortWeight(role) {
@@ -1071,6 +1104,8 @@ export function inferPartRoles(engineNames, partDetails, count) {
 export function resolveSystemRoles(labels, fallbackRoles, engineNames, partCount, partDetails = []) {
   const count = Math.max(1, Number(partCount) || 1);
   const canonicalLabels = (Array.isArray(labels) ? labels : [])
+    // 双保险：装配层也过滤一遍噪声标签（调号字形/歌词），避免上游漏过滤时把声部越拆越多。
+    .filter((label) => isPlausiblePartLabel(label))
     .map(canonicalPartRole)
     .filter(Boolean);
   const inferred = inferPartRoles(engineNames, partDetails, count);
@@ -1563,7 +1598,9 @@ export function assignLayoutToSystems(pageLayout, systems, options = {}) {
       .map((label) => ({ ...label, centerY: (Number(label.y) || 0) + (Number(label.height) || 0) / 2 }))
       .filter((label) => label.centerY >= Math.min(firstTop, system.top) - 8 && label.centerY <= Math.max(lastBottom, system.bottom) + 8)
       .sort((left, right) => left.centerY - right.centerY || left.x - right.x);
-    const roles = near.map((label) => String(label.text || "").trim()).filter(Boolean);
+    const roles = near
+      .map((label) => String(label.text || "").trim())
+      .filter((text) => Boolean(text) && isPlausiblePartLabel(text));
     // 2) 印刷小节号：印在第一行谱表上方约 10–140px 处。
     let anchorBar = null;
     let anchorDistance = Infinity;

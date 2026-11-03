@@ -31,6 +31,42 @@ BAR_RE = re.compile(r"^\d{1,3}$")
 TIME_GLYPH_RE = re.compile(r"^\d{2,3}$")
 LABEL_CHAR_RE = re.compile(r"[A-Za-z\u4e00-\u9fff]")
 
+# 声部标签白名单。为什么必须白名单：谱表左缘那一块除了声部标签，还有调号字形（"b"）、
+# 歌词（"世界问你是谁来自哪" / "光" / "wu"）、表情文字等——不分青红皂白全当标签，
+# 就会把「4 声部 + 钢琴」认成 11 个声部（用户反馈《有我》的原始 bug）。
+# 缩写（S. / A. / Bar. / Pno.）要求带结尾的点；完整单词（Soprano / Piano / 陶笛）直接收。
+LABEL_ABBREVIATIONS = {
+    "s", "a", "t", "b", "c", "v", "bar", "bari", "sop", "alt", "ten", "bass",
+    "pno", "pn", "pf", "piano", "vox", "voc",
+    "vln", "vla", "vc", "cb", "fl", "ob", "cl", "bn", "hn", "tpt", "tbn", "tba",
+    "gt", "dr", "perc", "sax", "timp",
+}
+LABEL_WORDS = {
+    "soprano", "alto", "tenor", "baritone", "bass", "piano", "ocarina", "voice",
+    "女高", "女高音", "女低", "女低音", "女中", "女中音", "男高", "男高音",
+    "男中", "男中音", "男低", "男低音", "高音", "中音", "低音",
+    "钢琴", "伴奏", "钢伴", "陶笛", "主旋律", "领唱", "合唱", "独唱",
+}
+
+
+def is_part_label(text):
+    """是不是「声部标签」：只认白名单里的缩写/完整名称，过滤调号字形、歌词等噪声。"""
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 24:
+        return False
+    stripped = raw.rstrip(".．·")
+    has_dot = stripped != raw
+    core = re.sub(r"\s*\d+$", "", stripped.strip()).lower()
+    if not core:
+        return False
+    if core in LABEL_WORDS:
+        return True
+    if core in LABEL_ABBREVIATIONS:
+        # 单个字母/短缩写必须带结尾点（"S." "Pno."）；不带点的只收 3 个字母以上的
+        # 常见乐器缩写（"Vln"/"Perc"），避免把歌词 "wu"、调号字形 "b" 误收。
+        return has_dot or len(core) >= 3
+    return False
+
 
 def is_music_font(font_name):
     lowered = str(font_name or "").lower()
@@ -92,7 +128,10 @@ def extract_layout(pdf_path):
                             })
                         continue
                     # 3) 声部标签：谱表左缘（x < 90）的短文字，如 Soprano / S. / 陶笛 / Pno.
-                    if x0 < 90 and len(text) <= 24 and LABEL_CHAR_RE.search(text) and not BAR_RE.match(text):
+                    #    必须过白名单：同一块区域还有调号字形（b）、歌词（世界问…/光/wu），
+                    #    全收进来会把 4 声部+钢琴认成 11 个声部（《有我》实测）。
+                    if (x0 < 90 and len(text) <= 24 and LABEL_CHAR_RE.search(text)
+                            and not BAR_RE.match(text) and is_part_label(text)):
                         labels.append({
                             "text": text, "x": round(x0, 1), "y": round(y0, 1),
                             "width": width, "height": height,
