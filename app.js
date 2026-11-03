@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-03·提速13";
+const APP_BUILD = "2026-11-03·提速14";
 
 const byId = (id) => document.getElementById(id);
 const els = {

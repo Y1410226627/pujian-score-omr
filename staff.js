@@ -649,6 +649,8 @@ export function mergePageScores(pages, skippedPages = null) {
   const warnings = new Set();
   const failedPages = [];
   const meterChanges = [];
+  // 调号变化（变调）：跨页累加并按小节号平移（《绒花》：Ab → 第 9 小节 F → 第 86 小节 Ab）。
+  const keyChanges = [];
   const symbolCounts = {};
   const systemStats = {};
   const wedgeMarks = [];
@@ -660,6 +662,8 @@ export function mergePageScores(pages, skippedPages = null) {
   // 若与上一页结尾的拍号相同，那只是重复记录、不是真的变拍子（否则速度说明会出现
   // 「6/8（第 16、32、43…小节为 2/4）」这样一长串假的变拍子）。
   let runningMeter = "";
+  // 当前生效的调号：与拍号同理，跨页延续的同一调号不重复记录。
+  let runningKey = "";
   // 上一次记录的速度值：连续相同的速度标记只保留第一次（每页开头常重复印速度）。
   let lastTempoBpm = Number.NaN;
 
@@ -687,6 +691,15 @@ export function mergePageScores(pages, skippedPages = null) {
       if (meter === runningMeter) continue;   // 与上一页结尾相同 → 不是真的变拍号
       meterChanges.push({ ...change, measure: measure + offsetMeasures, meter });
       runningMeter = meter;
+    }
+    // 调号变化（变调）：小节号随页面整体后移；与上一页结尾相同的调号不算变化。
+    for (const change of page.keyChanges || []) {
+      const measure = Number(change.measure);
+      const key = String(change.key || "");
+      if (!Number.isFinite(measure) || !key) continue;
+      if (key === runningKey) continue;
+      keyChanges.push({ measure: measure + offsetMeasures, key });
+      runningKey = key;
     }
     for (const [key, value] of Object.entries(page.symbolCounts || {})) {
       symbolCounts[key] = (symbolCounts[key] || 0) + (Number(value) || 0);
@@ -751,13 +764,14 @@ export function mergePageScores(pages, skippedPages = null) {
     pageCount: pages.length,
     failedPages,
     timeSummary: summarizeMeterChanges(meterChanges, first ? first.timeSummary : ""),
-    keySummary: first ? first.keySummary : "",
+    keySummary: summarizeKeyChanges(keyChanges, first ? first.keySummary : ""),
     clef: first ? first.clef : "",
     // 速度/力度：速度标记现在跨页累加（中途变速都在），力度仍沿用「第 1 页起延续」。
     tempoMarks,
     dynamicsMarks: first && first.dynamicsMarks ? [...first.dynamicsMarks] : [],
     wedgeMarks,
     meterChanges,
+    keyChanges,
     symbolCounts,
     systemStats,
     title: first ? first.title : "未命名乐谱",
@@ -1116,7 +1130,23 @@ function inferMeterFromSystems(systems) {
 }
 
 /**
- * 把多个「逐系统识别」结果拼成一页（或一首）乐谱。
+ * 把「第几小节变了什么调」整理成一句中文说明。
+ * 例：《绒花》Ab 起、第 9 小节转 F、第 86 小节回到 Ab
+ *   → "Ab（第 9 小节起 F；第 86 小节起 Ab）"
+ */
+export function summarizeKeyChanges(changes, fallback = "") {
+  const list = (Array.isArray(changes) ? changes : [])
+    .map((change) => ({ measure: Number(change.measure), key: String(change.key || "") }))
+    .filter((change) => Number.isFinite(change.measure) && change.key);
+  if (!list.length) return fallback || "调号未标明";
+  const first = list[0].key;
+  const rest = list.slice(1);
+  if (!rest.length) return first;
+  return `${first}（${rest.map((change) => `第 ${change.measure} 小节起 ${change.key}`).join("；")}）`;
+}
+
+/**
+ * 把「逐系统识别」结果拼成一页（或一首）乐谱。
  *
  * 关键规则：
  *  - 同一系统内的各声部并行（起拍相同）；不同系统在时间上首尾相接；
@@ -1153,6 +1183,8 @@ export function assembleSystemScores(systems, options = {}) {
   const dynamicsMarks = [];
   const wedgeMarks = [];
   const meterChanges = [];
+  // 调号变化（变调）：{measure, key}，按小节先后累加（《绒花》：Ab → 第 9 小节 F → 第 86 小节 Ab）。
+  const keyChanges = [];
   const symbolCounts = {};
   const stats = {
     systemCount: 0, appendedMeasures: 0, trimmedMeasures: 0,
@@ -1163,6 +1195,7 @@ export function assembleSystemScores(systems, options = {}) {
   let nextMeasureNumber = measureBaseStart;
   let firstMeter = "";
   let runningMeter = "";
+  let runningKey = "";
   let keySummary = "";
   let timeSummary = "";
   let clef = "";
@@ -1234,6 +1267,24 @@ export function assembleSystemScores(systems, options = {}) {
 
     // 小节号基准：弱起小节记 0（第一小节号 1 之前的第 0 小节）
     const labelBase = pickup ? nextMeasureNumber - 1 : nextMeasureNumber;
+    // 调号（变调）：XML 的 keyEvents 给出「本系统第几小节变成什么调」。
+    // 与拍号一样按小节累计，跨系统/跨页延续的同一调号不重复记录。
+    const keyByMeasure = new Map();
+    for (const event of info.keyEvents || []) {
+      const index = Number(event.measureIndex);
+      if (Number.isFinite(index) && event.key) keyByMeasure.set(index, String(event.key));
+    }
+    if (!runningKey && keyByMeasure.size) {
+      const firstIndex = Math.max(0, Math.min(...keyByMeasure.keys()));
+      runningKey = keyByMeasure.get(firstIndex);
+      keyChanges.push({ measure: labelBase + firstIndex, key: runningKey });
+    }
+    for (let index = 0; index < authoritative; index++) {
+      const key = keyByMeasure.get(index);
+      if (!key || key === runningKey) continue;
+      runningKey = key;
+      keyChanges.push({ measure: labelBase + index, key });
+    }
     const firstMeasureNumber = parsedMeasures.length ? Number(parsedMeasures[0].number) : 1;
     const localIndexFor = (note) => {
       const number = Number(note.measure);
@@ -1373,13 +1424,14 @@ export function assembleSystemScores(systems, options = {}) {
     measureCount: stats.measureCount,
     totalBeats: stats.totalBeats,
     timeSummary: summary,
-    keySummary,
+    keySummary: summarizeKeyChanges(keyChanges, keySummary),
     clef,
     title: title || "未命名乐谱",
     tempoMarks: mergedTempo,
     dynamicsMarks: mergedDynamics,
     wedgeMarks: mergedWedges,
     meterChanges,
+    keyChanges,
     symbolCounts,
     // 组装统计：界面上如实告诉用户「几个系统 / 补了几个空小节 / 拍号变化在哪」。
     systemStats: { ...stats },

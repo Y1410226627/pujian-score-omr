@@ -6,7 +6,7 @@
 > 图片识别由本机引擎完成，结果**必须逐音校对**。界面会明确标出识别来源（专业引擎 / 粗略估算 / 文件导入），
 > 并标出置信度偏低、建议校对的音符。
 
-## 识别升级：逐系统识别 + PDF 文字层对账 + 自适应裁片（2026-11-03 · 提速13）
+## 识别升级：逐系统识别 + PDF 文字层对账 + 自适应裁片 + 变调识别（2026-11-03 · 提速14）
 
 以前是「整页图一次送 Audiveris」。一页里有多个系统（多行谱表）时，它会把第二行当成第一行的「后续小节」，
 于是声部互相错位、钢琴被拆成两个声部、中间出现莫名其妙的空拍，速度也读不到。
@@ -39,7 +39,8 @@
 （2 行谱表 + G2/F4 = 钢琴；单行 G2 → Soprano/Alto、G2 低八度 → Tenor、F4 → Bass），
 并且各系统声部数不同（钢琴独奏段 / Solo 段 / 四声部段混排）时也按**声部名**对号，不会串位。
 用《绒花 吴混声四声部降A调 钢伴正谱》（图片型 9 页）实测：5 声部（S/A/T/B + Piano）、119 小节、
-253 拍（6/8→第 16 小节 2/4）、♩=60 且中途读到 68/72、补/裁小节 0；**整本识别约 63 秒
+253 拍（6/8→第 16 小节 2/4）、♩=60 且中途读到 68/72、补/裁小节 0、**变调也识别出来**
+（Ab → 第 9 小节起 F → 第 86 小节起回到 Ab，详情行直接写出来）；**整本识别约 63 秒
 （优化前约 160 秒）**。详细的能力边界见 [符号支持清单](符号支持清单.md)，技术细节见
 [提速文档第十一、十二、十三节](docs-三处提速-20261024.md)。
 
@@ -256,7 +257,7 @@ FluidR3_GM、VCSL 民族打击乐；VCSL 采样为 CC0，其他来源按各自�
 npm test          # 或 node --test "tests/**/*.test.mjs"（本机受限环境下逐个文件跑：node tests/xxx.test.mjs）
 ```
 
-当前共 **270 个单元/回归测试**（含 4 份真实乐谱的逐音对账），另有 19 + 7 个需要浏览器（Edge + playwright-core）的端到端/验证脚本（`e2e-audio` 音色、`e2e-jianpu` 简谱、`e2e-composer` 创作室、`e2e-workbench` 变速/编辑/加厚/流畅度、`e2e-audio-export` 导出 MP3、`e2e-realscore-systems` **真实合唱谱《敕勒歌》整本+单页识别回归**、`e2e-realscore-ronghua` **图片型四声部谱《绒花》整本+单页识别回归（声部/小节/拍号/速度/性能）**、`e2e-hall-export` 真实长曲子导出、`e2e-composer-friendly` 零基础符号可视化、`e2e-composer-v2` 多声部复刻、`e2e-composer-fidelity` 真实乐谱逐音对账、`e2e-composer-newfeatures` 拍型与中途变速、`e2e-composer-repeats` 反复记号、`e2e-composer-endings` 房子）。
+当前共 **273 个单元/回归测试**（含 4 份真实乐谱的逐音对账），另有 19 + 7 个需要浏览器（Edge + playwright-core）的端到端/验证脚本（`e2e-audio` 音色、`e2e-jianpu` 简谱、`e2e-composer` 创作室、`e2e-workbench` 变速/编辑/加厚/流畅度、`e2e-audio-export` 导出 MP3、`e2e-realscore-systems` **真实合唱谱《敕勒歌》整本+单页识别回归**、`e2e-realscore-ronghua` **图片型四声部谱《绒花》整本+单页识别回归（声部/小节/拍号/速度/性能）**、`e2e-hall-export` 真实长曲子导出、`e2e-composer-friendly` 零基础符号可视化、`e2e-composer-v2` 多声部复刻、`e2e-composer-fidelity` 真实乐谱逐音对账、`e2e-composer-newfeatures` 拍型与中途变速、`e2e-composer-repeats` 反复记号、`e2e-composer-endings` 房子）。
 采样音源相关的端到端测试会在**没装音源的机器上自动跳过**（装了才跑）。
 
 - `tests/musicxml.test.mjs`：MusicXML 解析（和弦/休止/连音线/速度/力度/调性/微分音）、悬空连音线、弱起小节、

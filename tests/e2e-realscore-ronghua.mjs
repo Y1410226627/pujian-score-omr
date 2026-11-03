@@ -6,6 +6,7 @@
 //      钢琴始终是同一个声部（Solo 段的钢琴不能被算成 Alto）；
 //   2. 小节：119 个印刷小节（累计印刷小节号），不能多补/少裁；（第 15 小节是原谱的整小节休止）
 //   3. 拍号：前半 6/8、第 16 小节起 2/4（253 拍 = 15×3 + 104×2）；
+//   3b. 变调：Ab 起、第 9 小节起 F、第 86 小节起回到 Ab（界面要写清楚，音高要跟着调号走）；
 //   4. 速度：谱面 ♩=60-65 要读成 60 起，中途 ♩=68 / ♩=72 也要读到（不是默认 84）；
 //   5. 调号：降 A（4 个降号）；
 //   6. 速度：整本识别耗时（性能回归用，允许较宽范围）。
@@ -86,6 +87,20 @@ try {
     for (let measure = 1; measure <= (scoreInfo.measureCount || 0); measure++) {
       if (!notesPerMeasure[measure]) emptyMeasures.push(measure);
     }
+    // 变调核对：原谱 Ab 起、第 9 小节转 F、第 86 小节回到 Ab。
+    // 音高有没有跟着调号走，用音级分布验证：
+    //   F 大调段（1 降号）应多 A/D/E 还原音，少 Ab/Db/Eb；
+    //   Ab 大调段（4 降号）反过来。
+    const pitchClasses = { fSection: [], abSection: [] };
+    for (const note of scoreInfo.notes || []) {
+      const measure = Number(note.measure);
+      const pc = ((Number(note.midi) % 12) + 12) % 12;
+      if (measure >= 9 && measure <= 85) pitchClasses.fSection.push(pc);
+      else if (measure >= 86) pitchClasses.abSection.push(pc);
+    }
+    const FLATS = [1, 3, 8];        // Db / Eb / Ab
+    const NATURALS = [2, 4, 9];     // D / E / A
+    const countIn = (list, classes) => list.filter((pc) => classes.includes(pc)).length;
     return {
       hints,
       notes: (scoreInfo.notes || []).length,
@@ -98,6 +113,13 @@ try {
       tempoMarks: (scoreInfo.tempoMarks || []).map((mark) => Math.round(Number(mark.bpm))),
       timeSummary: scoreInfo.timeSummary,
       keySummary: scoreInfo.keySummary,
+      keyChanges: scoreInfo.keyChanges || [],
+      pitchCheck: {
+        fNaturals: countIn(pitchClasses.fSection, NATURALS),
+        fFlats: countIn(pitchClasses.fSection, FLATS),
+        abFlats: countIn(pitchClasses.abSection, FLATS),
+        abNaturals: countIn(pitchClasses.abSection, NATURALS),
+      },
       systemStats: scoreInfo.systemStats || {},
       warnings: scoreInfo.warnings || [],
       emptyMeasures,
@@ -153,8 +175,20 @@ try {
   assert.equal(state.tempoDetected, true, "速度应标注为『从谱面读到』");
   assert.ok(state.tempoMarks.includes(68), `应读到中途 ♩=68（实际 ${JSON.stringify(state.tempoMarks)}）`);
   assert.ok(state.tempoMarks.includes(72), `应读到中途 ♩=72（实际 ${JSON.stringify(state.tempoMarks)}）`);
-  // 5) 调号：降 A（4 个降号）
-  assert.equal(state.keySummary, "Ab", "调号应为降 A");
+  // 5) 调号：原谱有两次变调（Ab 起 → 第 9 小节转 F → 第 86 小节回到 Ab）
+  assert.equal(state.keySummary, "Ab（第 9 小节起 F；第 86 小节起 Ab）",
+    `变调说明不对（实际 ${state.keySummary}）`);
+  assert.deepEqual(state.keyChanges, [
+    { measure: 1, key: "Ab" },
+    { measure: 9, key: "F" },
+    { measure: 86, key: "Ab" },
+  ], "变调小节号应为第 1、9、86 小节");
+  // 音高必须跟着调号走：F 段多还原音、Ab 段多降号音（否则就是调号没生效、整段音高错了）
+  console.log("音级分布核对：", JSON.stringify(state.pitchCheck));
+  assert.ok(state.pitchCheck.fNaturals > state.pitchCheck.fFlats,
+    `F 大调段应以还原音为主（实际 还原 ${state.pitchCheck.fNaturals} vs 降号 ${state.pitchCheck.fFlats}）`);
+  assert.ok(state.pitchCheck.abFlats > state.pitchCheck.abNaturals,
+    `Ab 大调段应以降号音为主（实际 降号 ${state.pitchCheck.abFlats} vs 还原 ${state.pitchCheck.abNaturals}）`);
   assert.ok(state.gridded, "所有起拍都应落在 1/4 拍网格上");
   // 6) 性能：从点击「识别全部」到结果落地。图片型 PDF 9 页 19 个系统，
   //    优化前约 160 秒；这里给 110 秒上限（留机器差异余量），明显变慢时会失败提醒。

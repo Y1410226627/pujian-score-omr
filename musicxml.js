@@ -182,6 +182,9 @@ export function parseMusicXmlText(source, options = {}) {
   ]));
   const musicParts = childrenNamed(root, "part");
   const tempoMarks = [], dynamicsMarks = [], timeSignatures = new Set(), keySignatures = new Set();
+  // 调号事件（第几小节变成什么调）：与 timeSignatures 的「集合」不同，调号是**有先后顺序**的，
+  // 变调要靠它（《绒花》：Ab 起，第 9 小节转 F，第 86 小节回到 Ab）。多个声部会重复报同一调号，按小节去重。
+  const keyEventByMeasure = new Map();
   const warnings = new Set();
   let measureCount = 0, skippedNotes = 0;
   // 谱面记号计数：识别结果里如实告诉用户「哪些符号真的读出来了」。
@@ -269,7 +272,11 @@ export function parseMusicXmlText(source, options = {}) {
           const key = childNamed(item, "key");
           if (key) {
             const value = keyName(key);
-            if (value) keySignatures.add(value);
+            if (value) {
+              keySignatures.add(value);
+              // 按小节记录调号（同一小节多个声部重复报只留第一个）。
+              if (!keyEventByMeasure.has(measureIndex)) keyEventByMeasure.set(measureIndex, value);
+            }
           }
           const transposeNode = childNamed(item, "transpose");
           if (transposeNode) {
@@ -605,6 +612,10 @@ export function parseMusicXmlText(source, options = {}) {
     tempoMarks: uniqueTempoMarks, dynamicsMarks: uniqueDynamicsMarks, wedgeMarks,
     // 小节结构：number/implicit/lengthBeats/startBeat。逐系统识别时靠它判断弱起、对齐小节号。
     measures,
+    // 调号事件（按小节先后）：{measureIndex, key}。逐系统装配据此记录「第几小节变调」。
+    keyEvents: [...keyEventByMeasure.entries()]
+      .map(([measureIndex, key]) => ({ measureIndex, key }))
+      .sort((left, right) => left.measureIndex - right.measureIndex),
     // 谱面记号统计：界面上如实告诉用户"读到了哪些符号"。
     symbolCounts: { ...symbols },
     timeSummary, keySummary, warnings: [...warnings], clef: scoreClef,

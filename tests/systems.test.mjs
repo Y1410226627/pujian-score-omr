@@ -14,6 +14,8 @@ import {
   groupSystems,
   inferPartRoles,
   resolveSystemRoles,
+  summarizeKeyChanges,
+  mergePageScores,
   assembleSystemScores,
 } from "../staff.js";
 
@@ -274,4 +276,57 @@ test("assembleSystemScores：整页没有印刷拍号时按音符时值推断拍
   assert.ok(Math.abs(score.totalBeats - 6) < 0.01, "3 小节 × 2 拍 = 6 拍（不是 3×4=12）");
   assert.deepEqual(score.notes.map((note) => note.startBeat), [0, 1, 2, 3, 4, 5]);
   assert.ok(score.warnings.some((warning) => warning.includes("推断为 2/4")), "要如实告诉用户拍号是推断的");
+});
+
+test("assembleSystemScores：变调（调号变化）按小节记录并写成中文说明", async () => {
+  const { DOMParser } = await import("@xmldom/xmldom");
+  globalThis.DOMParser = DOMParser;
+  const { parseMusicXmlText } = await import("../musicxml.js");
+  const note = (step) => `<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>`;
+  const xml = `<score-partwise>
+    <part-list><score-part id="P1"><part-name>Voice</part-name></score-part></part-list>
+    <part id="P1">
+      <measure number="1"><attributes><divisions>1</divisions><time><beats>2</beats><beat-type>4</beat-type></time>
+        <key><fifths>-4</fifths></key></attributes>${note("C")}${note("D")}</measure>
+      <measure number="2">${note("E")}${note("F")}</measure>
+      <measure number="3"><attributes><key><fifths>-1</fifths></key></attributes>${note("G")}${note("A")}</measure>
+    </part>
+  </score-partwise>`;
+  const parsed = parseMusicXmlText(xml);
+  assert.deepEqual(parsed.keyEvents, [{ measureIndex: 0, key: "Ab" }, { measureIndex: 2, key: "F" }],
+    "调号事件应按小节记录（Ab → 第 3 小节 F）");
+  const score = assembleSystemScores([{ scoreInfo: parsed, labels: [], measureCount: 3 }]);
+  assert.deepEqual(score.keyChanges, [{ measure: 1, key: "Ab" }, { measure: 3, key: "F" }]);
+  assert.equal(score.keySummary, "Ab（第 3 小节起 F）", "变调要写成一句中文说明");
+});
+
+test("summarizeKeyChanges：没有变化时只报调号，有变化时报第几小节起转什么调", () => {
+  assert.equal(summarizeKeyChanges([{ measure: 1, key: "F" }]), "F");
+  assert.equal(summarizeKeyChanges([{ measure: 1, key: "Ab" }, { measure: 9, key: "F" }]), "Ab（第 9 小节起 F）");
+  assert.equal(summarizeKeyChanges([
+    { measure: 1, key: "Ab" }, { measure: 9, key: "F" }, { measure: 86, key: "Ab" },
+  ]), "Ab（第 9 小节起 F；第 86 小节起 Ab）");
+  assert.equal(summarizeKeyChanges([], "调号未标明"), "调号未标明");
+});
+
+test("mergePageScores：变调跨页累加并平移小节号，重复调号不重复记录", () => {
+  const page1 = {
+    notes: [], warnings: [], partNames: ["S."], measureCount: 8, totalBeats: 24, timeSummary: "6/8",
+    keySummary: "Ab", keyChanges: [{ measure: 1, key: "Ab" }, { measure: 8, key: "F" }],
+  };
+  const page2 = {
+    notes: [], warnings: [], partNames: ["S."], measureCount: 6, totalBeats: 24, timeSummary: "4/4",
+    keySummary: "F", keyChanges: [{ measure: 1, key: "F" }],   // 与上一页结尾相同 → 不算变调
+  };
+  const page3 = {
+    notes: [], warnings: [], partNames: ["S."], measureCount: 4, totalBeats: 16, timeSummary: "4/4",
+    keySummary: "Ab", keyChanges: [{ measure: 1, key: "Ab" }],
+  };
+  const merged = mergePageScores([page1, page2, page3]);
+  assert.deepEqual(merged.keyChanges, [
+    { measure: 1, key: "Ab" },
+    { measure: 8, key: "F" },
+    { measure: 15, key: "Ab" },
+  ]);
+  assert.equal(merged.keySummary, "Ab（第 8 小节起 F；第 15 小节起 Ab）");
 });
