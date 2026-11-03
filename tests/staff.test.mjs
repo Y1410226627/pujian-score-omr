@@ -455,15 +455,39 @@ test("assembleSystemScores：两系统首尾相接、声部按标签命名、弱
   assert.equal(score.notes.find((note) => note.startBeat === 5).measure, "2");
 });
 
-test("assembleSystemScores：小节数按印刷小节线补齐/截断，并给出如实提示", () => {
-  const parsed = parseMusicXmlText(systemXml({ measures: 3, noteCount: 4 }));
-  // 原谱有 4 小节，Audiveris 只识别出 3 小节（漏掉一条小节线）
+test("assembleSystemScores：解析小节数少于小节线、且有一小节明显超长时，按印刷小节线补齐", () => {
+  // Audiveris 漏读一条小节线：两个 4/4 小节被并成一个 8 拍的小节（《敕勒歌》第 10 页实测）；
+  // 只有这种「有小节明显超长」的情况才相信小节线条数，避免低清图片上小节线误检多出空小节。
+  const note = (step, duration = 1) => `<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>${duration}</duration><voice>1</voice><staff>1</staff></note>`;
+  const xml = `<score-partwise><part-list><score-part id="P1"><part-name>S.</part-name></score-part></part-list>
+    <part id="P1">
+      <measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        ${note("C").repeat(8)}
+      </measure>
+      <measure number="2">${note("D", 4)}</measure>
+      <measure number="3">${note("E", 4)}</measure>
+    </part></score-partwise>`;
+  const parsed = parseMusicXmlText(xml);
+  assert.deepEqual(parsed.measureContents, [8, 4, 4], "第一小节吞掉了相邻小节线（8 拍）");
   const score = assembleSystemScores([
-    { scoreInfo: parsed, labels: ["S.", "A."], meterMap: ["6/4", "4/4", "4/4", "4/4"], measureCount: 4 },
+    { scoreInfo: parsed, labels: ["S."], meterMap: ["4/4", "4/4", "4/4", "4/4"], measureCount: 4 },
   ], { measureBase: 1 });
   assert.equal(score.measureCount, 4, "以印刷小节线为准：4 小节");
-  assert.equal(score.totalBeats, 18, "6 + 4 + 4 + 4");
+  assert.equal(score.totalBeats, 16);
   assert.ok(score.warnings.some((warning) => warning.includes("多 1 个小节")), "补小节要如实告知用户");
+});
+
+test("assembleSystemScores：解析小节数少于小节线、但小节内容正常时，不补空小节（低清图片小节线误检）", () => {
+  // 图片型 PDF 上小节线检测偶尔会多算一条；此时若机械按小节线补小节，就会多出一个空小节
+  // （用户听到的「莫名其妙的空拍」）。内容正常（没有超长小节）时应以解析结果为准。
+  const note = () => `<note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>`;
+  const measure = (number) => `<measure number="${number}"><attributes><divisions>2</divisions>${number === 1 ? "<time><beats>2</beats><beat-type>4</beat-type></time>" : ""}</attributes>${note()}${note()}</measure>`;
+  const xml = `<score-partwise><part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+    <part id="P1">${measure(1)}${measure(2)}${measure(3)}${measure(4)}</part></score-partwise>`;
+  const parsed = parseMusicXmlText(xml);
+  const score = assembleSystemScores([{ scoreInfo: parsed, labels: [], measureCount: 5 }]);
+  assert.equal(score.measureCount, 4, "解析出 4 个正常小节，就不按误检的 5 条小节线补");
+  assert.equal(score.systemStats.appendedMeasures, 0, "不应补空小节");
 });
 
 test("assembleSystemScores：变拍子写进拍号说明（第几小节是 6/4）", () => {

@@ -1129,6 +1129,59 @@ function inferMeterFromSystems(systems) {
   return `${Math.round(best * 2)}/8`;
 }
 
+/** 每小节拍数 → 通用拍号字符串（从「小节实际内容拍数」推断变拍子时用）。 */
+export function meterNameForBeats(beats) {
+  const value = Math.round((Number(beats) || 0) * 4) / 4;
+  if (!(value > 0)) return "";
+  const table = {
+    0.5: "1/8", 0.75: "3/16", 1: "1/4", 1.5: "3/8", 2: "2/4", 2.5: "5/8",
+    3: "3/4", 3.5: "7/8", 4: "4/4", 5: "5/4", 6: "6/4", 7: "7/4", 8: "8/4",
+    9: "9/8", 12: "12/8",
+  };
+  return table[value] || "";
+}
+
+/**
+ * 从「每小节的原始内容拍数」推断逐小节拍号表。
+ *
+ * 为什么需要：图片型 PDF 只在变拍子那一条谱表上印一次新拍号，后面的系统都不再印；
+ * Audiveris 也不会输出 `<time>`，所以只能看「每个小节实际写了几拍」。
+ * 实测《Goodbye Mr Lawrence》：第 29 小节起 6/8 → 2/4，若不推断，后面所有 2/4 小节
+ * 都会被当成 6/8 的 3 拍（每小节末尾多 1 拍空拍——用户听到的「莫名其妙的空拍」）。
+ *
+ * 规则：某小节内容拍数与当前拍号差 **≥ 3/4 拍**、且**后一小节也一致**时才认作变拍号。
+ * 为什么门槛是 3/4 拍：图片型谱的三连音经常被 Audiveris 多算一点时值（实测《绒花》2/4 小节
+ * 被读成 2.5 拍），差 1/2 拍就把 2/4 换成 5/8 会把整段节奏算错；而真正的变拍子（6/8→2/4、
+ * 4/4→2/4、4/4→6/4 等）内容拍数至少差 1 拍。单小节的差异更可能是弱起小节/识别误差；
+ * 系统最后一小节也不能单独触发换拍号（实测《Goodbye Mr Lawrence》第 137/191/195 小节
+ * 被识别引擎读成 3 拍/4 拍，按「最后一小节也算」的旧规则会凭空多出 3/4、4/4 的假变拍子），
+ * 真正的变拍子会从下一系统的第 1 小节开始被识别出来。
+ *
+ * @param {number[]} contents 每小节原始内容拍数（四分音符为一拍）
+ * @param {string} initialMeter 起始拍号（上一个系统末尾的拍号）
+ * @returns {string[]} 与 contents 同长的逐小节拍号表
+ */
+export function inferMeterMapFromContents(contents, initialMeter = "") {
+  const list = Array.isArray(contents)
+    ? contents.map((value) => Math.round((Number(value) || 0) * 4) / 4)
+    : [];
+  let current = normalizeMeter(initialMeter) || "";
+  return list.map((beats, index) => {
+    if (beats > 0) {
+      const currentBeats = beatsPerMeter(current);
+      if (!current || Math.abs(currentBeats - beats) > 0.74) {
+        const next = list[index + 1] || 0;
+        const sustained = next > 0 && Math.abs(next - beats) < 0.26;
+        if (sustained) {
+          const named = meterNameForBeats(beats);
+          if (named) current = named;
+        }
+      }
+    }
+    return current;
+  });
+}
+
 /**
  * 把「第几小节变了什么调」整理成一句中文说明。
  * 例：《绒花》Ab 起、第 9 小节转 F、第 86 小节回到 Ab
@@ -1229,14 +1282,32 @@ export function assembleSystemScores(systems, options = {}) {
 
     const parsedMeasures = Array.isArray(info.measures) ? info.measures : [];
     const parsedCount = parsedMeasures.length || Math.max(0, Number(info.measureCount) || 0);
-    let authoritative = Number.isFinite(system.measureCount) && system.measureCount > 0
-      ? Math.round(system.measureCount) : parsedCount;
-    if (!authoritative) authoritative = Math.max(1, parsedCount);
+    const barlineCount = Number.isFinite(system.measureCount) && system.measureCount > 0
+      ? Math.round(system.measureCount) : 0;
+    // 小节数：以识别引擎自己的小节为准；只有「某个解析小节明显超长（说明它吞掉了相邻小节线）」
+    // 时才相信图像小节线的条数。反过来（小节线比解析少）一律不信——低分辨率图片上
+    // 小节线检测会漏，硬用小节线会把后面几个小节的音符挤进一个小节（听感是突然一堆音 + 空拍）。
+    let authoritative = parsedCount || barlineCount || 1;
+    if (barlineCount > authoritative) {
+      const meterBeatsForCheck = beatsPerMeter(normalizeMeter(info.timeSummary))
+        || beatsPerMeter(runningMeter) || beatsPerMeter(inferredMeter) || 0;
+      const rawContents = Array.isArray(info.measureContents) ? info.measureContents : [];
+      const maxContent = rawContents.reduce((max, value) => Math.max(max, Number(value) || 0), 0);
+      if (meterBeatsForCheck > 0 && maxContent > meterBeatsForCheck * 1.6 + 0.01) {
+        authoritative = barlineCount;
+      }
+    }
     if (authoritative < parsedCount) { stats.trimmedMeasures += parsedCount - authoritative; }
     if (authoritative > parsedCount) { stats.appendedMeasures += authoritative - parsedCount; }
 
-    const meterMap = Array.isArray(system.meterMap) && system.meterMap.length >= authoritative
-      ? system.meterMap : null;
+    // 逐小节拍号（来自 XML 本身 / 变拍子推断的重解析结果）：图片型 PDF 的变拍子靠它。
+    const xmlMeters = Array.isArray(info.measureMeters) ? info.measureMeters : [];
+    // PDF 文字层给出的逐小节拍号（矢量 PDF 才有）。注意：图片型 PDF 也会带一个「长度等于小节数、
+    // 内容全是空串」的占位表——不能因为它是数组就直接用，否则会挡住下面的 xmlMeters，
+    // 图片型 PDF 的变拍子（《Goodbye Mr Lawrence》第 29 小节 6/8→2/4）就会整段丢失。
+    const printMeters = Array.isArray(system.meterMap) ? system.meterMap : [];
+    const meterAt = (index) =>
+      normalizeMeter(printMeters[index] || "") || normalizeMeter(xmlMeters[index] || "");
     const isFirstSystem = systemIndex === 0;
     const pickup = Boolean(isFirstSystem && parsedMeasures[0] && parsedMeasures[0].implicit);
     const pickupBeats = pickup ? Math.max(0, Number(parsedMeasures[0].lengthBeats) || 0) : 0;
@@ -1247,7 +1318,7 @@ export function assembleSystemScores(systems, options = {}) {
     let lastLength = 0;
     for (let index = 0; index < authoritative; index++) {
       const parsed = parsedMeasures[index];
-      const meter = meterMap ? meterMap[index] : "";
+      const meter = meterAt(index);
       let length = 0;
       if (pickup && index === 0) length = pickupBeats;
       else if (meter) length = beatsPerMeter(meter);
@@ -1354,7 +1425,8 @@ export function assembleSystemScores(systems, options = {}) {
     let meterCursor = normalizeMeter(runningMeter) || normalizeMeter(info.timeSummary) || inferredMeter;
     const meters = [];
     for (let index = 0; index < authoritative; index++) {
-      const mapped = meterMap ? normalizeMeter(meterMap[index]) : "";
+      // 拍号来源优先级：PDF 文字层 > XML 自己印的/推断出的逐小节拍号 > 沿用上一小节
+      const mapped = meterAt(index);
       if (mapped) meterCursor = mapped;
       meters.push(meterCursor);
     }

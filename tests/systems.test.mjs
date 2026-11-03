@@ -13,6 +13,8 @@ import {
   detectSystems,
   groupSystems,
   inferPartRoles,
+  inferMeterMapFromContents,
+  meterNameForBeats,
   resolveSystemRoles,
   summarizeKeyChanges,
   mergePageScores,
@@ -329,4 +331,100 @@ test("mergePageScores：变调跨页累加并平移小节号，重复调号不�
     { measure: 15, key: "Ab" },
   ]);
   assert.equal(merged.keySummary, "Ab（第 8 小节起 F；第 15 小节起 Ab）");
+});
+
+test("inferMeterMapFromContents：从每小节内容拍数推断 6/8 → 2/4 的变拍子（《Goodbye Mr Lawrence》场景）", () => {
+  assert.equal(meterNameForBeats(3), "3/4");
+  assert.equal(meterNameForBeats(2), "2/4");
+  assert.equal(meterNameForBeats(4), "4/4");
+  assert.equal(meterNameForBeats(2.5), "5/8");
+  // 第 32 小节起由 6/8（3 拍）变 2/4（2 拍）：内容拍数 3,2,2,2,2
+  assert.deepEqual(inferMeterMapFromContents([3, 2, 2, 2, 2], "6/8"),
+    ["6/8", "2/4", "2/4", "2/4", "2/4"]);
+  // 单小节的短内容（弱起/识别误差）不能当成变拍子
+  assert.deepEqual(inferMeterMapFromContents([1, 3, 3], "6/8"), ["6/8", "6/8", "6/8"]);
+  // 后续系统继续沿用 2/4
+  assert.deepEqual(inferMeterMapFromContents([2, 2], "2/4"), ["2/4", "2/4"]);
+  // 没有起始拍号时按第一小节推断
+  assert.deepEqual(inferMeterMapFromContents([2, 2, 2], ""), ["2/4", "2/4", "2/4"]);
+  // 系统最后一小节单独超长不能当变拍子（实测《Goodbye Mr Lawrence》第 137/191/195 小节
+  // 被识别引擎读成 3/4、4/4，旧规则会凭空多出假变拍子）；真正的变拍子从下一系统第 1 小节开始认。
+  assert.deepEqual(inferMeterMapFromContents([2, 2, 4], "2/4"), ["2/4", "2/4", "2/4"]);
+  assert.deepEqual(inferMeterMapFromContents([2, 2, 4, 4], "2/4"), ["2/4", "2/4", "4/4", "4/4"]);
+  // 三连音被 Audiveris 多算时值：2/4 小节被读成 2.5 拍（《绒花》实测），差 1/2 拍不能换成 5/8。
+  assert.deepEqual(inferMeterMapFromContents([2, 2.5, 2.5, 2.5, 2], "2/4"),
+    ["2/4", "2/4", "2/4", "2/4", "2/4"]);
+});
+
+test("变拍子闭环：6/8 系统后半变 2/4 → 推断 → 重解析 → 装配后拍号/拍数都对", async () => {
+  const { DOMParser } = await import("@xmldom/xmldom");
+  globalThis.DOMParser = DOMParser;
+  const { parseMusicXmlText } = await import("../musicxml.js");
+  const eighth = (step) => `<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>`;
+  const quarter = (step) => `<note><pitch><step>${step}</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>`;
+  // divisions=2：八分音符 duration=1，四分音符 duration=2
+  const xml = `<score-partwise><part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+    <part id="P1">
+      <measure number="1"><attributes><divisions>2</divisions><time><beats>6</beats><beat-type>8</beat-type></time></attributes>
+        ${eighth("C")}${eighth("D")}${eighth("E")}${eighth("F")}${eighth("G")}${eighth("A")}
+      </measure>
+      <measure number="2">${quarter("C")}${quarter("D")}</measure>
+      <measure number="3">${quarter("E")}${quarter("F")}</measure>
+    </part></score-partwise>`;
+  const first = parseMusicXmlText(xml);
+  assert.deepEqual(first.measureContents, [3, 2, 2], "每小节实际内容拍数");
+  const inferred = inferMeterMapFromContents(first.measureContents, "6/8");
+  assert.deepEqual(inferred, ["6/8", "2/4", "2/4"]);
+  const reparsed = parseMusicXmlText(xml, { meterMap: inferred, strictMeters: true, assumeFirstMeasurePickup: false });
+  assert.deepEqual(reparsed.measures.map((measure) => measure.lengthBeats), [3, 2, 2], "重解析后 2/4 小节就是 2 拍");
+  const score = assembleSystemScores([{ scoreInfo: reparsed, labels: [], measureCount: 3 }]);
+  assert.equal(score.totalBeats, 7, "3 + 2 + 2 拍（修复前会被当成 3+3+3=9 拍，每小节多 1 拍空拍）");
+  assert.equal(score.timeSummary, "6/8（第 2 小节为 2/4）");
+});
+
+test("图片型 PDF 的空占位拍号表不能挡掉 XML 逐小节拍号（《Goodbye Mr Lawrence》第 29 小节 6/8→2/4）", async () => {
+  const { DOMParser } = await import("@xmldom/xmldom");
+  globalThis.DOMParser = DOMParser;
+  const { parseMusicXmlText } = await import("../musicxml.js");
+  const eighth = (step) => `<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>1</duration><voice>1</voice><staff>1</staff></note>`;
+  const quarter = (step) => `<note><pitch><step>${step}</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>`;
+  const xml = `<score-partwise><part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+    <part id="P1">
+      <measure number="1"><attributes><divisions>2</divisions><time><beats>6</beats><beat-type>8</beat-type></time></attributes>
+        ${eighth("C")}${eighth("D")}${eighth("E")}${eighth("F")}${eighth("G")}${eighth("A")}
+      </measure>
+      <measure number="2">${quarter("C")}${quarter("D")}</measure>
+      <measure number="3">${quarter("E")}${quarter("F")}</measure>
+    </part></score-partwise>`;
+  const info = parseMusicXmlText(xml);
+  const inferred = inferMeterMapFromContents(info.measureContents, "6/8");
+  const reparsed = parseMusicXmlText(xml, { meterMap: inferred, strictMeters: true, assumeFirstMeasurePickup: false });
+  // 图片型 PDF 的系统会带一个「长度=小节数、全是空串」的占位拍号表（PDF 文字层没有字形）。
+  // 修复前它被当成有效 meterMap，把 reparsed.measureMeters 里的 2/4 全挡掉，整页又变回 6/8。
+  const score = assembleSystemScores([{
+    scoreInfo: reparsed, labels: [], measureCount: 3, meterMap: ["", "", ""],
+  }]);
+  assert.equal(score.timeSummary, "6/8（第 2 小节为 2/4）");
+  assert.deepEqual(score.meterChanges, [{ measure: 1, meter: "6/8" }, { measure: 2, meter: "2/4" }]);
+  assert.equal(score.totalBeats, 7);
+});
+
+test("PDF 文字层的逐小节拍号优先于 XML 拍号（矢量谱变拍子场景）", async () => {
+  const { DOMParser } = await import("@xmldom/xmldom");
+  globalThis.DOMParser = DOMParser;
+  const { parseMusicXmlText } = await import("../musicxml.js");
+  const quarter = (step) => `<note><pitch><step>${step}</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><staff>1</staff></note>`;
+  const xml = `<score-partwise><part-list><score-part id="P1"><part-name>S.</part-name></score-part></part-list>
+    <part id="P1">
+      <measure number="1"><attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        ${quarter("C")}${quarter("D")}${quarter("E")}${quarter("F")}
+      </measure>
+      <measure number="2">${quarter("G")}${quarter("A")}${quarter("B")}${quarter("C")}</measure>
+    </part></score-partwise>`;
+  const info = parseMusicXmlText(xml);
+  const score = assembleSystemScores([{
+    scoreInfo: info, labels: [], measureCount: 2, meterMap: ["6/4", "6/4"],
+  }]);
+  assert.equal(score.timeSummary, "6/4");
+  assert.equal(score.totalBeats, 12, "文字层说 6/4 就要按 6 拍算，不能被 XML 的 4/4 覆盖");
 });

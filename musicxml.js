@@ -182,6 +182,9 @@ export function parseMusicXmlText(source, options = {}) {
   ]));
   const musicParts = childrenNamed(root, "part");
   const tempoMarks = [], dynamicsMarks = [], timeSignatures = new Set(), keySignatures = new Set();
+  // 本 XML 里是否真的印了拍号（<time> 元素）。注意：没印时 timeSummary 可能是「继承来的拍号」，
+  // 调用方不能把继承值当成「本系统印了拍号」——否则会挡住「从内容推断变拍子」（见 app.js parseSystemBatch）。
+  let printedMeter = false;
   // 调号事件（第几小节变成什么调）：与 timeSignatures 的「集合」不同，调号是**有先后顺序**的，
   // 变调要靠它（《绒花》：Ab 起，第 9 小节转 F，第 86 小节回到 Ab）。多个声部会重复报同一调号，按小节去重。
   const keyEventByMeasure = new Map();
@@ -234,6 +237,11 @@ export function parseMusicXmlText(source, options = {}) {
     const partClefs = [];
     let measureNumber = 0;
     const trackNotes = [], measureLengths = [];
+    // 每个小节的「原始内容拍数」（所有声部里最长的那个）与「这一小节生效的拍号」：
+    // 图片型 PDF 只在变拍子处印一次拍号，多数装配系统读不到 <time>；
+    // 上层靠 rawContents/measureMeters 从「每小节实际时值」推断变拍子（如 6/8 → 2/4）。
+    const rawContents = [];
+    const partMeters = [];
     // 每个小节的时间缩放（只在「本页没印拍号、时值又被猜长」的小节上小于 1）。
     const measureScales = [];
     for (const measure of childrenNamed(part, "measure")) {
@@ -261,6 +269,7 @@ export function parseMusicXmlText(source, options = {}) {
           if (time) {
             const beats = textOf(time, "beats");
             const beatType = textOf(time, "beat-type");
+            if (beats && beatType) printedMeter = true;
             if (beats && beatType && !mappedMeter) {
               currentTime = `${beats}/${beatType}`;
               timeSignatures.add(currentTime);
@@ -467,6 +476,8 @@ export function parseMusicXmlText(source, options = {}) {
       }
       measureLengths.push(length);
       measureScales.push(scale);
+      rawContents.push(maxCursor);
+      partMeters.push(currentTime || "");
     }
     // 把「猜长小节」里的音符位置/时值等比缩回标称长度（保持小节内的相对节奏）。
     for (const note of trackNotes) {
@@ -476,7 +487,7 @@ export function parseMusicXmlText(source, options = {}) {
         note.durationBeats *= scale;
       }
     }
-    partTracks.push({ partId, partName, notes: trackNotes, measureLengths });
+    partTracks.push({ partId, partName, notes: trackNotes, measureLengths, rawContents, partMeters });
     let minMidi = Infinity, maxMidi = -Infinity;
     for (const note of trackNotes) {
       if (!Number.isFinite(note.midi)) continue;
@@ -497,6 +508,14 @@ export function parseMusicXmlText(source, options = {}) {
       globalMeasureLengths[index] = Math.max(globalMeasureLengths[index] || 0, length);
     });
   }
+  // 每小节的原始内容拍数与生效拍号：上层据此推断图片型 PDF 的变拍子（6/8 → 2/4）。
+  const globalMeasureContents = [];
+  for (const track of partTracks) {
+    (track.rawContents || []).forEach((value, index) => {
+      globalMeasureContents[index] = Math.max(globalMeasureContents[index] || 0, Number(value) || 0);
+    });
+  }
+  const globalMeasureMeters = (partTracks[0] && partTracks[0].partMeters) || [];
   const globalBaseBeats = [];
   let runningBeat = 0;
   for (let index = 0; index < globalMeasureLengths.length; index++) {
@@ -612,6 +631,10 @@ export function parseMusicXmlText(source, options = {}) {
     tempoMarks: uniqueTempoMarks, dynamicsMarks: uniqueDynamicsMarks, wedgeMarks,
     // 小节结构：number/implicit/lengthBeats/startBeat。逐系统识别时靠它判断弱起、对齐小节号。
     measures,
+    // 每小节的原始内容拍数与生效拍号：逐系统识别用它们推断「变拍子」（图片型 PDF 常见）。
+    measureContents: globalMeasureContents,
+    measureMeters: globalMeasureMeters,
+    printedMeter,
     // 调号事件（按小节先后）：{measureIndex, key}。逐系统装配据此记录「第几小节变调」。
     keyEvents: [...keyEventByMeasure.entries()]
       .map(([measureIndex, key]) => ({ measureIndex, key }))

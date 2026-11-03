@@ -2,7 +2,7 @@ import { parseMusicXmlText, readMusicXmlFile } from "./musicxml.js";
 import {
   binarize, detectStaves, detectSystems, staffCropBox,
   mergeSystemScores, mergePageScores, transposeNotes, yForPitch, CLEF_BY_SIGN, quantizeScoreRhythm,
-  detectBarlines, assignLayoutToSystems, assembleSystemScores,
+  detectBarlines, assignLayoutToSystems, assembleSystemScores, inferMeterMapFromContents, beatsPerMeter,
 } from "./staff.js";
 import {
   TIMBRE_LABELS, TIMBRE_GAIN, TIMBRE_ORDER, TIMBRE_GROUPS, PIANO_HARMONICS, PIANO_STRINGS,
@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-03·提速14";
+const APP_BUILD = "2026-11-04·提速15";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -973,8 +973,8 @@ function binaryFromCanvas(canvas) {
  * 放大只是像素插值，不改变谱面内容；代价是请求体变大、识别慢一些（本机约 1.5–2 倍），
  * 但准确率提升是值得的（用户明确要求「再多 token 都在所不惜」）。
  */
-function cropCanvasToBlob(canvas, box, { scale = OMR_CROP_UPSCALE } = {}) {
-  const safeScale = Math.max(1, Math.min(scale, OMR_CROP_MAX_WIDTH / Math.max(1, box.width)));
+function cropCanvasToBlob(canvas, box, { scale = OMR_CROP_UPSCALE, maxWidth = OMR_CROP_MAX_WIDTH } = {}) {
+  const safeScale = Math.max(1, Math.min(scale, maxWidth / Math.max(1, box.width)));
   const offscreen = document.createElement("canvas");
   offscreen.width = Math.max(1, Math.round(box.width * safeScale));
   offscreen.height = Math.max(1, Math.round(box.height * safeScale));
@@ -2702,6 +2702,8 @@ async function preparePageSystems(number, token, { displayStaves = null, initial
       index: crop.index,
       blob,
       box: { x: crop.x, y: crop.y, width: crop.width, height: crop.height },
+      // 送引擎前的放大倍数（调试诊断用：对不上号时先看这一条是不是和别的系统不一样）。
+      scale: cropScale,
       staves: crop.staves,
       firstStaffTop: crop.firstStaffTop,
       lastStaffBottom: crop.lastStaffBottom,
@@ -2721,8 +2723,26 @@ async function preparePageSystems(number, token, { displayStaves = null, initial
   return { systems, staves: displayBoxes || staves, width, height, scaleToDisplay };
 }
 
-/** 逐系统解析：每个系统用自己那套「拍号地图」，拍号未知时继承上一系统的拍号。 */
-function parseSystemBatch(systemJobs, xmlList, { superseded = () => false } = {}) {
+/** 取字符串里的纯拍号（"4/4"、"4/4（第 54 小节为 6/4）" → "4/4"）；取不到返回空串。 */
+function normalizeMeterText(value) {
+  const matched = /(\d+(?:\+\d+)*)\s*\/\s*(\d+)/.exec(String(value || ""));
+  return matched ? `${matched[1]}/${matched[2]}` : "";
+}
+
+/**
+ * 逐系统解析：每个系统用自己那套「拍号地图」，拍号未知时继承上一系统的拍号。
+ *
+ * 分两遍：
+ *  1. 先按 PDF 文字层（若有）/ 继承拍号解析一遍；
+ *  2. 对「没有印刷拍号来源」的系统，用每小节的**实际内容拍数**推断变拍子并重解析。
+ * 为什么需要第 2 遍：图片型 PDF 只在变拍子的那一条谱表上印一次新拍号（如《Goodbye Mr Lawrence》
+ * 第 29 小节 6/8→2/4），后面的系统都不印、Audiveris 也不输出 `<time>`。不推断的话，
+ * 后面所有 2/4 小节都会被当成 6/8 的 3 拍，每小节末尾多出 1 拍空拍（用户听到的「莫名其妙的空拍」）。
+ *
+ * @param {string} [options.initialMeter] 只重解析个别系统时传入「它前面已经确定的拍号」。
+ */
+function parseSystemBatch(systemJobs, xmlList, { superseded = () => false, initialMeter = "" } = {}) {
+  const inheritedMeter = normalizeMeterText(initialMeter);
   const parsed = [];
   let contextTime = "";
   for (let index = 0; index < systemJobs.length; index++) {
@@ -2730,10 +2750,10 @@ function parseSystemBatch(systemJobs, xmlList, { superseded = () => false } = {}
     const xml = xmlList[index];
     const job = systemJobs[index];
     if (!xml) { parsed.push(null); continue; }
-    const meterMap = Array.isArray(job.meterMap) && job.meterMap.length ? job.meterMap : null;
+    const meterMap = Array.isArray(job.meterMap) && job.meterMap.some(Boolean) ? job.meterMap : null;
     try {
       const scoreInfo = parseMusicXmlText(xml, {
-        timeSignature: contextTime || undefined,
+        timeSignature: contextTime || inheritedMeter || undefined,
         meterMap: meterMap || undefined,
         // 印了拍号（或从 PDF 文字层读到拍号）时严格按拍号算小节长度：
         // 否则 Audiveris 多读一个音就会把整小节拉长，后面所有音整体后移（用户听到的就是「节拍跟不上」）。
@@ -2748,6 +2768,255 @@ function parseSystemBatch(systemJobs, xmlList, { superseded = () => false } = {}
       parsed.push(null);
     }
   }
+  // 第二遍：变拍子推断（只对没有文字层拍号的系统；文字层的拍号是精确值，不能被内容推断覆盖）。
+  let runningMeter = inheritedMeter;
+  for (let index = 0; index < parsed.length; index++) {
+    if (superseded()) return [];
+    const job = systemJobs[index];
+    const info = parsed[index];
+    if (!info) continue;
+    const textMeterMap = Array.isArray(job.meterMap) && job.meterMap.some(Boolean) ? job.meterMap : null;
+    if (textMeterMap) {
+      runningMeter = normalizeMeterText(textMeterMap[textMeterMap.length - 1]) || runningMeter;
+      continue;
+    }
+    const explicitMeter = info.printedMeter && /^\d+\/\d+$/.test(info.timeSummary || "")
+      ? info.timeSummary : "";
+    if (explicitMeter) {
+      // 本系统确实印了拍号（Audiveris 读到了 <time>）：直接采用，并作为后面系统的起点。
+      runningMeter = explicitMeter;
+      continue;
+    }
+    const inferred = inferMeterMapFromContents(info.measureContents || [], runningMeter);
+    const lastMeter = inferred.filter(Boolean).pop() || "";
+    const currentMeters = Array.isArray(info.measureMeters) ? info.measureMeters : [];
+    const differs = inferred.some((meter, i) => meter && meter !== normalizeMeterText(currentMeters[i] || ""));
+    if (inferred.some(Boolean) && (differs || !runningMeter)) {
+      try {
+        const reparsed = parseMusicXmlText(xmlList[index], {
+          meterMap: inferred,
+          strictMeters: true,
+          assumeFirstMeasurePickup: false,
+        });
+        parsed[index] = reparsed;
+      } catch (error) {
+        console.info("变拍子重解析失败，沿用第一次结果：", error);
+      }
+    }
+    if (lastMeter) runningMeter = lastMeter;
+  }
+  return parsed;
+}
+
+/**
+ * 这个系统「读得可疑吗」？返回原因数组（空 = 没问题）。
+ *
+ * 为什么要这一步：图片型 PDF（206 DPI 扫描）在 1× 裁片下，Audiveris 偶尔会把两小节并成一节、
+ * 或整小节吞掉只留一个空小节（实测《Goodbye Mr Lawrence》p7s4 只剩 3 小节、第 2 小节全空，
+ * 听感就是「这里莫名空两拍」）。这些系统的共同特征是「小节内容拍数和当前拍号明显对不上」，
+ * 用它们当特征把它们挑出来，再放大 1.5×/2× 重识别——实测同样的核，放大后就能读对。
+ *
+ * @param {object} info 单个系统的解析结果
+ * @param {string} expectedMeter 这个系统应该是什么拍号（前面系统延续下来的）
+ * @param {string[]} [printedMeters] PDF 文字层读到的逐小节拍号（矢量谱才有；有就按小节精确对照）
+ * @returns {string[]} 可疑原因
+ */
+function systemSuspicionReasons(info, expectedMeter, printedMeters = null) {
+  if (!info) return ["解析失败"];
+  const contents = Array.isArray(info.measureContents) ? info.measureContents : [];
+  const notesByMeasure = new Map();
+  for (const note of info.notes || []) {
+    const measure = Number(note.measure) || 1;
+    notesByMeasure.set(measure, (notesByMeasure.get(measure) || 0) + 1);
+  }
+  const expectedBeats = beatsPerMeter(normalizeMeterText(expectedMeter)) || 0;
+  const hasPrinted = Array.isArray(printedMeters) && printedMeters.some((meter) => normalizeMeterText(meter));
+  const nonZeroMeasures = contents.filter((value) => Number(value) > 0).length;
+  // 没有「前面延续下来的拍号」时（单页识别第 1 个系统），拿本系统最短的非空小节当参照：
+  // 同拍号系统里各小节拍数应大致相同，明显更长的那个多半是「两小节被并成一节」。
+  const shortestContent = contents.reduce((min, value) => {
+    const content = Number(value) || 0;
+    if (!(content > 0)) return min;
+    return min > 0 ? Math.min(min, content) : content;
+  }, 0);
+  const referenceBeats = expectedBeats || shortestContent;
+  const reasons = [];
+  contents.forEach((value, index) => {
+    const content = Number(value) || 0;
+    const noteCount = notesByMeasure.get(index + 1) || 0;
+    // 文字层有逐小节拍号时按小节精确对照（避免把「真的变拍子」当成可疑）。
+    const measureBeats = hasPrinted
+      ? (beatsPerMeter(normalizeMeterText(printedMeters[index] || "")) || referenceBeats)
+      : referenceBeats;
+    // 1) 一串非空小节里夹着一个「零内容、零音符」的小节：引擎多半把这一小节吞了。
+    //    （整小节休止不是这种形态：Audiveris 会给整休止一个 4 拍的内容时值。）
+    if (content === 0 && noteCount === 0 && nonZeroMeasures >= 2 && index > 0) {
+      reasons.push(`第 ${index + 1} 小节内容为空`);
+      return;
+    }
+    if (noteCount === 0) return;
+    // 2) 有音符的小节内容拍数明显超过参照拍号：两小节被并成一节，或时值读错。
+    if (measureBeats > 0 && content > measureBeats * 1.2 + 0.01) {
+      reasons.push(`第 ${index + 1} 小节超长（${content} 拍 vs ${measureBeats} 拍）`);
+      return;
+    }
+    // 3) 有音符但内容不是半拍的整数倍：时值读错（三连音等 1/3 拍内容也属于这种，
+    //    重识别一次不亏；读对了就不算可疑）。
+    if (Math.abs(content * 2 - Math.round(content * 2)) > 0.06 && Math.abs(content * 3 - Math.round(content * 3)) > 0.06) {
+      reasons.push(`第 ${index + 1} 小节内容拍数不对齐（${Math.round(content * 100) / 100}）`);
+    }
+  });
+  return reasons;
+}
+
+/** 一个系统解析完后，「从它开始往后应该是什么拍号」：最后一个有效拍号。 */
+function meterAfterSystem(info) {
+  if (!info) return "";
+  const meters = Array.isArray(info.measureMeters) ? info.measureMeters : [];
+  for (let index = meters.length - 1; index >= 0; index--) {
+    const meter = normalizeMeterText(meters[index]);
+    if (meter) return meter;
+  }
+  return normalizeMeterText(info.timeSummary || "");
+}
+
+/**
+ * 一个系统「内容拍数 vs 应有拍数」的总偏差：用来判断重识别的结果是不是真的更准。
+ *
+ * 只看可疑原因个数不够：例如 p11s1 从「4+2 拍」重识别成「2.5+2 拍」，
+ * 可疑原因个数没变少，但超出小节的内容从 2 拍降到 0.5 拍，明显更接近原谱——应该采用。
+ */
+function systemContentError(info, expectedMeter, printedMeters = null) {
+  if (!info) return Infinity;
+  const contents = Array.isArray(info.measureContents) ? info.measureContents : [];
+  const expectedBeats = beatsPerMeter(normalizeMeterText(expectedMeter)) || 0;
+  const hasPrinted = Array.isArray(printedMeters) && printedMeters.some((meter) => normalizeMeterText(meter));
+  // 没有延续拍号时用本系统最短的非空小节当参照（和 systemSuspicionReasons 同一套判断）。
+  const shortestContent = contents.reduce((min, value) => {
+    const content = Number(value) || 0;
+    if (!(content > 0)) return min;
+    return min > 0 ? Math.min(min, content) : content;
+  }, 0);
+  const fallbackReference = expectedBeats || shortestContent;
+  if (!(fallbackReference > 0) && !hasPrinted) return Infinity;
+  let error = 0, counted = 0;
+  for (let index = 0; index < contents.length; index++) {
+    const content = Number(contents[index]) || 0;
+    if (content <= 0) continue;
+    const reference = hasPrinted
+      ? (beatsPerMeter(normalizeMeterText(printedMeters[index] || "")) || fallbackReference)
+      : fallbackReference;
+    if (!(reference > 0)) continue;
+    error += Math.abs(content - reference);
+    counted += 1;
+  }
+  return counted ? error : Infinity;
+}
+
+/**
+ * 对「读得可疑」的系统放大重识别（只在需要时发生，整本通常只有个位数个系统）。
+ *
+ * 两轮：先 1.5×，仍可疑的再 2×；只有「可疑原因变少」才采用新结果（避免越重试越差）。
+ * 每轮只重新渲染「包含可疑系统的那些页」再裁图，不会重渲染/重识别整本。
+ * 重识别裁片允许比常规上限（5000px）宽到 6400px：只重识别几个系统，请求体不大，
+ * 但 2× 分辨率是引擎读对「两小节被并成一节」这类错误的关键（实测 p10s5 1.68× 仍读错、2× 才读对）。
+ *
+ * @returns {Promise<Array>} 就地更新并返回 parsed
+ */
+async function retrySuspiciousSystems(systemJobs, xmlList, parsed, { superseded = () => false, onProgress = () => {} } = {}) {
+  if (!Array.isArray(parsed) || !parsed.length) return parsed;
+  // 只对「低清图片型 PDF」做放大复核：这类扫描件在 1× 裁片下才会被 Audiveris 并/吞小节。
+  // 高分辨率图片型谱（如 661 DPI 的《绒花》）和矢量 PDF 第一遍就够准，放大重识别只会改变
+  // 原本正确的切分（实测《绒花》被误判出 5/8、117 小节等假拍号）——所以直接跳过，避免回归。
+  if (!state.lowResPdf) return parsed;
+  // 单页识别时第一个系统前面没有拍号可继承：用整页/整本出现最多的拍号兜底
+  // （单页第 11 页：前面没拍号时第一个系统会被当成 4 拍，拿同页第二个系统的 2/4 当参照就能发现它可疑）。
+  // 真印了拍号的系统（如第 1 页的 6/8）不受兜底影响，否则会把 6/8 的 3 拍误判成超长。
+  const meterCounts = new Map();
+  for (const info of parsed) {
+    const meter = meterAfterSystem(info);
+    if (meter) meterCounts.set(meter, (meterCounts.get(meter) || 0) + 1);
+  }
+  let fallbackMeter = "";
+  for (const [meter, count] of meterCounts) {
+    if (!fallbackMeter || count > (meterCounts.get(fallbackMeter) || 0)) fallbackMeter = meter;
+  }
+  // 先按「前一个系统延续下来的拍号」给每个系统算可疑原因。
+  const contexts = [];
+  const reasons = [];
+  const errors = [];
+  let contextMeter = "";
+  for (let index = 0; index < parsed.length; index++) {
+    const info = parsed[index];
+    let expectedMeter = contextMeter;
+    if (!expectedMeter && fallbackMeter && !(info && info.printedMeter)) expectedMeter = fallbackMeter;
+    contexts.push(expectedMeter);
+    const printedMeters = Array.isArray(systemJobs[index] && systemJobs[index].meterMap) ? systemJobs[index].meterMap : null;
+    reasons.push(systemSuspicionReasons(info, expectedMeter, printedMeters));
+    errors.push(systemContentError(info, expectedMeter, printedMeters));
+    const after = meterAfterSystem(info);
+    if (after) contextMeter = after;
+  }
+  let pending = reasons.map((items, index) => (items.length ? index : -1)).filter((index) => index >= 0);
+  if (!pending.length) return parsed;
+  console.info(`可疑系统重识别：${pending.length} 个（${pending.map((index) => `p${systemJobs[index].page}s${systemJobs[index].index + 1}`).join("、")}）`);
+  const describe = (index) => `p${systemJobs[index].page}s${systemJobs[index].index + 1}`;
+  for (const scale of [1.5, 2.0]) {
+    if (superseded() || !pending.length) break;
+    onProgress({ done: 0, total: 1, label: `正在放大复核 ${pending.length} 个可疑系统（${pending.map(describe).join("、")}）…` });
+    const canvases = new Map();
+    const blobs = [];
+    const targets = [];
+    for (const index of pending) {
+      if (superseded()) return parsed;
+      const job = systemJobs[index];
+      const box = job.box || {};
+      if (!(box.width > 0) || !(box.height > 0)) continue;
+      let canvas = canvases.get(job.page);
+      if (!canvas) {
+        canvas = await omrPageCanvas(job.page, state.loadToken);
+        if (canvas) canvases.set(job.page, canvas);
+      }
+      if (!canvas) continue;
+      // 放大倍数按「相对这个系统原来的裁片」算：每页第一个系统原本就按 1.35× 裁（为了页顶速度记号），
+      // 重识别时直接给 1.5× 反而比它原来的裁片还小，等于没放大——所以乘上 job.scale。
+      const retryScale = Math.max(1, (Number(job.scale) || 1) * scale);
+      const blob = await cropCanvasToBlob(canvas, box, { scale: retryScale, maxWidth: Math.max(OMR_CROP_MAX_WIDTH, 6400) });
+      if (!blob) continue;
+      blobs.push(blob);
+      targets.push(index);
+    }
+    if (!blobs.length) break;
+    const retryXmls = await recognizeImageBlobsInBatch(blobs, { superseded, unit: "系统" });
+    if (superseded() || !retryXmls.length) break;
+    for (let local = 0; local < targets.length; local++) {
+      const index = targets[local];
+      const xml = retryXmls[local];
+      if (!xml) continue;
+      try {
+        const retried = parseSystemBatch([systemJobs[index]], [xml], {
+          superseded, initialMeter: contexts[index],
+        })[0];
+        if (!retried) continue;
+        const printedMeters = Array.isArray(systemJobs[index] && systemJobs[index].meterMap) ? systemJobs[index].meterMap : null;
+        const newReasons = systemSuspicionReasons(retried, contexts[index], printedMeters);
+        const newError = systemContentError(retried, contexts[index], printedMeters);
+        // 采用条件：可疑原因变少，或「内容拍数总偏差」变小（更接近原谱）。
+        if (newReasons.length < reasons[index].length || newError < errors[index] - 0.001) {
+          console.info(`可疑系统重识别：${describe(index)} 用 ${scale.toFixed(1)}× 重识别后从「${reasons[index].join("；") || "正常"}，内容偏差 ${errors[index].toFixed(2)}」变成「${newReasons.join("；") || "正常"}，内容偏差 ${newError.toFixed(2)}」`);
+          parsed[index] = retried;
+          reasons[index] = newReasons;
+          errors[index] = newError;
+        }
+      } catch (error) {
+        console.info("可疑系统重识别结果解析失败：", error);
+      }
+    }
+    // 下一轮继续重试「仍有可疑原因」的系统（哪怕这一轮已经变好一点：2× 可能读得更准）。
+    pending = pending.filter((index) => reasons[index].length > 0);
+  }
+  if (superseded()) return parsed;
+  onProgress({ done: 1, total: 1, label: "可疑系统复核完成" });
   return parsed;
 }
 
@@ -2804,6 +3073,8 @@ async function recognizePageBySystems(number, { displayStaves = null, superseded
   });
   if (superseded() || !xmls.length || !xmls.some(Boolean)) return null;
   const parsed = parseSystemBatch(jobs, xmls, { superseded });
+  // 单页识别同样对「可疑系统」放大重识别（图片型 PDF 的个别系统会被引擎并/吞小节）。
+  await retrySuspiciousSystems(jobs, xmls, parsed, { superseded, onProgress });
   if (superseded()) return null;
   // 单页识别：小节号尽量按「原谱印刷的小节号」显示（第 2 页就是从 11 开始），
   // 这样用户对着纸谱校对时不会错位。拿不到印刷小节号时就从 1 开始。
@@ -2911,11 +3182,41 @@ async function recognizeBookBySystems({ totalPages, superseded = () => false, on
       unit: "系统",
     });
     const engineMs = Math.round(performance.now() - engineStart);
+    // 调试诊断（?debug=1）：把「每个系统裁片的信息 + 引擎原始 XML」挂到 window 上，
+    // 排查「哪个系统没读对」时不用重新识别一遍。裁片二进制按需读取（__pujianDumpBlobs），不占常驻内存。
+    if (/[?&]debug=1/.test(location.search)) {
+      window.__pujianOmrDump = {
+        jobs: jobs.map((job) => ({
+          page: job.page, index: job.index, box: job.box, scale: job.scale,
+          measureCount: job.measureCount, meterMap: job.meterMap,
+          labels: job.labels, anchorBar: job.anchorBar,
+        })),
+        xmls,
+      };
+      window.__pujianDumpBlobs = async () => {
+        const dumpBlobs = [];
+        for (const job of jobs) dumpBlobs.push(await blobToBase64(job.blob));
+        return dumpBlobs;
+      };
+    }
     // 耗时诊断：页面准备（渲染/切系统/裁图编码）与识别引擎各占多少，用户反馈慢时一眼能看出来。
     console.info(`逐系统识别耗时：切系统 ${prepareMs} ms（${preparedPages} 页 ${jobs.length} 个系统，约 ${(blobBytes / 1048576).toFixed(1)} MB）· 引擎 ${engineMs} ms`);
     if (superseded()) return null;
     if (!xmls.length) return null;
     const parsed = parseSystemBatch(jobs, xmls, { superseded });
+    // 图片型 PDF 在 1× 裁片下个别系统会被 Audiveris 并/吞小节：对可疑系统放大重识别（通常只有几个）。
+    await retrySuspiciousSystems(jobs, xmls, parsed, { superseded, onProgress });
+    if (/[?&]debug=1/.test(location.search)) {
+      window.__pujianParseDump = parsed.map((info, index) => (info ? {
+        page: jobs[index].page, index: jobs[index].index,
+        measureContents: info.measureContents, measureMeters: info.measureMeters,
+        printedMeter: info.printedMeter, timeSummary: info.timeSummary,
+        measureCount: info.measureCount, totalBeats: info.totalBeats,
+        measures: (info.measures || []).map((measure) => ({
+          number: measure.number, implicit: measure.implicit, lengthBeats: measure.lengthBeats,
+        })),
+      } : null));
+    }
     if (superseded()) return null;
     // 按页装配：每页内的系统依次相接（小节号页内从 1 开始，跨页由 mergePageScores 平移）。
     const entries = new Array(totalPages).fill(null);
