@@ -53,9 +53,9 @@
               </span>
               <strong>拖放文件到这里</strong>
               <span class="dropzone-sub">或 <span class="browse-text">浏览文件</span></span>
-              <span class="file-types">PDF、图片、MusicXML、MXL</span>
+              <span class="file-types">PDF、图片、MusicXML/MXL、MIDI</span>
             </label>
-            <input id="fileInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp,image/bmp,image/gif,.musicxml,.xml,.mxl,application/vnd.recordare.musicxml+xml" hidden />
+            <input id="fileInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp,image/bmp,image/gif,.musicxml,.xml,.mxl,application/vnd.recordare.musicxml+xml,.mid,.midi,audio/midi,audio/x-midi" hidden />
             <div class="upload-foot"><span class="lock-icon" aria-hidden="true">⌑</span><span>无需上传到服务器，文件在浏览器本地读取</span></div>
             <div class="current-file" id="currentFile" hidden>
               <span class="file-icon" aria-hidden="true">♫</span>
@@ -138,7 +138,7 @@
               <span class="recognize-progress-label" id="recognizeProgressLabel"></span>
             </div>
             <button class="ghost-button cancel-recognize" id="cancelRecognize" type="button" hidden>取消识别</button>
-            <p class="fine-print" id="engineHint">图片识别依赖本机专业引擎（Audiveris 整页识别 / homr 逐谱表识别）；未安装时只做粗略估算，结果务必逐音校对。五线谱由专业引擎识别；简谱（数字谱）改用本机简谱识别模块（实验性），请在下方选择调号与拍号。也可导入 OMR 工具导出的 MusicXML/MXL。</p>
+            <p class="fine-print" id="engineHint">图片识别依赖本机专业引擎（Audiveris 整页识别 / homr 逐谱表识别）；未安装时只做粗略估算，结果务必逐音校对。五线谱由专业引擎识别；简谱（数字谱）改用本机简谱识别模块（实验性），请在下方选择调号与拍号。也可导入 OMR 工具导出的 MusicXML/MXL。导入 MIDI（.mid/.midi）会在本机自动量化成五线谱（需装 MuseScore，用于排版），可直接预览、试听并导出 MusicXML/PDF。</p>
           </aside>
 
           <section class="score-card panel">
@@ -150,6 +150,7 @@
                   <span id="pageLabel">1 / 1</span>
                   <button class="icon-button" id="nextPage" type="button" aria-label="下一页">›</button>
                 </div>
+                <div class="midi-export" id="midiExportGroup" hidden><button class="midi-button" id="exportMusicXmlButton" type="button" title="把这份 MIDI 转成的乐谱导出为 MusicXML（可在 MuseScore 等制谱软件里修改、打印）">↓ MusicXML</button><button class="midi-button" id="exportStaffPdfButton" type="button" title="把这份 MIDI 转成的五线谱导出为 PDF">↓ 五线谱 PDF</button></div>
                 <span class="zoom-label" id="zoomLabel">适合窗口</span>
               </div>
             </div>
@@ -164,7 +165,7 @@
               <div class="empty-state" id="emptyState">
                 <div class="empty-staff" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><b>𝄞</b><i>♪</i><em>♫</em></div>
                 <strong>你的乐谱会显示在这里</strong>
-                <p>支持 PDF、图片以及 MusicXML/MXL 符号乐谱</p>
+                <p>支持 PDF、图片、MusicXML/MXL 符号乐谱以及 MIDI 文件</p>
                 <button class="text-button" id="chooseFileButton" type="button">选择一个文件 <span>→</span></button>
               </div>
               <div class="imported-score" id="scoreInfo" hidden>
@@ -260,7 +261,7 @@
           </div>
         </section>
       </main>
-      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-11-04·提速17</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
+      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-11-10·MIDI 导入</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="app.js"></script>

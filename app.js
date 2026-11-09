@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-04·提速17";
+const APP_BUILD = "2026-11-10·MIDI 导入";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -56,12 +56,19 @@ const els = {
   sampleStatus: byId("sampleStatus"), tempoHint: byId("tempoHint"),
   noteLimitBanner: byId("noteLimitBanner"),
   exportRateSelect: byId("exportRateSelect"),
+  // MIDI 导入后的导出按钮（MusicXML / 五线谱 PDF），非 MIDI 文件时整组隐藏。
+  midiExportGroup: byId("midiExportGroup"), exportMusicXmlButton: byId("exportMusicXmlButton"),
+  exportStaffPdfButton: byId("exportStaffPdfButton"),
   layerToolbar: byId("layerToolbar"), addLayerPart: byId("addLayerPart"),
   addLayerBatch: byId("addLayerBatch"), layerBatchCount: byId("layerBatchCount"),
   addLayerEcho: byId("addLayerEcho"), addLayerLower: byId("addLayerLower"),
 };
 const state = {
   file: null, objectUrl: null, pdf: null, pageNumber: 1, pageCount: 1, notes: [], scoreInfo: null,
+  // MIDI 导入信息：{ meta, musicxml, title, pdfBytes }。
+  // musicxml 用于「导出 MusicXML」；pdfBytes 是 MuseScore 排版好的五线谱（有就直接下载，不再排版一次）。
+  // 非 MIDI 导入时为 null（导出按钮隐藏）。
+  midiInfo: null,
   recognized: false, isPlaying: false, audio: null, sources: new Set(), timers: [], toastTimer: null,
   // 令牌机制：文件加载 / 识别 / PDF 渲染各自带序号，只有最后一次发起的操作才允许改界面，
   // 避免"识别中切换文件""连点翻页"这类竞态把旧结果写回界面。
@@ -296,7 +303,7 @@ async function refreshEngineStatus() {
   if (els.jianpuButton) els.jianpuButton.hidden = jianpuAvailable === false;
   updateBatchButtons();
   updateEngineHint();
-  if (state.file && !state.isRecognizing && !/\.(musicxml|xml|mxl)$/i.test(state.file.name)) {
+  if (state.file && !state.isRecognizing && !/\.(musicxml|xml|mxl|mid|midi)$/i.test(state.file.name)) {
     els.recognizeLabel.textContent = idleRecognizeLabel();
   }
 }
@@ -318,6 +325,8 @@ function clearScore() {
   state.pianoKeys = new Set();
   state.expectedParts = [];
   state.expectedPartsSource = null;
+  state.midiInfo = null;
+  if (els.midiExportGroup) els.midiExportGroup.hidden = true;
   if (els.transposeInput) els.transposeInput.value = "0";
   if (els.recognizeProgress) els.recognizeProgress.hidden = true;
   els.scoreInfo.hidden = true;
@@ -393,6 +402,10 @@ function updateRecognitionBanner() {
     banner.className = "recognition-banner is-file";
     els.recognitionSource.textContent = "来自文件的结构化乐谱";
     els.recognitionDetail.textContent = `${state.notes.length} 个音符 · 音高与时值直接读取自 MusicXML，未经过图像识别`;
+  } else if (state.recognitionSource === "midi") {
+    banner.className = "recognition-banner is-file";
+    els.recognitionSource.textContent = "MIDI 文件（自动转谱）";
+    els.recognitionDetail.textContent = `${state.notes.length} 个音符 · 由 MIDI 的按键时间自动量化成五线谱，未经过图像识别 · 谱面与演奏请校对后使用`;
   } else if (state.recognitionSource === "jianpu") {
     banner.className = "recognition-banner is-jianpu";
     els.recognitionSource.textContent = "本机简谱识别（实验性）";
@@ -583,7 +596,8 @@ async function recognizeJianpuScore() {
 
 /** 多页时显示「整本识别」按钮（五线谱与简谱各一个），单页/图片/简谱不可用时隐藏。 */
 function updateBatchButtons() {
-  const multi = Boolean(state.file && state.pdf && state.pageCount > 1);
+  // MIDI 导入的谱面是自动排版的，没有「识别」概念，不显示整本识别按钮。
+  const multi = Boolean(state.file && state.pdf && state.pageCount > 1 && !state.midiInfo);
   els.recognizeAllButton.hidden = !multi;
   els.recognizeAllLabel.textContent = `识别全部 ${state.pageCount} 页`;
   els.recognizeAllButton.disabled = false;
@@ -600,13 +614,48 @@ function setCanvasSize(width, height) {
   els.canvasWrap.hidden = false;
   clearOverlay();
 }
+/**
+ * 把「结构化乐谱」铺到界面上：标题/详情/警告 + 音符列表 + 声部面板 + 自动速度。
+ *
+ * MusicXML 导入与 MIDI 导入（MIDI 先生成 MusicXML）共用这一份逻辑，
+ * 避免两条导入路径各写一遍，以后改界面只改一处。
+ * 调用前 state.notes 等业务数据的来源不同（source: musicxml / midi），
+ * 谱面预览由调用方自己决定（MusicXML 没有谱面，MIDI 会再排版成五线谱 PDF）。
+ */
+function applyScoreInfo(scoreInfo, source) {
+  for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
+  applyScoreExpression(scoreInfo);
+  state.scoreInfo = scoreInfo;
+  state.notes = scoreInfo.notes;
+  state.expectedParts = expectedPartsForScore(scoreInfo);
+  state.expectedPartsSource = scoreInfo;
+  state.recognitionSource = scoreInfo.notes.length ? source : null;
+  state.scorePage = null;   // 符号乐谱/自动转谱没有谱面坐标，不画点
+  updatePartControls(true);
+  state.recognized = false;
+  els.emptyState.hidden = true;
+  els.scoreInfo.hidden = false;
+  els.staffSelectField.hidden = true;
+  els.scoreTitle.textContent = scoreInfo.title;
+  els.scoreDetails.textContent = describeScoreDetails(scoreInfo);
+  els.scoreWarnings.textContent = scoreInfo.warnings.join(" ");
+  els.scoreWarnings.hidden = scoreInfo.warnings.length === 0;
+  applyDetectedTempo(scoreInfo);
+  renderNotes();
+  updateRecognitionBanner();
+  // 结构化乐谱不走 commitScore，这里补上同样的收尾：清掉音色缓存 + 后台按需预加载音源。
+  // 否则导入符号乐谱后要等点播放才开始加载音源（用户感受到的又是「音源跟不上演奏」）。
+  clearTimbreCache();
+  scheduleTimbrePreload();
+}
 async function loadFile(file) {
   if (!file) return;
   const lowerName = file.name.toLowerCase();
   const isPdf = file.type === "application/pdf" || lowerName.endsWith(".pdf");
   const isMusicXml = /\.(musicxml|xml|mxl)$/i.test(lowerName);
+  const isMidi = /\.(mid|midi)$/i.test(lowerName);
   const isImage = Boolean(file.type?.startsWith("image/")) || /\.(png|jpe?g|webp|bmp|gif)$/i.test(file.name);
-  if (!isPdf && !isImage && !isMusicXml) return showToast("请选择 PDF、图片或 MusicXML 乐谱文件。");
+  if (!isPdf && !isImage && !isMusicXml && !isMidi) return showToast("请选择 PDF、图片、MusicXML 或 MIDI 乐谱文件。");
   prepareAudio();          // 声卡初始化要 600ms 左右，趁"载入文件"这段本来就忙的时候做掉
   stopPlayback();
   await destroyPdf();
@@ -615,7 +664,7 @@ async function loadFile(file) {
   const token = ++state.loadToken;
   state.file = file;
   // PDF 交给 pdf.js 直接读 ArrayBuffer，MusicXML 在浏览器内解析，两者都不需要 blob URL。
-  state.objectUrl = (isPdf || isMusicXml) ? null : URL.createObjectURL(file);
+  state.objectUrl = (isPdf || isMusicXml || isMidi) ? null : URL.createObjectURL(file);
   state.pageNumber = 1;
   state.pageCount = 1;
   state.image = null;
@@ -624,10 +673,10 @@ async function loadFile(file) {
   state.timeSignatureHint = "";
   state.partOctaves = new Map();
   clearScore();
-  els.clefSelect.disabled = isMusicXml;
-  els.jianpuField.hidden = true;   // 简谱设置只在图片/PDF 页面上出现，MusicXML 不需要
+  els.clefSelect.disabled = isMusicXml || isMidi;
+  els.jianpuField.hidden = true;   // 简谱设置只在图片/PDF 页面上出现，MusicXML / MIDI 不需要
   els.fileName.textContent = file.name;
-  els.fileInfo.textContent = (isMusicXml ? "MusicXML 乐谱" : isPdf ? "PDF 文档" : "图片文件") + " · " + formatSize(file.size);
+  els.fileInfo.textContent = (isMusicXml ? "MusicXML 乐谱" : isMidi ? "MIDI 文件" : isPdf ? "PDF 文档" : "图片文件") + " · " + formatSize(file.size);
   els.currentFile.hidden = false;
   els.recognizeButton.disabled = true;
   els.recognizeLabel.textContent = "正在载入…";
@@ -635,31 +684,17 @@ async function loadFile(file) {
   els.pageControls.hidden = true;
   els.scoreHint.textContent = "正在载入谱面";
   try {
+    if (isMidi) {
+      await loadMidi(file, token);
+      return;
+    }
     if (isMusicXml) {
       const scoreInfo = await readMusicXmlFile(file);
       if (token !== state.loadToken) return;
-      for (const note of scoreInfo.notes) note.duration = durationFromBeats(note.durationBeats);
-      applyScoreExpression(scoreInfo);
-      state.scoreInfo = scoreInfo;
-      state.notes = scoreInfo.notes;
-      state.expectedParts = expectedPartsForScore(scoreInfo);
-      state.expectedPartsSource = scoreInfo;
-      state.recognitionSource = scoreInfo.notes.length ? "musicxml" : null;
-      state.scorePage = null;   // 符号乐谱没有谱面坐标，不画点
-      updatePartControls(true);
-      state.recognized = false;
       state.pageCount = 1;
       els.canvasWrap.hidden = true;
-      els.emptyState.hidden = true;
-      els.scoreInfo.hidden = false;
-      els.staffSelectField.hidden = true;
-      els.scoreTitle.textContent = scoreInfo.title;
-      els.scoreDetails.textContent = describeScoreDetails(scoreInfo);
-      els.scoreWarnings.textContent = scoreInfo.warnings.join(" ");
-      els.scoreWarnings.hidden = scoreInfo.warnings.length === 0;
-      applyDetectedTempo(scoreInfo);
-      renderNotes();
-      updateRecognitionBanner();
+      applyScoreInfo(scoreInfo, "musicxml");
+      if (token !== state.loadToken) return;
       els.recognizeButton.disabled = true;
       els.recognizeLabel.textContent = "已载入符号乐谱";
       els.pageControls.hidden = true;
@@ -669,10 +704,6 @@ async function loadFile(file) {
       showToast(scoreInfo.notes.length
         ? `已读取 ${scoreInfo.notes.length} 个音符，请校对后试听。`
         : "已读取乐谱，但没有找到可演奏的带音高音符。");
-      // MusicXML 导入不走 commitScore，这里补上同样的收尾：清掉音色缓存 + 后台按需预加载音源。
-      // 否则导入符号乐谱后要等点播放才开始加载音源（用户感受到的又是「音源跟不上演奏」）。
-      clearTimbreCache();
-      scheduleTimbrePreload();
       return;
     }
     if (isPdf) await loadPdf(file, token);
@@ -694,6 +725,144 @@ async function loadFile(file) {
     els.emptyState.hidden = false;
     els.scoreHint.textContent = "载入失败";
     showToast(error.message || "文件无法打开，请尝试其他文件。");
+  }
+}
+/**
+ * MIDI 导入：解析 .mid → 生成 MusicXML → 同一份数据驱动三处：
+ *   · 乐谱预览：把 MusicXML 交给本机 MuseScore 排版成五线谱 PDF，用和扫描 PDF 一样的分页预览；
+ *   · 旋律工作台：MusicXML 再解析回音符/声部（音高、时值、速度、拍号、调号与导出谱完全一致），可试听/校对；
+ *   · 导出：MusicXML（可在制谱软件里继续改）+ 五线谱 PDF。
+ *
+ * 为什么在浏览器里解析：midi.js 是纯函数、有单测；本机没装 MuseScore 时仍能导入/试听/导出 MusicXML，
+ * 只是少了五线谱预览——这时会明确告诉用户原因，而不是整页报错。
+ */
+async function loadMidi(file, token) {
+  const midiModule = await import("./midi.js");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const title = file.name.replace(/\.[^.]+$/, "");
+  const { musicxml, meta } = midiModule.midiToMusicXml(bytes, { title });
+  if (token !== state.loadToken) return;
+  // 生成的 MusicXML 复用 MusicXML 导入的解析路径：音符/声部/休止/速度/拍号/调号完全一致。
+  const xmlFile = new File([musicxml], title + ".musicxml", { type: "application/xml" });
+  const scoreInfo = await readMusicXmlFile(xmlFile);
+  if (token !== state.loadToken) return;
+  state.midiInfo = { meta, musicxml, title, pdfBytes: null };
+  // 显示「解析回乐谱后的音符数」：MIDI 原始音符与谱面音符会因连音线合并/和弦差异略有出入，
+  // 界面统一用与横幅/旋律工作台一致的数字，避免同一个文件出现两个音符数。
+  const noteCount = scoreInfo.notes.length;
+  els.fileInfo.textContent = `MIDI 文件 · ${formatSize(file.size)} · ${meta.parts} 个声部 / ${noteCount} 个音符`;
+  els.scoreHint.textContent = "正在把 MIDI 排版成五线谱…";
+  // 1) 先排版五线谱（可选步骤：本机没有 MuseScore 就跳过，不影响下面的音符/试听）。
+  let previewError = "";
+  let pdfReady = false;
+  try {
+    const response = await fetch("/api/score/to-pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ musicxml, title }),
+    });
+    if (!response.ok) {
+      let message = "";
+      try {
+        const payload = await response.json();
+        message = payload && payload.error ? String(payload.error) : "";
+      } catch { /* 错误体不是 JSON，用下面的兜底文案 */ }
+      previewError = message || `五线谱排版失败（HTTP ${response.status}）`;
+    } else {
+      const pdfBytes = await response.arrayBuffer();
+      if (token !== state.loadToken) return;
+      state.midiInfo.pdfBytes = pdfBytes;
+      // 走和扫描 PDF 完全相同的预览路径（pdf.js 分页/缩放/翻页）：乐谱预览里看到的就是真五线谱。
+      await loadPdf(new File([pdfBytes], title + ".pdf", { type: "application/pdf" }), token);
+      if (token !== state.loadToken) return;
+      pdfReady = true;
+    }
+  } catch (error) {
+    console.info("MIDI 五线谱预览不可用：", error);
+    previewError = "无法连接本机排版服务";
+  }
+  if (token !== state.loadToken) return;
+  // 2) 再把音符/声部铺到界面（旋律工作台 + 乐谱信息卡）。
+  if (!pdfReady) {
+    state.pageCount = 1;
+    els.canvasWrap.hidden = true;
+    els.pageControls.hidden = true;
+  }
+  applyScoreInfo(scoreInfo, "midi");
+  if (token !== state.loadToken) return;
+  els.midiExportGroup.hidden = false;
+  els.exportStaffPdfButton.title = pdfReady
+    ? "把这份 MIDI 转成的五线谱下载为 PDF"
+    : "本机没装 MuseScore（或排版失败）时无法导出五线谱 PDF；可先导出 MusicXML 在制谱软件里打开";
+  els.recognizeButton.disabled = true;
+  els.recognizeLabel.textContent = "已导入 MIDI";
+  els.pageControls.hidden = !pdfReady || state.pageCount <= 1;
+  const keyText = meta.key ? `，调号约 ${meta.key}` : "";
+  const timeText = meta.timeSummary ? `，${meta.timeSummary}` : "";
+  els.scoreHint.textContent = pdfReady
+    ? `已排版成 ${state.pageCount} 页五线谱 · ${meta.parts} 个声部 ${noteCount} 个音符 · ♩=${meta.tempo}${timeText}${keyText}。MIDI 不含力度/表情细节，谱面请校对后使用`
+    : `${meta.parts} 个声部 ${noteCount} 个音符已可试听、可导出 MusicXML；${previewError}，所以暂时不能显示五线谱`;
+  showToast(pdfReady
+    ? `已导入 MIDI：${meta.parts} 个声部、${noteCount} 个音符，已排版成 ${state.pageCount} 页五线谱。`
+    : `已导入 MIDI：${meta.parts} 个声部、${noteCount} 个音符。${previewError ? previewError + "。" : ""}可先试听或导出 MusicXML。`);
+}
+/** 导出文件名：优先用 MIDI 文件名（去掉后缀），清掉文件名非法字符。 */
+function midiExportBaseName() {
+  const raw = (state.midiInfo && state.midiInfo.title) || (state.file ? state.file.name.replace(/\.[^.]+$/, "") : "MIDI 导入");
+  const safe = String(raw).replace(/[\\/:*?"<>|]/g, "_").trim().slice(0, 80);
+  return safe || "MIDI 导入";
+}
+/** 把内存数据下载成本地文件（导出按钮共用）。 */
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // 稍后再释放：部分浏览器需要 URL 在 click 之后还存活一小会儿才开始下载。
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+/** 导出 MusicXML：客户端直接下载生成的文本，不需要服务端。 */
+function exportMidiMusicXml() {
+  if (!state.midiInfo) return showToast("当前乐谱不是从 MIDI 导入的，没有可导出的 MusicXML。");
+  const blob = new Blob([state.midiInfo.musicxml], { type: "application/vnd.recordare.musicxml+xml;charset=utf-8" });
+  downloadBlob(blob, midiExportBaseName() + ".musicxml");
+  showToast("已导出 MusicXML：可在 MuseScore 等制谱软件里继续修改、打印。");
+}
+/** 导出五线谱 PDF：优先用预览时已经排版好的结果，没有再请求一次 MuseScore。 */
+async function exportMidiStaffPdf() {
+  const info = state.midiInfo;
+  if (!info) return showToast("当前乐谱不是从 MIDI 导入的，没有可导出的五线谱。");
+  const button = els.exportStaffPdfButton;
+  if (button) button.disabled = true;
+  try {
+    let pdfBytes = info.pdfBytes;
+    if (!pdfBytes) {
+      const response = await fetch("/api/score/to-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ musicxml: info.musicxml, title: info.title }),
+      });
+      if (!response.ok) {
+        let message = "";
+        try {
+          const payload = await response.json();
+          message = payload && payload.error ? String(payload.error) : "";
+        } catch { /* 错误体不是 JSON */ }
+        return showToast(message || "五线谱排版失败，暂时无法导出 PDF。");
+      }
+      pdfBytes = await response.arrayBuffer();
+      info.pdfBytes = pdfBytes;   // 缓存：再次导出不再排版
+    }
+    downloadBlob(new Blob([pdfBytes], { type: "application/pdf" }), midiExportBaseName() + ".pdf");
+    showToast("已导出五线谱 PDF。");
+  } catch (error) {
+    console.error(error);
+    showToast("导出五线谱失败：无法连接本机排版服务。");
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 async function loadImage(file, token) {
@@ -7280,6 +7449,8 @@ if (els.addLayerEcho) els.addLayerEcho.addEventListener("click", () => addLayerO
 if (els.addLayerLower) els.addLayerLower.addEventListener("click", () => addLayerOctave(-12));
 els.midiButton.addEventListener("click", downloadMidi);
 if (els.audioButton) els.audioButton.addEventListener("click", exportAudio);
+if (els.exportMusicXmlButton) els.exportMusicXmlButton.addEventListener("click", exportMidiMusicXml);
+if (els.exportStaffPdfButton) els.exportStaffPdfButton.addEventListener("click", exportMidiStaffPdf);
 els.playButton.addEventListener("click", playMelody);
 els.stopButton.addEventListener("click", stopPlayback);
 els.canvasWrap.addEventListener("click", focusNearestScoreNote);

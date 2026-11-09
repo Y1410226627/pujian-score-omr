@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 import io
 import base64
 import binascii
@@ -147,6 +147,184 @@ def handle_pdf_layout_request(handler):
         return
     layout = read_pdf_layout_from_pdf(payload)
     handler.send_json(200, {"pages": layout.get("pages", [])})
+
+
+MUSESCORE_TIMEOUT_SECONDS = 90
+# 同一时刻只跑一个 MuseScore 排版：两个实例同时启动会抢同一份用户配置/日志（偶发启动失败）。
+MUSESCORE_SLOT = threading.Lock()
+MUSESCORE_QUEUE_WAIT_SECONDS = 60
+
+
+def find_musescore():
+    """找本机 MuseScore（只用来把 MusicXML 排版成五线谱 PDF，不参与识谱）。
+
+    为什么需要它：MIDI 导入后「乐谱预览」要显示真正的五线谱，而排版引擎自己写太贵；
+    MuseScore 4/3 都支持命令行 `MuseScore4.exe -o 输出.pdf 输入.musicxml` 无头排版（实测 1–2 秒）。
+    找不到时不影响导入：前端会降级成「只有旋律工作台的音符/播放 + MusicXML 导出」，并明确提示原因。
+    """
+    configured = os.environ.get("MUSESCORE_EXECUTABLE", "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.is_file():
+            return str(configured_path.resolve())
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+    candidates = []
+    # 项目自带的便携版（和 Audiveris 一样放在 .tools 下，方便整包拷到别的电脑）
+    for name in ("MuseScore4.exe", "MuseScore3.exe", "mscore", "musescore4"):
+        candidates.extend((
+            PROJECT_DIR / ".tools" / "musescore" / name,
+            PROJECT_DIR / ".tools" / "musescore" / "bin" / name,
+        ))
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")):
+            if not base:
+                continue
+            candidates.extend((
+                Path(base) / "MuseScore 4" / "bin" / "MuseScore4.exe",
+                Path(base) / "MuseScore 3" / "bin" / "MuseScore3.exe",
+                Path(base) / "Programs" / "MuseScore 4" / "bin" / "MuseScore4.exe",
+            ))
+    else:
+        candidates.extend((
+            Path("/Applications/MuseScore 4.app/Contents/MacOS/mscore"),
+            Path("/Applications/MuseScore 3.app/Contents/MacOS/mscore"),
+            Path("/usr/bin/musescore4"),
+            Path("/usr/bin/mscore"),
+            Path("/usr/local/bin/musescore4"),
+        ))
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("MuseScore4") or shutil.which("musescore4") or shutil.which("mscore")
+
+
+def render_musicxml_pdf(musicxml):
+    """MusicXML 文本 → 五线谱 PDF 字节（MuseScore 命令行无头排版）。
+
+    找不到 MuseScore 时返回 None；排版失败抛 RuntimeError（错误信息面向用户，不暴露本机路径）。
+    """
+    musescore = find_musescore()
+    if not musescore:
+        return None
+    with tempfile.TemporaryDirectory(prefix="pujian-score-") as temporary_dir:
+        temporary_path = Path(temporary_dir)
+        input_path = temporary_path / "score.musicxml"
+        output_path = temporary_path / "score.pdf"
+        input_path.write_text(musicxml, encoding="utf-8")
+        env = dict(os.environ)
+        # MuseScore 也会往系统临时目录写东西；指到本次任务目录，避免受限电脑上写 %TEMP% 失败。
+        # 注意：subprocess 的 env 只接受字符串，Path 对象会报 "environment can only contain strings"。
+        for name in ("TMP", "TEMP", "TMPDIR"):
+            env[name] = str(temporary_path)
+        try:
+            process = subprocess.run(
+                [musescore, "-o", str(output_path), str(input_path)],
+                cwd=str(temporary_path),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=MUSESCORE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("MuseScore 排版超时（超过 {} 秒），请稍后重试。".format(MUSESCORE_TIMEOUT_SECONDS))
+        except OSError as error:
+            print("[pujian] MuseScore 启动失败：{!r}".format(error))
+            raise RuntimeError("MuseScore 启动失败，请检查安装是否完整。")
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            detail = (process.stdout + process.stderr).decode("utf-8", errors="replace")[-600:].strip()
+            if detail:
+                # 详情只写到本地控制台：里面可能有本机路径/用户名，不回传给页面。
+                print("[musescore] 排版失败，返回码 {}：\n{}".format(process.returncode, detail))
+                print("[musescore] 详细日志见 %LOCALAPPDATA%\\MuseScore\\MuseScore4\\logs\\")
+            raise RuntimeError("MuseScore 没能把这份乐谱排版成 PDF，请换一份乐谱重试。")
+        pdf_bytes = output_path.read_bytes()
+        if not pdf_bytes.startswith(b"%PDF-"):
+            raise RuntimeError("MuseScore 输出的文件不是有效 PDF。")
+        return pdf_bytes
+
+
+def handle_score_to_pdf_request(handler):
+    """POST /api/score/to-pdf：接收 MusicXML 文本（JSON `{"musicxml": "..."}` 或 raw XML），返回五线谱 PDF。
+
+    MIDI 导入的「乐谱预览」和「导出五线谱 PDF」都走这里：同一份 MusicXML 只排版一次，
+    页面直接用返回的 PDF 铺满预览区（和扫描 PDF 一样的分页浏览）。
+    """
+    content_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type not in ("application/json", "application/xml", "text/xml"):
+        handler.send_json(415, {"error": "排版接口只接收 JSON 或 MusicXML 文本。"})
+        return
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        length = 0
+    if length <= 0 or length > MAX_MUSICXML_BYTES:
+        handler.send_json(413, {"error": "MusicXML 数据为空或超过上限。"})
+        return
+    try:
+        raw = handler.rfile.read(length)
+    except Exception:  # noqa: BLE001
+        handler.send_json(400, {"error": "MusicXML 数据未完整接收，请重试。"})
+        return
+    if len(raw) != length:
+        handler.send_json(400, {"error": "MusicXML 数据未完整接收，请重试。"})
+        return
+    if content_type == "application/json":
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+            musicxml = payload.get("musicxml") or ""
+            title = str(payload.get("title") or "").strip()
+        except (ValueError, UnicodeDecodeError, AttributeError):
+            handler.send_json(400, {"error": "请求格式不正确。"})
+            return
+    else:
+        musicxml = raw.decode("utf-8", errors="replace")
+        title = ""
+    if not isinstance(musicxml, str) or not musicxml.strip():
+        handler.send_json(400, {"error": "没有收到可排版的 MusicXML。"})
+        return
+    if not musicxml.lstrip().startswith("<"):
+        handler.send_json(400, {"error": "收到的内容不是 MusicXML。"})
+        return
+    if find_musescore() is None:
+        handler.send_json(503, {
+            "error": "本机没找到 MuseScore，暂时无法把乐谱排版成五线谱 PDF。安装 MuseScore 4 后即可预览；也可以先用「导出 MusicXML」在制谱软件里打开。",
+            "reason": "engine-missing",
+        })
+        return
+    if not MUSESCORE_SLOT.acquire(timeout=MUSESCORE_QUEUE_WAIT_SECONDS):
+        handler.send_json(503, {"error": "本机排版任务正忙，请稍候重试。", "reason": "busy"})
+        return
+    try:
+        pdf_bytes = render_musicxml_pdf(musicxml)
+    except RuntimeError as error:
+        handler.send_json(500, {"error": str(error)})
+        return
+    finally:
+        MUSESCORE_SLOT.release()
+    if not pdf_bytes:
+        handler.send_json(503, {"error": "本机没找到 MuseScore，暂时无法排版五线谱 PDF。", "reason": "engine-missing"})
+        return
+    # HTTP 头只能是 latin-1：中文标题放进 RFC 5987 的 filename*，filename= 用 ASCII 兜底。
+    filename = "score.pdf"
+    disposition = 'inline; filename="score.pdf"'
+    if title:
+        ascii_title = "".join(char for char in title if char.isascii() and (char.isalnum() or char in " -_"))[:60].strip()
+        if ascii_title:
+            filename = ascii_title + ".pdf"
+            disposition = 'inline; filename="{}"'.format(filename)
+        if not title.isascii():
+            disposition += "; filename*=UTF-8''" + quote(title[:60] + ".pdf")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/pdf")
+    handler.send_header("Content-Length", str(len(pdf_bytes)))
+    handler.send_header("Content-Disposition", disposition)
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(pdf_bytes)
 
 
 def handle_tempo_text_request(handler):
@@ -521,6 +699,9 @@ class ProjectHandler(SimpleHTTPRequestHandler):
                 "audiverisAvailable": find_audiveris() is not None,
                 "audiverisOcr": audiveris_ocr_languages(),
                 "jianpuAvailable": jianpu_available(),
+                # MuseScore 只用于「把 MusicXML 排版成五线谱 PDF」（MIDI 导入预览/导出）；
+                # 没有它时导入 MIDI 仍可用，只是预览区降级提示。
+                "musescoreAvailable": find_musescore() is not None,
             })
             return
         if self.path.split("?", 1)[0] == "/api/version":
@@ -590,6 +771,9 @@ class ProjectHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/omr/pdf-layout":
             handle_pdf_layout_request(self)
+            return
+        if route == "/api/score/to-pdf":
+            handle_score_to_pdf_request(self)
             return
         if route == "/api/jianpu/recognize":
             self.handle_jianpu()
