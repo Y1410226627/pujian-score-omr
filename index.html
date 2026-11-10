@@ -174,6 +174,18 @@
                 <h3 id="scoreTitle" contenteditable="true" spellcheck="false" title="点击可直接修改标题">未命名乐谱</h3>
                 <p id="scoreDetails"></p>
                 <p class="imported-score-warning" id="scoreWarnings" hidden></p>
+                <div class="midi-grouping" id="midiGroupingRow" hidden>
+                  <label class="field-label" for="midiGroupingSelect">MIDI 声部整理</label>
+                  <div class="select-wrap midi-grouping-select">
+                    <select id="midiGroupingSelect" aria-label="MIDI 声部整理方式">
+                      <option value="auto" selected>自动整理重复 / 和声（推荐）</option>
+                      <option value="melody">只保留主旋律（1 个声部）</option>
+                      <option value="tracks">每条轨道一个声部</option>
+                    </select>
+                    <span aria-hidden="true">⌄</span>
+                  </div>
+                  <p class="fine-print" id="midiGroupingHint"></p>
+                </div>
                 <small>可在音符列表校对音高、起拍和时值；试听使用合成音色。</small>
               </div>
               <div class="canvas-wrap" id="canvasWrap" hidden>
@@ -261,7 +273,7 @@
           </div>
         </section>
       </main>
-      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-11-10·MIDI 导入</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
+      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-11-10·MIDI 声部整理</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="app.js"></script>

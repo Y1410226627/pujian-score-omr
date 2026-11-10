@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-10·MIDI 导入";
+const APP_BUILD = "2026-11-10·MIDI 声部整理";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -56,19 +56,23 @@ const els = {
   sampleStatus: byId("sampleStatus"), tempoHint: byId("tempoHint"),
   noteLimitBanner: byId("noteLimitBanner"),
   exportRateSelect: byId("exportRateSelect"),
-  // MIDI 导入后的导出按钮（MusicXML / 五线谱 PDF），非 MIDI 文件时整组隐藏。
+  // MIDI 导入后的导出按钮（MusicXML / 五线谱 PDF）与声部整理下拉，非 MIDI 文件时整组隐藏。
   midiExportGroup: byId("midiExportGroup"), exportMusicXmlButton: byId("exportMusicXmlButton"),
   exportStaffPdfButton: byId("exportStaffPdfButton"),
+  midiGroupingRow: byId("midiGroupingRow"), midiGroupingSelect: byId("midiGroupingSelect"),
+  midiGroupingHint: byId("midiGroupingHint"),
   layerToolbar: byId("layerToolbar"), addLayerPart: byId("addLayerPart"),
   addLayerBatch: byId("addLayerBatch"), layerBatchCount: byId("layerBatchCount"),
   addLayerEcho: byId("addLayerEcho"), addLayerLower: byId("addLayerLower"),
 };
 const state = {
   file: null, objectUrl: null, pdf: null, pageNumber: 1, pageCount: 1, notes: [], scoreInfo: null,
-  // MIDI 导入信息：{ meta, musicxml, title, pdfBytes }。
-  // musicxml 用于「导出 MusicXML」；pdfBytes 是 MuseScore 排版好的五线谱（有就直接下载，不再排版一次）。
-  // 非 MIDI 导入时为 null（导出按钮隐藏）。
+  // MIDI 导入信息：{ meta, musicxml, title, pdfBytes, bytes, grouping }。
+  // musicxml 用于「导出 MusicXML」；pdfBytes 是 MuseScore 排版好的五线谱（有就直接下载，不再排版一次）；
+  // bytes 是原始 MIDI 字节（切换声部整理方式时重新转谱用）。非 MIDI 导入时为 null（导出按钮隐藏）。
   midiInfo: null,
+  // MIDI 声部整理方式：auto=自动合并重复/和声（默认）/ melody=只保留主旋律 / tracks=一条轨道一个声部
+  midiGrouping: "auto",
   recognized: false, isPlaying: false, audio: null, sources: new Set(), timers: [], toastTimer: null,
   // 令牌机制：文件加载 / 识别 / PDF 渲染各自带序号，只有最后一次发起的操作才允许改界面，
   // 避免"识别中切换文件""连点翻页"这类竞态把旧结果写回界面。
@@ -327,6 +331,7 @@ function clearScore() {
   state.expectedPartsSource = null;
   state.midiInfo = null;
   if (els.midiExportGroup) els.midiExportGroup.hidden = true;
+  if (els.midiGroupingRow) els.midiGroupingRow.hidden = true;
   if (els.transposeInput) els.transposeInput.value = "0";
   if (els.recognizeProgress) els.recognizeProgress.hidden = true;
   els.scoreInfo.hidden = true;
@@ -405,7 +410,10 @@ function updateRecognitionBanner() {
   } else if (state.recognitionSource === "midi") {
     banner.className = "recognition-banner is-file";
     els.recognitionSource.textContent = "MIDI 文件（自动转谱）";
-    els.recognitionDetail.textContent = `${state.notes.length} 个音符 · 由 MIDI 的按键时间自动量化成五线谱，未经过图像识别 · 谱面与演奏请校对后使用`;
+    const midiMeta = state.midiInfo?.meta;
+    const partCount = state.scoreInfo?.partNames?.length || 0;
+    const trackText = midiMeta ? `${midiMeta.pitchedTracks ?? midiMeta.tracks} 条轨道 → ${partCount} 个声部 · ` : "";
+    els.recognitionDetail.textContent = `${state.notes.length} 个音符 · ${trackText}由 MIDI 的按键时间自动量化/归并成五线谱，未经过图像识别 · 谱面与演奏请校对后使用`;
   } else if (state.recognitionSource === "jianpu") {
     banner.className = "recognition-banner is-jianpu";
     els.recognitionSource.textContent = "本机简谱识别（实验性）";
@@ -673,6 +681,7 @@ async function loadFile(file) {
   state.timeSignatureHint = "";
   state.partOctaves = new Map();
   clearScore();
+  state.midiGrouping = "auto";   // 换文件时恢复默认的「自动整理」；切换整理方式走 reloadMidiGrouping
   els.clefSelect.disabled = isMusicXml || isMidi;
   els.jianpuField.hidden = true;   // 简谱设置只在图片/PDF 页面上出现，MusicXML / MIDI 不需要
   els.fileName.textContent = file.name;
@@ -740,17 +749,20 @@ async function loadMidi(file, token) {
   const midiModule = await import("./midi.js");
   const bytes = new Uint8Array(await file.arrayBuffer());
   const title = file.name.replace(/\.[^.]+$/, "");
-  const { musicxml, meta } = midiModule.midiToMusicXml(bytes, { title });
+  const grouping = state.midiGrouping === "tracks" || state.midiGrouping === "melody" ? state.midiGrouping : "auto";
+  const { musicxml, meta } = midiModule.midiToMusicXml(bytes, { title, grouping });
   if (token !== state.loadToken) return;
   // 生成的 MusicXML 复用 MusicXML 导入的解析路径：音符/声部/休止/速度/拍号/调号完全一致。
   const xmlFile = new File([musicxml], title + ".musicxml", { type: "application/xml" });
   const scoreInfo = await readMusicXmlFile(xmlFile);
   if (token !== state.loadToken) return;
-  state.midiInfo = { meta, musicxml, title, pdfBytes: null };
+  // bytes 留着：用户切换「MIDI 声部整理」方式时要重新转一次谱，不必再读文件。
+  state.midiInfo = { meta, musicxml, title, pdfBytes: null, bytes, grouping };
   // 显示「解析回乐谱后的音符数」：MIDI 原始音符与谱面音符会因连音线合并/和弦差异略有出入，
   // 界面统一用与横幅/旋律工作台一致的数字，避免同一个文件出现两个音符数。
   const noteCount = scoreInfo.notes.length;
-  els.fileInfo.textContent = `MIDI 文件 · ${formatSize(file.size)} · ${meta.parts} 个声部 / ${noteCount} 个音符`;
+  const trackCount = meta.pitchedTracks ?? meta.tracks;
+  els.fileInfo.textContent = `MIDI 文件 · ${formatSize(file.size)} · ${trackCount} 条轨道 → ${meta.parts} 个声部 / ${noteCount} 个音符`;
   els.scoreHint.textContent = "正在把 MIDI 排版成五线谱…";
   // 1) 先排版五线谱（可选步骤：本机没有 MuseScore 就跳过，不影响下面的音符/试听）。
   let previewError = "";
@@ -790,6 +802,7 @@ async function loadMidi(file, token) {
   }
   applyScoreInfo(scoreInfo, "midi");
   if (token !== state.loadToken) return;
+  updateMidiGroupingUi(meta);
   els.midiExportGroup.hidden = false;
   els.exportStaffPdfButton.title = pdfReady
     ? "把这份 MIDI 转成的五线谱下载为 PDF"
@@ -799,12 +812,73 @@ async function loadMidi(file, token) {
   els.pageControls.hidden = !pdfReady || state.pageCount <= 1;
   const keyText = meta.key ? `，调号约 ${meta.key}` : "";
   const timeText = meta.timeSummary ? `，${meta.timeSummary}` : "";
+  const groupingText = meta.grouping && meta.grouping.consolidated
+    ? `（${trackCount} 条轨道自动整理成 ${meta.parts} 个声部）` : "";
   els.scoreHint.textContent = pdfReady
-    ? `已排版成 ${state.pageCount} 页五线谱 · ${meta.parts} 个声部 ${noteCount} 个音符 · ♩=${meta.tempo}${timeText}${keyText}。MIDI 不含力度/表情细节，谱面请校对后使用`
+    ? `已排版成 ${state.pageCount} 页五线谱 · ${meta.parts} 个声部 ${noteCount} 个音符${groupingText} · ♩=${meta.tempo}${timeText}${keyText}。MIDI 不含力度/表情细节，谱面请校对后使用`
     : `${meta.parts} 个声部 ${noteCount} 个音符已可试听、可导出 MusicXML；${previewError}，所以暂时不能显示五线谱`;
   showToast(pdfReady
-    ? `已导入 MIDI：${meta.parts} 个声部、${noteCount} 个音符，已排版成 ${state.pageCount} 页五线谱。`
-    : `已导入 MIDI：${meta.parts} 个声部、${noteCount} 个音符。${previewError ? previewError + "。" : ""}可先试听或导出 MusicXML。`);
+    ? `已导入 MIDI：${trackCount} 条轨道 → ${meta.parts} 个声部、${noteCount} 个音符，已排版成 ${state.pageCount} 页五线谱。`
+    : `已导入 MIDI：${trackCount} 条轨道 → ${meta.parts} 个声部、${noteCount} 个音符。${previewError ? previewError + "。" : ""}可先试听或导出 MusicXML。`);
+}
+/**
+ * 刷新「MIDI 声部整理」下拉框与说明文字。
+ *
+ * 为什么要把这件事摆到界面上：很多 MIDI（尤其是人声分轨/多轨工程）一条轨根本不是「一个声部」，
+ * 同一条旋律会有重复轨、八度叠唱、三度和声垫、分段补轨。如果默默按轨道数显示声部，
+ * 用户会看到「10 个声部」这种明显不对的谱面。这里如实说明「几条轨道 → 几个声部、为什么」，
+ * 并把选择权交给用户（自动整理 / 只保留主旋律 / 每条轨道一个声部）。
+ */
+function updateMidiGroupingUi(meta) {
+  if (!els.midiGroupingRow) return;
+  els.midiGroupingRow.hidden = false;
+  if (els.midiGroupingSelect) els.midiGroupingSelect.value = meta.grouping?.requested || state.midiGrouping;
+  const grouping = meta.grouping || {};
+  const groups = grouping.groups || [];
+  const trackCount = meta.pitchedTracks ?? meta.tracks;
+  const hasIndependent = groups.some((group) => group.role === "part");
+  let text;
+  if (grouping.requested === "tracks") {
+    text = `当前按「一条轨道一个声部」导入：${trackCount} 条有音符的轨道 = ${meta.parts} 个声部。`;
+  } else if (grouping.requested === "melody") {
+    text = `当前只保留主旋律：${meta.parts} 个声部（其余轨道是这条旋律的重复/八度/和声叠加，已省略）。`;
+  } else if (grouping.consolidated) {
+    text = `检测到 ${trackCount} 条轨道其实是同一条旋律的分层/叠录，已自动整理成 ${meta.parts} 个声部：`
+      + `${groups.map((group) => `${group.name}（合并 ${group.tracks.length} 条轨道）`).join("、")}。`;
+    if (!hasIndependent) {
+      text += "这份 MIDI 里没有独立的伴奏乐器轨（只有这条旋律的分层），所以谱面只有旋律与和声层。";
+    }
+  } else {
+    text = `没有检测到明显的重复/叠加轨道，按 ${meta.parts} 个独立声部导入。`;
+  }
+  els.midiGroupingHint.textContent = text;
+}
+/** 用户切换「MIDI 声部整理」方式：重新生成 MusicXML、重新排版（不重新选文件）。 */
+async function reloadMidiGrouping(mode) {
+  if (!state.midiInfo || !state.file) return;
+  const file = state.file;
+  state.midiGrouping = mode === "tracks" || mode === "melody" ? mode : "auto";
+  stopPlayback();
+  await destroyPdf();
+  disposePartBuses();
+  const token = ++state.loadToken;
+  clearScore();
+  state.pageNumber = 1;
+  state.pageCount = 1;
+  els.fileName.textContent = file.name;
+  els.recognizeButton.disabled = true;
+  els.recognizeLabel.textContent = "正在载入…";
+  els.pageControls.hidden = true;
+  els.scoreHint.textContent = "正在按新的声部整理方式重新排版…";
+  try {
+    await loadMidi(file, token);
+  } catch (error) {
+    if (token !== state.loadToken) return;
+    console.error(error);
+    els.recognizeLabel.textContent = "已导入 MIDI";
+    els.scoreHint.textContent = "重新整理失败";
+    showToast(error.message || "按新的声部整理方式重新排版失败。");
+  }
 }
 /** 导出文件名：优先用 MIDI 文件名（去掉后缀），清掉文件名非法字符。 */
 function midiExportBaseName() {
@@ -7451,6 +7525,11 @@ els.midiButton.addEventListener("click", downloadMidi);
 if (els.audioButton) els.audioButton.addEventListener("click", exportAudio);
 if (els.exportMusicXmlButton) els.exportMusicXmlButton.addEventListener("click", exportMidiMusicXml);
 if (els.exportStaffPdfButton) els.exportStaffPdfButton.addEventListener("click", exportMidiStaffPdf);
+if (els.midiGroupingSelect) {
+  els.midiGroupingSelect.addEventListener("change", () => {
+    reloadMidiGrouping(els.midiGroupingSelect.value);
+  });
+}
 els.playButton.addEventListener("click", playMelody);
 els.stopButton.addEventListener("click", stopPlayback);
 els.canvasWrap.addEventListener("click", focusNearestScoreNote);

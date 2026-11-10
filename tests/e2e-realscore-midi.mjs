@@ -93,6 +93,12 @@ try {
       noteRows: document.querySelectorAll("#noteList .note-row").length,
       exportVisible: !document.querySelector("#midiExportGroup").hidden,
       midiInfo: Boolean(app.midiInfo),
+      groupingVisible: !document.querySelector("#midiGroupingRow").hidden,
+      groupingValue: document.querySelector("#midiGroupingSelect")?.value || "",
+      groupingHint: document.querySelector("#midiGroupingHint")?.textContent || "",
+      groupingGroups: (app.midiInfo?.meta?.grouping?.groups || []).map((group) => ({
+        name: group.name, role: group.role, tracks: group.tracks.length, notes: group.notes,
+      })),
     };
   });
   console.log("MIDI 导入耗时：", elapsed.toFixed(1), "秒");
@@ -116,19 +122,28 @@ try {
   assert.match(state.banner, /MIDI/, "横幅应标明来源是 MIDI 文件");
   assert.match(state.fileInfo, /MIDI 文件/, "文件信息应标明 MIDI");
 
-  // 2) 数据：与 MIDI 文件本身一致（见 tests/midi.test.mjs 的解析口径）
-  assert.equal(state.partNames.length, 10, "应有 10 个有音符的声部");
-  assert.ok(state.notes >= 1700 && state.notes <= 1800, `音符数应在 1700–1800 之间，实际 ${state.notes}`);
+  // 2) 数据：10 条 MIDI 轨道（全是同一条洛天依人声的分层/叠录）应被自动整理成 2 个声部
+  assert.equal(state.groupingVisible, true, "MIDI 导入后应显示「声部整理」下拉");
+  assert.equal(state.groupingValue, "auto", "默认使用自动整理");
+  assert.ok(state.groupingHint.includes("自动整理") || state.groupingHint.includes("同一条旋律"),
+    `声部整理说明应讲清原因，实际：${state.groupingHint}`);
+  assert.equal(state.partNames.length, 2, `应整理成 2 个声部（主旋律 + 和声/叠加层），实际 ${state.partNames.join("、")}`);
+  assert.deepEqual(state.partNames, ["和声 / 叠加层", "主旋律"].sort(), "声部名应为「主旋律」「和声 / 叠加层」");
+  assert.equal(state.groupingGroups.length, 2);
+  assert.equal(state.groupingGroups[0].tracks, 6, "主旋律合并了 6 条轨道（主唱 + 双轨加宽 + 分段补轨 + 碎片轨）");
+  assert.equal(state.groupingGroups[1].tracks, 4, "和声层合并了 4 条叠加轨道");
+  assert.ok(state.notes >= 1400 && state.notes <= 1500, `去重后的音符数应在 1400–1500 之间，实际 ${state.notes}`);
   assert.equal(state.measureCount, 80, "应有 80 小节");
   assert.equal(state.totalBeats, 320, "全曲 320 拍");
   assert.equal(state.timeSummary, "4/4", "拍号应为 4/4");
   assert.equal(state.bpm, 148, "速度应从 MIDI 的 tempo 事件读出 ♩=148");
   assert.match(state.keySummary || "", /minor|major|[A-G]/, "应估出调号并展示");
+  assert.match(state.fileInfo, /10 条轨道 → 2 个声部/, "文件信息应写明轨迹归并结果");
 
   // 3) 乐谱预览：MuseScore 排版的五线谱 PDF
   assert.ok(state.pdfLoaded, "五线谱 PDF 应已载入预览");
   assert.ok(state.canvasVisible, "预览画布应可见");
-  assert.ok(state.pageCount > 1, `应排版成多页五线谱，实际 ${state.pageCount} 页`);
+  assert.ok(state.pageCount > 1 && state.pageCount <= 10, `2 个声部应排版成不多于 10 页，实际 ${state.pageCount} 页`);
   assert.match(state.pageLabel, new RegExp(`^1 / ${state.pageCount}$`), "页码应显示 1 / 总页数");
   assert.ok(state.pageControlsVisible, "多页时应显示翻页控件");
   assert.ok(state.canvasSize.ink > 20, `预览画布应有内容，实际取到墨点 ${state.canvasSize.ink}`);
@@ -140,7 +155,7 @@ try {
     return { playDisabled: document.querySelector("#playButton").disabled, notes: app.notes.length };
   });
   assert.equal(canPlay.playDisabled, false, "有音符时播放按钮应可用");
-  assert.ok(canPlay.notes >= 1700, "旋律工作台应拿到同一份音符");
+  assert.ok(canPlay.notes >= 1400, "旋律工作台应拿到同一份音符");
   await page.click("#playButton");
   await page.waitForFunction(() => window.__pujian.state.isPlaying === true, null, { timeout: 30000, polling: 200 });
   const playing = await page.evaluate(() => ({
@@ -159,7 +174,7 @@ try {
   await xmlDownload.saveAs(xmlPath);
   const xmlBytes = readFileSync(xmlPath);
   console.log("导出 MusicXML：", xmlBytes.length, "字节，文件名：", xmlDownload.suggestedFilename());
-  assert.ok(xmlBytes.length > 50000, `导出的 MusicXML 应有内容，实际 ${xmlBytes.length} 字节`);
+  assert.ok(xmlBytes.length > 20000, `导出的 MusicXML 应有内容，实际 ${xmlBytes.length} 字节`);
   assert.match(xmlBytes.toString("utf8", 0, 200), /score-partwise/, "导出内容应是 MusicXML");
   assert.match(xmlDownload.suggestedFilename(), /\.musicxml$/, "导出文件名应以 .musicxml 结尾");
 
@@ -170,11 +185,37 @@ try {
   await pdfDownload.saveAs(pdfPath);
   const pdfBytes = readFileSync(pdfPath);
   console.log("导出五线谱 PDF：", pdfBytes.length, "字节，文件名：", pdfDownload.suggestedFilename());
-  assert.ok(pdfBytes.length > 100000, `导出的五线谱 PDF 应有内容，实际 ${pdfBytes.length} 字节`);
+  assert.ok(pdfBytes.length > 50000, `导出的五线谱 PDF 应有内容，实际 ${pdfBytes.length} 字节`);
   assert.equal(pdfBytes.subarray(0, 5).toString("latin1"), "%PDF-", "导出内容应是 PDF");
   assert.match(pdfDownload.suggestedFilename(), /\.pdf$/, "导出文件名应以 .pdf 结尾");
 
-  // 6) 翻页：乐谱预览能正常翻到第 2 页（等渲染完成后再读页码，页码是渲染收尾时才更新的）
+
+  // 6) 声部整理方式切换：只保留主旋律（1 个声部）→ 每条轨道一个声部（10 个）→ 再切回自动（2 个）
+  async function switchGrouping(value, expectedParts) {
+    await page.selectOption("#midiGroupingSelect", value);
+    await page.waitForFunction(
+      (parts) => (document.querySelector("#scoreHint")?.textContent || "").includes("已排版成")
+        && (window.__pujian.state.scoreInfo?.partNames?.length || 0) === parts,
+      expectedParts, { timeout: 180000, polling: 300 },
+    );
+    return page.evaluate(() => ({
+      parts: window.__pujian.state.scoreInfo.partNames.length,
+      names: window.__pujian.state.scoreInfo.partNames,
+      pages: window.__pujian.state.pageCount,
+      value: document.querySelector("#midiGroupingSelect")?.value,
+    }));
+  }
+  const melodyMode = await switchGrouping("melody", 1);
+  console.log("只保留主旋律：", JSON.stringify(melodyMode));
+  assert.equal(melodyMode.parts, 1, "只保留主旋律时应只有 1 个声部");
+  assert.deepEqual(melodyMode.names, ["主旋律"]);
+  const tracksMode = await switchGrouping("tracks", 10);
+  console.log("每条轨道一个声部：", JSON.stringify(tracksMode));
+  assert.equal(tracksMode.parts, 10, "每条轨道一个声部时应为 10 个声部");
+  const autoMode = await switchGrouping("auto", 2);
+  console.log("切回自动整理：", JSON.stringify(autoMode));
+  assert.deepEqual(autoMode.names.slice().sort(), ["和声 / 叠加层", "主旋律"].sort());
+  // 7) 翻页：乐谱预览能正常翻到第 2 页（等渲染完成后再读页码，页码是渲染收尾时才更新的）
   await page.click("#nextPage");
   await page.waitForFunction(
     () => (document.querySelector("#pageLabel")?.textContent || "").startsWith("2 /"),

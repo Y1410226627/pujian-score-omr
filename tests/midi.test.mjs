@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DOMParser } from "@xmldom/xmldom";
 
-import { parseMidiFile, midiToPitchParts, detectKey, keyDisplayName, midiToMusicXml } from "../midi.js";
+import { parseMidiFile, midiToPitchParts, detectKey, keyDisplayName, midiToMusicXml, trackRelation } from "../midi.js";
 
 globalThis.DOMParser = DOMParser;
 const { parseMusicXmlText } = await import("../musicxml.js");
@@ -252,4 +252,76 @@ test("多个音轨按轨道名生成声部，重名自动加序号", () => {
   assert.equal(parsed.meta.parts, 3);
   const names = parseMusicXmlText(parsed.musicxml).partNames;
   assert.deepEqual(names, ["同名声部", "同名声部 2", "同名声部 3"]);
+});
+
+// —— 轨道归并（2026-11-10：MIDI 轨道 → 声部） ——
+
+test("trackRelation：找出两条轨之间「同时开始 + 固定移调」的关系", () => {
+  const base = Array.from({ length: 16 }, (_, index) => ({
+    midi: 60 + index, startTick: index * 480, endTick: index * 480 + 480,
+  }));
+  const octave = base.map((note) => ({ ...note, midi: note.midi + 12 }));
+  const relation = trackRelation(octave, base, 60);
+  // shift 是「b 相对 a」的移调：a=高八度轨，b=原轨 → -12
+  assert.equal(relation.shift, -12);
+  assert.equal(relation.ratio, 1);
+  assert.equal(trackRelation(base, base, 60).shift, 0);
+});
+
+test("自动整理：重复/八度/三度和声轨合并成「主旋律 + 和声/叠加层」", () => {
+  const scale = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24, 26];
+  const makeTrack = (name, shift) => trackChunk([
+    nameEvent(0, name),
+    tempoEvent(0, 120),
+    timeEvent(0, 4, 4),
+    ...scale.flatMap((pitch) => {
+      const midi = 60 + pitch + shift;
+      return [onEvent(0, midi), offEvent(480, midi)];
+    }),
+  ]);
+  const bytes = midiFile({
+    tracks: [makeTrack("主唱", 0), makeTrack("主唱重复", 0), makeTrack("高八度", 12), makeTrack("三度和声", 4)],
+  });
+  const auto = midiToMusicXml(bytes, { grouping: "auto" });
+  assert.equal(auto.meta.parts, 2);
+  assert.equal(auto.meta.grouping.consolidated, true);
+  assert.deepEqual(auto.meta.grouping.groups.map((group) => group.name), ["主旋律", "和声 / 叠加层"]);
+  assert.equal(auto.meta.grouping.groups[0].tracks.length, 2, "主唱 + 重复轨");
+  assert.equal(auto.meta.grouping.groups[1].tracks.length, 2, "八度 + 三度和声轨");
+  const parsed = parseMusicXmlText(auto.musicxml);
+  assert.deepEqual(parsed.partNames, ["主旋律", "和声 / 叠加层"]);
+  assert.equal(parsed.notes.filter((note) => note.partName === "主旋律").length, 16, "重复轨已按音高+起拍去重");
+  const harmony = parsed.notes.filter((note) => note.partName === "和声 / 叠加层");
+  assert.equal(harmony.length, 32);
+  // 同时开始、同时结束的两个和声音 = 一个和弦（同一 eventId）
+  const firstBeat = harmony.filter((note) => Math.abs(note.startBeat) < 1e-6);
+  assert.equal(firstBeat.length, 2);
+  assert.equal(firstBeat[0].eventId, firstBeat[1].eventId);
+  // 其它模式
+  const melodyOnly = midiToMusicXml(bytes, { grouping: "melody" });
+  assert.equal(melodyOnly.meta.parts, 1);
+  assert.deepEqual(parseMusicXmlText(melodyOnly.musicxml).partNames, ["主旋律"]);
+  const tracksMode = midiToMusicXml(bytes, { grouping: "tracks" });
+  assert.equal(tracksMode.meta.parts, 4);
+  assert.deepEqual(parseMusicXmlText(tracksMode.musicxml).partNames, ["主唱", "主唱重复", "高八度", "三度和声"]);
+});
+
+test("自动整理：真正独立的声部不会被硬合并（退回一条轨道一个声部）", () => {
+  // 三条轨：起拍错开、音域不同、没有固定移调关系 → 应该各自保留
+  const lead = trackChunk([
+    nameEvent(0, "旋律"),
+    ...Array.from({ length: 16 }, (_, index) => [onEvent(0, 72 + (index % 5)), offEvent(480, 72 + (index % 5))]).flat(),
+  ]);
+  const bass = trackChunk([
+    nameEvent(0, "低音"),
+    ...Array.from({ length: 16 }, (_, index) => [onEvent(240, 40 + (index % 4)), offEvent(240, 40 + (index % 4))]).flat(),
+  ]);
+  const high = trackChunk([
+    nameEvent(0, "高音"),
+    ...Array.from({ length: 16 }, (_, index) => [onEvent(120, 84 + (index % 3)), offEvent(360, 84 + (index % 3))]).flat(),
+  ]);
+  const auto = midiToMusicXml(midiFile({ tracks: [lead, bass, high] }), { grouping: "auto" });
+  assert.equal(auto.meta.parts, 3);
+  assert.equal(auto.meta.grouping.consolidated, false);
+  assert.deepEqual(parseMusicXmlText(auto.musicxml).partNames, ["旋律", "低音", "高音"]);
 });

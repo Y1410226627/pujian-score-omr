@@ -463,23 +463,432 @@ function clefForNotes(notes) {
   return median < 59 ? { sign: "F", line: 4 } : { sign: "G", line: 2 };
 }
 
+// —— 轨道关系分析：把「同一条旋律的重复 / 八度叠加 / 和声垫 / 分段补轨」找出来 ——
+//
+// 为什么需要：真实 MIDI 经常把同一条旋律录成多条轨——双轨加宽（L/R）、八度叠唱、
+// 三度和声垫、分段补录、零散效果轨。如果按「一条轨 = 一个声部」转谱，
+// 用户会看到「10 个声部」这种明显不合理的五线谱（《人是猫.mid》就是这种情况）。
+// 所以转谱前先分析轨道之间的关系，再决定怎么归并：
+//   · 同度重复（固定移调 0）        → 并进主旋律，按音高 + 起拍去重
+//   · 八度 / 三度平行叠加            → 归到「和声层」一个声部（保留全部音，和弦化）
+//   · 和主旋律几乎不同时段的「分段轨」→ 并进主旋律（补全主旋律没唱的段落）
+//   · 只有零星几个音的「碎片轨」      → 并进主旋律
+//   · 真正独立的内容（独立乐器/声部）  → 各自保留为单独声部
+const RELATION_SHIFT_LIMIT = 24;          // 只考虑 ±24 半音（两个八度）内的固定移调关系
+const RELATION_TIME_TOLERANCE_BEATS = 0.125;  // 「同时开始」的容差（拍）
+const RELATION_MIN_RATIO = 0.45;          // 一条轨至少 45% 的音能被另一条轨解释，才算有关系
+const UNISON_MIN_RATIO = 0.5;             // 同度重复的判定
+const RHYTHM_SAME_GROUP = 0.75;           // 起拍 Jaccard 达到这个值，视为同一节奏（块状和声垫）
+const SECTION_OVERLAP_MAX = 0.3;          // 与主旋律活动时段重叠低于这个比例 → 视为分段补轨
+const TINY_TRACK_NOTES = 12;              // 少于这么多音 → 视为零散/效果轨
+const MAX_ANALYZED_TRACKS = 16;           // 轨道再多就不做自动归并（避免很长的两两分析）
+
+/**
+ * 一条轨的音有多少能被另一条轨「同时开始 + 固定移调」解释。
+ * @returns {{shift:number, ratio:number, matches:number}} shift 为 b 相对 a 的移调
+ */
+export function trackRelation(aNotes, bNotes, tolerance = 60) {
+  if (!aNotes.length || !bNotes.length) return { shift: 0, ratio: 0, matches: 0 };
+  const buckets = new Map();
+  for (const note of bNotes) {
+    const key = Math.round(note.startTick / 20);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(note);
+  }
+  const counts = new Map();
+  for (const note of aNotes) {
+    const center = Math.round(note.startTick / 20);
+    for (let offset = -4; offset <= 4; offset += 1) {
+      const list = buckets.get(center + offset);
+      if (!list) continue;
+      for (const other of list) {
+        if (Math.abs(other.startTick - note.startTick) > tolerance) continue;
+        const shift = other.midi - note.midi;
+        if (shift < -RELATION_SHIFT_LIMIT || shift > RELATION_SHIFT_LIMIT) continue;
+        counts.set(shift, (counts.get(shift) || 0) + 1);
+      }
+    }
+  }
+  let bestShift = 0, bestCount = 0;
+  for (const [shift, count] of counts) {
+    if (count > bestCount) { bestCount = count; bestShift = shift; }
+  }
+  return { shift: bestShift, ratio: bestCount / aNotes.length, matches: bestCount };
+}
+
+/** 起拍集合（按网格取整）：用来判断两条轨是不是同一节奏型（块状和声/齐奏）。 */
+function onsetSet(notes, grid) {
+  const set = new Set();
+  for (const note of notes) set.add(Math.round(note.startTick / grid));
+  return set;
+}
+
+function setJaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let common = 0;
+  for (const value of a) if (b.has(value)) common += 1;
+  return common / (a.size + b.size - common);
+}
+
+/** 一条轨「有音的小节窗口」：和主旋律的窗口重叠比例低 → 它是分段补轨，不是独立声部。 */
+function activeWindows(notes, division) {
+  const set = new Set();
+  const window = Math.max(1, division * 4);
+  for (const note of notes) set.add(Math.floor(note.startTick / window));
+  return set;
+}
+
+function windowOverlapRatio(notes, referenceNotes, division) {
+  const own = activeWindows(notes, division);
+  if (!own.size) return 0;
+  const reference = activeWindows(referenceNotes, division);
+  let common = 0;
+  for (const value of own) if (reference.has(value)) common += 1;
+  return common / own.size;
+}
+
+/**
+ * 分析 MIDI 轨道 → 建议的「声部」分组。
+ *
+ * @param {Array<{index:number, name:string, notes:Array}>} sourceTracks
+ * @param {number} division MIDI 时间分辨率
+ * @returns {{appliedMode:"auto"|"tracks", groups:Array, stats:object}}
+ */
+export function analyzeMidiTracks(sourceTracks, division) {
+  const tracks = sourceTracks.filter((item) => item.notes.length);
+  const allTracks = () => tracks.map((item) => ({
+    name: item.name, role: "part", sourceIndexes: [item.index], notes: item.notes.slice(),
+  }));
+  if (tracks.length <= 1 || tracks.length > MAX_ANALYZED_TRACKS) {
+    return { appliedMode: "tracks", groups: allTracks(), stats: { analyzedTracks: tracks.length } };
+  }
+  // 只有几个音的「碎片轨」不参与主旋律/和声判定（一个音就凑出一个声部没有意义）：
+  // 它们最后会并进主旋律，或者在没有任何可归并内容时原样保留。
+  const substantial = [];
+  const fragments = [];
+  tracks.forEach((item, index) => {
+    (item.notes.length >= TINY_TRACK_NOTES ? substantial : fragments).push(index);
+  });
+  if (substantial.length < 2) {
+    return {
+      appliedMode: "tracks",
+      groups: allTracks(),
+      stats: { analyzedTracks: tracks.length, reason: "too-few-substantial-tracks" },
+    };
+  }
+  const tolerance = Math.max(6, Math.round(division * RELATION_TIME_TOLERANCE_BEATS));
+  const relation = new Map();   // "i:j" → {shift, ratio}（i 的音能被 j 解释多少）
+  for (const i of substantial) {
+    for (const j of substantial) {
+      if (i === j) continue;
+      relation.set(`${i}:${j}`, trackRelation(tracks[i].notes, tracks[j].notes, tolerance));
+    }
+  }
+  // 1) 找「主旋律」：被最多轨道解释的那条；同度关系加权，平手时取音多的。
+  let leadIndex = substantial[0], leadScore = -1;
+  for (const i of substantial) {
+    let score = 0;
+    for (const j of substantial) {
+      if (i === j) continue;
+      const rel = relation.get(`${j}:${i}`);
+      if (rel.ratio < RELATION_MIN_RATIO) continue;
+      score += rel.ratio * (rel.shift === 0 ? 2 : 1);
+    }
+    if (score > leadScore + 1e-9
+      || (Math.abs(score - leadScore) <= 1e-9 && tracks[i].notes.length > tracks[leadIndex].notes.length)) {
+      leadScore = score;
+      leadIndex = i;
+    }
+  }
+  if (leadScore < 0.8) {
+    return { appliedMode: "tracks", groups: allTracks(), stats: { analyzedTracks: tracks.length, reason: "no-relations" } };
+  }
+  const rhythmGrid = Math.max(1, Math.round(division / QUANTIZE_STEPS_PER_BEAT));
+  const onsets = new Map();
+  for (const i of substantial) onsets.set(i, onsetSet(tracks[i].notes, rhythmGrid));
+  const used = new Set([leadIndex]);
+  const melodyIndexes = [leadIndex];
+  // 2) 同度重复（L/R 双轨加宽、同一条旋律录了两三遍）→ 并进主旋律，按音高+起拍去重
+  for (const i of substantial) {
+    if (used.has(i)) continue;
+    const rel = relation.get(`${i}:${leadIndex}`);
+    if (rel.shift === 0 && rel.ratio >= UNISON_MIN_RATIO) {
+      melodyIndexes.push(i);
+      used.add(i);
+    }
+  }
+  // 3) 与主旋律有固定移调关系（八度/三度…）、节奏也接近的轨 → 「和声/叠加层」种子，再按同节奏扩张
+  const stack = new Set();
+  for (const i of substantial) {
+    if (used.has(i)) continue;
+    const rel = relation.get(`${i}:${leadIndex}`);
+    if (rel.shift !== 0 && rel.ratio >= RELATION_MIN_RATIO
+      && setJaccard(onsets.get(i), onsets.get(leadIndex)) >= 0.3) {
+      stack.add(i);
+    }
+  }
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const i of substantial) {
+      if (used.has(i) || stack.has(i)) continue;
+      for (const member of stack) {
+        if (setJaccard(onsets.get(i), onsets.get(member)) >= RHYTHM_SAME_GROUP) {
+          stack.add(i);
+          expanded = true;
+          break;
+        }
+      }
+    }
+  }
+  const harmonyIndexes = [...stack].sort((a, b) => a - b);
+  for (const index of harmonyIndexes) used.add(index);
+  // 4) 剩下的实义轨：和主旋律几乎不同时段的分段补轨并进主旋律，其余各自保留为独立声部
+  const ownParts = [];
+  for (const i of substantial) {
+    if (used.has(i)) continue;
+    if (windowOverlapRatio(tracks[i].notes, tracks[leadIndex].notes, division) < SECTION_OVERLAP_MAX) {
+      melodyIndexes.push(i);
+      used.add(i);
+    } else {
+      ownParts.push(i);
+    }
+  }
+  melodyIndexes.push(...fragments);   // 碎片轨并进主旋律（音高+起拍去重时仍在）
+  const partCount = 1 + (harmonyIndexes.length ? 1 : 0) + ownParts.length;
+  if (partCount >= tracks.length) {
+    return {
+      appliedMode: "tracks",
+      groups: allTracks(),
+      stats: { analyzedTracks: tracks.length, reason: "nothing-to-merge" },
+    };
+  }
+  const mergeNotes = (indexes, dedupe) => {
+    const pooled = [];
+    for (const index of indexes) for (const note of tracks[index].notes) pooled.push({ ...note });
+    return dedupe ? mergeDuplicateNotes(pooled, tolerance) : pooled;
+  };
+  const groups = [];
+  groups.push({
+    name: ownParts.length || harmonyIndexes.length ? "主旋律" : tracks[leadIndex].name,
+    role: "melody",
+    sourceIndexes: melodyIndexes.map((index) => tracks[index].index),
+    notes: mergeNotes(melodyIndexes, true),
+  });
+  if (harmonyIndexes.length) {
+    groups.push({
+      name: "和声 / 叠加层",
+      role: "harmony",
+      sourceIndexes: harmonyIndexes.map((index) => tracks[index].index),
+      notes: mergeNotes(harmonyIndexes, false),
+    });
+  }
+  const singleNames = uniquePartNames(ownParts.map((index) => tracks[index].name));
+  ownParts.forEach((index, order) => {
+    groups.push({
+      name: singleNames[order],
+      role: "part",
+      sourceIndexes: [tracks[index].index],
+      notes: tracks[index].notes.slice(),
+    });
+  });
+  return {
+    appliedMode: "auto",
+    groups,
+    stats: {
+      analyzedTracks: tracks.length,
+      leadTrack: tracks[leadIndex].index,
+      leadName: tracks[leadIndex].name,
+      melodyTracks: melodyIndexes.length,
+      harmonyTracks: harmonyIndexes.length,
+      separateTracks: ownParts.length,
+      fragmentTracks: fragments.length,
+    },
+  };
+}
+
+/** 同度重复去重：同音高、起拍差在容差内的音合并成一个（时值取最长）。 */
+function mergeDuplicateNotes(notes, tolerance) {
+  const sorted = notes.slice().sort((left, right) => left.midi - right.midi
+    || left.startTick - right.startTick || right.endTick - left.endTick);
+  const kept = [];
+  const lastByMidi = new Map();
+  for (const note of sorted) {
+    const previous = lastByMidi.get(note.midi);
+    if (previous && Math.abs(note.startTick - previous.startTick) <= tolerance) {
+      previous.startTick = Math.min(previous.startTick, note.startTick);
+      previous.endTick = Math.max(previous.endTick, note.endTick);
+      continue;
+    }
+    const copy = { midi: note.midi, startTick: note.startTick, endTick: note.endTick };
+    kept.push(copy);
+    lastByMidi.set(note.midi, copy);
+  }
+  return kept.sort((left, right) => left.startTick - right.startTick || left.midi - right.midi);
+}
+
+/**
+ * 把「同时开始、同时结束」的音合并成和弦单元（块状和声/柱式和弦 → 一个音符 + `<chord/>`）。
+ * 先合并再分配声部线，这样 4 条平行和声不会占满 4 条声部线。
+ */
+function groupChordUnits(events) {
+  const sorted = events.slice().sort((left, right) => left.startTick - right.startTick
+    || left.endTick - right.endTick || left.midi - right.midi);
+  const units = [];
+  let index = 0;
+  while (index < sorted.length) {
+    const first = sorted[index];
+    const unit = { startTick: first.startTick, endTick: first.endTick, members: [first] };
+    let next = index + 1;
+    while (next < sorted.length && sorted[next].startTick === first.startTick && sorted[next].endTick === first.endTick) {
+      unit.members.push(sorted[next]);
+      next += 1;
+    }
+    units.push(unit);
+    index = next;
+  }
+  return units;
+}
+
+/** 把一条轨的音按小节切开（跨小节 → 拆段并加连音线）。 */
+function splitNotesIntoMeasures(notes, measures, measureIndexOfTick) {
+  const byMeasure = new Map();
+  for (const note of notes) {
+    let startTick = note.startTick;
+    const endTick = note.endTick;
+    let guard = 0;
+    while (startTick < endTick && guard < 128) {
+      guard += 1;
+      const measureIndex = measureIndexOfTick(startTick);
+      const measure = measures[measureIndex];
+      const barEnd = measure.startTick + measure.lengthTicks;
+      const segmentEnd = Math.min(endTick, barEnd);
+      if (!byMeasure.has(measureIndex)) byMeasure.set(measureIndex, []);
+      byMeasure.get(measureIndex).push({
+        midi: note.midi,
+        startTick,
+        endTick: segmentEnd,
+        tieStart: segmentEnd < endTick,
+        tieStop: startTick > note.startTick,
+      });
+      startTick = segmentEnd;
+    }
+  }
+  return byMeasure;
+}
+
+/** 输出一个声部的 MusicXML 行。 */
+function renderPartLines(part, partIndex, context, lines) {
+  const { measures, measureIndexOfTick, timeChanges, tempoMarks, key, division, grid } = context;
+  const clef = clefForNotes(part.notes);
+  lines.push(`  <part id="P${partIndex + 1}">`);
+  const byMeasure = splitNotesIntoMeasures(part.notes, measures, measureIndexOfTick);
+  let noteCount = 0;
+  for (let measureIndex = 0; measureIndex < measures.length; measureIndex += 1) {
+    const measure = measures[measureIndex];
+    lines.push(`    <measure number="${measureIndex + 1}">`);
+    if (measureIndex === 0) {
+      lines.push(attributesXml({ beats: measure.beats, beatType: measure.beatType, clef, includeDivisions: true, key }));
+    } else {
+      const change = timeChanges.get(measureIndex);
+      if (change) lines.push(attributesXml({ beats: change.beats, beatType: change.beatType, includeDivisions: false, key }));
+    }
+    for (const tempo of tempoMarks.filter((item) => item.measureIndex === measureIndex)) {
+      lines.push(directionXml(tempo.bpm));
+    }
+    const events = byMeasure.get(measureIndex) || [];
+    // 先合并成和弦单元，再把单元分配到「声部线」（同一线内不能时间重叠）
+    const units = groupChordUnits(events);
+    const voiceEnds = [];
+    const voices = [];
+    for (const unit of units) {
+      let voiceIndex = -1;
+      for (let index = 0; index < voiceEnds.length; index += 1) {
+        if (voiceEnds[index] <= unit.startTick + 1e-6) { voiceIndex = index; break; }
+      }
+      if (voiceIndex < 0) {
+        if (voiceEnds.length < MAX_VOICES) voiceIndex = voiceEnds.length;
+        else {
+          // 声部线用满了：裁到最早结束的那条线之后（宁可少一个叠音，也不让时间轴倒退）
+          voiceIndex = voiceEnds.indexOf(Math.min(...voiceEnds));
+          unit.startTick = Math.max(unit.startTick, voiceEnds[voiceIndex]);
+          if (unit.endTick - unit.startTick < grid) continue;
+        }
+      }
+      voiceEnds[voiceIndex] = unit.endTick;
+      if (!voices[voiceIndex]) voices[voiceIndex] = [];
+      voices[voiceIndex].push(unit);
+    }
+    const activeVoiceCount = voices.filter(Boolean).length;
+    const measureDuration = Math.round(measure.quarterBeats * OUTPUT_DIVISIONS);
+    for (let voiceIndex = 0; voiceIndex < activeVoiceCount; voiceIndex += 1) {
+      const voiceUnits = voices[voiceIndex] || [];
+      if (voiceIndex > 0) lines.push(`      <backup><duration>${measureDuration}</duration></backup>`);
+      const voiceNumber = voiceIndex + 1;
+      let cursorTick = measure.startTick;
+      for (const unit of voiceUnits) {
+        if (unit.startTick > cursorTick) {
+          lines.push(restXml((unit.startTick - cursorTick) / division, voiceNumber, key));
+          cursorTick = unit.startTick;
+        }
+        const pieces = splitBeats((unit.endTick - unit.startTick) / division, (measure.lengthTicks / division));
+        let pieceIndex = 0;
+        for (const pieceBeats of pieces) {
+          const isFirst = pieceIndex === 0;
+          const isLast = pieceIndex === pieces.length - 1;
+          for (let memberIndex = 0; memberIndex < unit.members.length; memberIndex += 1) {
+            const member = unit.members[memberIndex];
+            lines.push(noteXml({
+              midi: member.midi,
+              beats: pieceBeats,
+              voice: voiceNumber,
+              chord: memberIndex > 0,
+              tieStop: isFirst ? member.tieStop : true,
+              tieStart: isLast ? member.tieStart : true,
+              key,
+            }));
+          }
+          pieceIndex += 1;
+        }
+        cursorTick = Math.max(cursorTick, unit.endTick);
+        noteCount += unit.members.length;
+      }
+      if (cursorTick < measure.startTick + measure.lengthTicks) {
+        lines.push(restXml((measure.startTick + measure.lengthTicks - cursorTick) / division, voiceNumber, key));
+      }
+    }
+    if (!activeVoiceCount) {
+      lines.push(noteXml({ beats: measure.quarterBeats, voice: 1, rest: true, key }));
+    }
+    lines.push("    </measure>");
+  }
+  lines.push("  </part>");
+  return noteCount;
+}
+
 /**
  * MIDI → MusicXML（五线谱）。
  *
+ * 默认 `grouping: "auto"`：先分析轨道关系，把同一条旋律的重复/八度/和声叠加轨归并成
+ * 「主旋律 + 和声层」；真正独立的内容才各自成为一个声部。其它可选值：
+ *   · `"tracks"`：一条 MIDI 轨道 = 一个声部（传统做法，调试/特殊需求时用）
+ *   · `"melody"`：只保留主旋律一个声部
+ *
  * @param {Uint8Array|ArrayBuffer} input MIDI 文件字节
- * @param {{title?: string, maxParts?: number}} [options]
+ * @param {{title?: string, maxParts?: number, grouping?: "auto"|"tracks"|"melody"}} [options]
  * @returns {{musicxml: string, meta: object}}
  */
 export function midiToMusicXml(input, options = {}) {
   const midi = parseMidiFile(input);
   const title = String(options.title || "").trim() || "MIDI 导入的乐谱";
+  const grouping = options.grouping === "tracks" || options.grouping === "melody" ? options.grouping : "auto";
   const division = midi.division;
   const grid = Math.max(1, Math.round(division / QUANTIZE_STEPS_PER_BEAT));
   const quantize = (tick) => Math.round(tick / grid) * grid;
   const timeSignatures = midi.timeSignatures;
   const firstTime = timeSignatures[0] || { beats: 4, beatType: 4 };
-  // 收集「有音符的轨道」→ 每个轨道一个声部；打击乐通道（10）的音符跳过。
-  const partTracks = [];
+  // 收集「有音符的轨道」；打击乐通道（10）的音符跳过。
+  const sourceTracks = [];
   let percussionNotes = 0;
   let maxNoteEndTick = 0;
   for (const track of midi.tracks) {
@@ -495,13 +904,30 @@ export function midiToMusicXml(input, options = {}) {
       maxNoteEndTick = Math.max(maxNoteEndTick, endTick);
       return { midi: note.midi, startTick, endTick };
     }).sort((left, right) => left.startTick - right.startTick || left.midi - right.midi);
-    partTracks.push({ track, notes });
+    sourceTracks.push({ index: sourceTracks.length, name: track.name, notes });
   }
-  if (!partTracks.length) throw new Error("MIDI 文件里没有可记谱的音符（可能只有打击乐或控制事件）。");
-  if (options.maxParts && partTracks.length > options.maxParts) partTracks.length = options.maxParts;
-  const partNames = uniquePartNames(partTracks.map((item) => item.track.name));
+  if (!sourceTracks.length) throw new Error("MIDI 文件里没有可记谱的音符（可能只有打击乐或控制事件）。");
+  // 按需截断（maxParts 只限制「独立声部」的数量，归并后的主旋律/和声层不受影响）
+  let analysis = analyzeMidiTracks(sourceTracks, division);
+  let groups;
+  if (grouping === "tracks") {
+    const names = uniquePartNames(sourceTracks.map((item) => item.name));
+    groups = sourceTracks.map((item, order) => ({
+      name: names[order], role: "part", sourceIndexes: [item.index], notes: item.notes,
+    }));
+  } else if (analysis.appliedMode === "tracks") {
+    const names = uniquePartNames(sourceTracks.map((item) => item.name));
+    groups = sourceTracks.map((item, order) => ({
+      name: names[order], role: "part", sourceIndexes: [item.index], notes: item.notes,
+    }));
+  } else if (grouping === "melody") {
+    groups = analysis.groups.filter((group) => group.role === "melody");
+  } else {
+    groups = analysis.groups.slice();
+  }
+  if (options.maxParts && groups.length > options.maxParts) groups = groups.slice(0, options.maxParts);
   // 估计整曲调号：让谱面少满屏临时记号（调号猜错不影响音高，用户可在制谱软件里改调号）
-  const key = detectKey(partTracks.flatMap((item) => item.notes));
+  const key = detectKey(sourceTracks.flatMap((item) => item.notes));
   const measures = buildMeasures(timeSignatures, division, Math.max(midi.totalTicks, maxNoteEndTick));
   const measureStarts = measures.map((measure) => measure.startTick);
   const measureIndexOfTick = (tick) => {
@@ -526,136 +952,26 @@ export function midiToMusicXml(input, options = {}) {
   lines.push(`  <work><work-title>${escapeXml(title)}</work-title></work>`);
   lines.push("  <identification><encoding><software>谱见 MIDI 导入</software></encoding></identification>");
   lines.push("  <part-list>");
-  partNames.forEach((name, index) => {
-    lines.push(`    <score-part id="P${index + 1}"><part-name>${escapeXml(name)}</part-name></score-part>`);
+  groups.forEach((group, index) => {
+    lines.push(`    <score-part id="P${index + 1}"><part-name>${escapeXml(group.name)}</part-name></score-part>`);
   });
   lines.push("  </part-list>");
   let totalNoteCount = 0;
-  partTracks.forEach(({ notes }, partIndex) => {
-    const clef = clefForNotes(notes);
-    lines.push(`  <part id="P${partIndex + 1}">`);
-    // 音符按小节切段（跨小节 → 拆成多段并加连音线）
-    const byMeasure = new Map();
-    for (const note of notes) {
-      let startTick = note.startTick;
-      const endTick = note.endTick;
-      let guard = 0;
-      while (startTick < endTick && guard < 128) {
-        guard += 1;
-        const measureIndex = measureIndexOfTick(startTick);
-        const measure = measures[measureIndex];
-        const barEnd = measure.startTick + measure.lengthTicks;
-        const segmentEnd = Math.min(endTick, barEnd);
-        if (!byMeasure.has(measureIndex)) byMeasure.set(measureIndex, []);
-        byMeasure.get(measureIndex).push({
-          midi: note.midi,
-          startTick,
-          endTick: segmentEnd,
-          tieStart: segmentEnd < endTick,
-          tieStop: startTick > note.startTick,
-        });
-        startTick = segmentEnd;
-      }
-    }
-    for (let measureIndex = 0; measureIndex < measures.length; measureIndex += 1) {
-      const measure = measures[measureIndex];
-      lines.push(`    <measure number="${measureIndex + 1}">`);
-      if (measureIndex === 0) {
-        lines.push(attributesXml({ beats: measure.beats, beatType: measure.beatType, clef, includeDivisions: true, key }));
-      } else {
-        const change = timeChanges.get(measureIndex);
-        if (change) lines.push(attributesXml({ beats: change.beats, beatType: change.beatType, includeDivisions: false, key }));
-      }
-      for (const tempo of tempoMarks.filter((item) => item.measureIndex === measureIndex)) {
-        lines.push(directionXml(tempo.bpm));
-      }
-      const events = (byMeasure.get(measureIndex) || []).sort((left, right) => left.startTick - right.startTick || left.midi - right.midi);
-      // 分配声部线：同一条声部线内的音不能时间重叠；和弦（同时开始、同时结束）放在同一线。
-      const voiceEnds = [];
-      const voices = [];
-      for (const event of events) {
-        let voiceIndex = -1;
-        for (let index = 0; index < voiceEnds.length; index += 1) {
-          if (voiceEnds[index] <= event.startTick + 1e-6) { voiceIndex = index; break; }
-        }
-        if (voiceIndex < 0) {
-          if (voiceEnds.length < MAX_VOICES) voiceIndex = voiceEnds.length;
-          else {
-            // 声部线用满了：裁到最早结束的那条线之后（宁可少一个叠音，也不让时间轴倒退）
-            voiceIndex = voiceEnds.indexOf(Math.min(...voiceEnds));
-            event.startTick = Math.max(event.startTick, voiceEnds[voiceIndex]);
-            if (event.endTick - event.startTick < grid) continue;
-          }
-        }
-        voiceEnds[voiceIndex] = event.endTick;
-        if (!voices[voiceIndex]) voices[voiceIndex] = [];
-        voices[voiceIndex].push(event);
-      }
-      const activeVoiceCount = voices.filter(Boolean).length;
-      const measureDuration = Math.round(measure.quarterBeats * OUTPUT_DIVISIONS);
-      for (let voiceIndex = 0; voiceIndex < activeVoiceCount; voiceIndex += 1) {
-        const voiceEvents = voices[voiceIndex] || [];
-        if (voiceIndex > 0) lines.push(`      <backup><duration>${measureDuration}</duration></backup>`);
-        const voiceNumber = voiceIndex + 1;
-        let cursorTick = measure.startTick;
-        for (let eventIndex = 0; eventIndex < voiceEvents.length; eventIndex += 1) {
-          const event = voiceEvents[eventIndex];
-          if (event.usedAsChord) continue;
-          if (event.startTick > cursorTick) {
-            lines.push(restXml((event.startTick - cursorTick) / division, voiceNumber, key));
-            cursorTick = event.startTick;
-          }
-          // 和弦：从当前音开始、同时结束的音一起输出（第一个不带 <chord/>，其余带）
-          const chordMembers = [event];
-          for (let otherIndex = eventIndex + 1; otherIndex < voiceEvents.length; otherIndex += 1) {
-            const other = voiceEvents[otherIndex];
-            if (other.usedAsChord) continue;
-            if (other.startTick !== event.startTick) break;
-            if (other.endTick !== event.endTick) continue;
-            other.usedAsChord = true;
-            chordMembers.push(other);
-          }
-          for (let memberIndex = 0; memberIndex < chordMembers.length; memberIndex += 1) {
-            const member = chordMembers[memberIndex];
-            const pieces = splitBeats((member.endTick - member.startTick) / division, (measure.lengthTicks / division));
-            let pieceIndex = 0;
-            for (const pieceBeats of pieces) {
-              const isFirst = pieceIndex === 0;
-              const isLast = pieceIndex === pieces.length - 1;
-              lines.push(noteXml({
-                midi: member.midi,
-                beats: pieceBeats,
-                voice: voiceNumber,
-                chord: memberIndex > 0,
-                tieStop: isFirst ? member.tieStop : true,
-                tieStart: isLast ? member.tieStart : true,
-                key,
-              }));
-              pieceIndex += 1;
-            }
-          }
-          cursorTick = Math.max(cursorTick, event.endTick);
-          totalNoteCount += chordMembers.length;
-        }
-        if (cursorTick < measure.startTick + measure.lengthTicks) {
-          lines.push(restXml((measure.startTick + measure.lengthTicks - cursorTick) / division, voiceNumber, key));
-        }
-      }
-      if (!activeVoiceCount) {
-        lines.push(noteXml({ beats: measure.quarterBeats, voice: 1, rest: true, key }));
-      }
-      lines.push("    </measure>");
-    }
-    lines.push("  </part>");
+  groups.forEach((group, partIndex) => {
+    totalNoteCount += renderPartLines(group, partIndex, {
+      measures, measureIndexOfTick, timeChanges, tempoMarks, key, division, grid,
+    }, lines);
   });
   lines.push("</score-partwise>");
+  const trackNames = sourceTracks.map((item) => item.name);
   return {
     musicxml: lines.join("\n") + "\n",
     meta: {
       format: midi.format,
       division,
       tracks: midi.tracks.length,
-      parts: partTracks.length,
+      pitchedTracks: sourceTracks.length,
+      parts: groups.length,
       notes: totalNoteCount,
       measures: measures.length,
       tempo: Math.round(firstTempo.bpm),
@@ -666,6 +982,18 @@ export function midiToMusicXml(input, options = {}) {
       key: keyDisplayName(key),
       keyFifths: key.fifths,
       keyMode: key.mode,
+      // 声部整理结果：界面用它在「乐谱信息」里如实说明「N 条轨道 → M 个声部」。
+      grouping: {
+        requested: grouping,
+        applied: grouping === "tracks" || analysis.appliedMode === "tracks" ? "tracks" : grouping,
+        consolidated: grouping !== "tracks" && analysis.appliedMode === "auto" && groups.length < sourceTracks.length,
+        groups: groups.map((group) => ({
+          name: group.name,
+          role: group.role,
+          tracks: group.sourceIndexes.map((index) => trackNames[index] || `轨道 ${index + 1}`),
+          notes: group.notes.length,
+        })),
+      },
     },
   };
 }
