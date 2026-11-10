@@ -304,6 +304,14 @@ test("自动整理：重复/八度/三度和声轨合并成「主旋律 + 和声
   const tracksMode = midiToMusicXml(bytes, { grouping: "tracks" });
   assert.equal(tracksMode.meta.parts, 4);
   assert.deepEqual(parseMusicXmlText(tracksMode.musicxml).partNames, ["主唱", "主唱重复", "高八度", "三度和声"]);
+  // 分声部版（阿卡贝拉分谱）：重复轨合并，但八度叠唱/三度和声各自成声部，名字标注角色
+  const voicesMode = midiToMusicXml(bytes, { grouping: "voices" });
+  assert.equal(voicesMode.meta.parts, 3);
+  assert.deepEqual(voicesMode.meta.grouping.groups.map((group) => group.name),
+    ["主旋律", "高八度叠唱", "和声（高 4 半音）"]);
+  assert.equal(voicesMode.meta.grouping.groups[0].tracks.length, 2, "重复轨合并进主旋律");
+  assert.deepEqual(parseMusicXmlText(voicesMode.musicxml).partNames,
+    ["主旋律", "高八度叠唱", "和声（高 4 半音）"]);
 });
 
 test("自动整理：真正独立的声部不会被硬合并（退回一条轨道一个声部）", () => {

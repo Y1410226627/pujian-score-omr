@@ -559,9 +559,13 @@ export function analyzeMidiTracks(sourceTracks, division) {
   const allTracks = () => tracks.map((item) => ({
     name: item.name, role: "part", sourceIndexes: [item.index], notes: item.notes.slice(),
   }));
-  if (tracks.length <= 1 || tracks.length > MAX_ANALYZED_TRACKS) {
-    return { appliedMode: "tracks", groups: allTracks(), stats: { analyzedTracks: tracks.length } };
-  }
+  const fallback = (reason) => ({
+    appliedMode: "tracks",
+    groups: allTracks(),
+    voiceGroups: allTracks(),
+    stats: { analyzedTracks: tracks.length, reason },
+  });
+  if (tracks.length <= 1 || tracks.length > MAX_ANALYZED_TRACKS) return fallback("too-many-or-too-few-tracks");
   // 只有几个音的「碎片轨」不参与主旋律/和声判定（一个音就凑出一个声部没有意义）：
   // 它们最后会并进主旋律，或者在没有任何可归并内容时原样保留。
   const substantial = [];
@@ -569,13 +573,7 @@ export function analyzeMidiTracks(sourceTracks, division) {
   tracks.forEach((item, index) => {
     (item.notes.length >= TINY_TRACK_NOTES ? substantial : fragments).push(index);
   });
-  if (substantial.length < 2) {
-    return {
-      appliedMode: "tracks",
-      groups: allTracks(),
-      stats: { analyzedTracks: tracks.length, reason: "too-few-substantial-tracks" },
-    };
-  }
+  if (substantial.length < 2) return fallback("too-few-substantial-tracks");
   const tolerance = Math.max(6, Math.round(division * RELATION_TIME_TOLERANCE_BEATS));
   const relation = new Map();   // "i:j" → {shift, ratio}（i 的音能被 j 解释多少）
   for (const i of substantial) {
@@ -600,23 +598,22 @@ export function analyzeMidiTracks(sourceTracks, division) {
       leadIndex = i;
     }
   }
-  if (leadScore < 0.8) {
-    return { appliedMode: "tracks", groups: allTracks(), stats: { analyzedTracks: tracks.length, reason: "no-relations" } };
-  }
+  if (leadScore < 0.8) return fallback("no-relations");
   const rhythmGrid = Math.max(1, Math.round(division / QUANTIZE_STEPS_PER_BEAT));
   const onsets = new Map();
   for (const i of substantial) onsets.set(i, onsetSet(tracks[i].notes, rhythmGrid));
   const used = new Set([leadIndex]);
-  const melodyIndexes = [leadIndex];
+  const unisonIndexes = [];
   // 2) 同度重复（L/R 双轨加宽、同一条旋律录了两三遍）→ 并进主旋律，按音高+起拍去重
   for (const i of substantial) {
     if (used.has(i)) continue;
     const rel = relation.get(`${i}:${leadIndex}`);
     if (rel.shift === 0 && rel.ratio >= UNISON_MIN_RATIO) {
-      melodyIndexes.push(i);
+      unisonIndexes.push(i);
       used.add(i);
     }
   }
+  const melodyIndexes = [leadIndex, ...unisonIndexes];
   // 3) 与主旋律有固定移调关系（八度/三度…）、节奏也接近的轨 → 「和声/叠加层」种子，再按同节奏扩张
   const stack = new Set();
   for (const i of substantial) {
@@ -644,36 +641,33 @@ export function analyzeMidiTracks(sourceTracks, division) {
   const harmonyIndexes = [...stack].sort((a, b) => a - b);
   for (const index of harmonyIndexes) used.add(index);
   // 4) 剩下的实义轨：和主旋律几乎不同时段的分段补轨并进主旋律，其余各自保留为独立声部
+  const sectionIndexes = [];
   const ownParts = [];
   for (const i of substantial) {
     if (used.has(i)) continue;
     if (windowOverlapRatio(tracks[i].notes, tracks[leadIndex].notes, division) < SECTION_OVERLAP_MAX) {
-      melodyIndexes.push(i);
+      sectionIndexes.push(i);
       used.add(i);
     } else {
       ownParts.push(i);
     }
   }
-  melodyIndexes.push(...fragments);   // 碎片轨并进主旋律（音高+起拍去重时仍在）
-  const partCount = 1 + (harmonyIndexes.length ? 1 : 0) + ownParts.length;
-  if (partCount >= tracks.length) {
-    return {
-      appliedMode: "tracks",
-      groups: allTracks(),
-      stats: { analyzedTracks: tracks.length, reason: "nothing-to-merge" },
-    };
-  }
+  // 只有「没有真的合并出更少声部」时才退回传统行为
+  const autoPartCount = 1 + (harmonyIndexes.length ? 1 : 0) + ownParts.length;
+  if (autoPartCount >= tracks.length) return fallback("nothing-to-merge");
   const mergeNotes = (indexes, dedupe) => {
     const pooled = [];
     for (const index of indexes) for (const note of tracks[index].notes) pooled.push({ ...note });
     return dedupe ? mergeDuplicateNotes(pooled, tolerance) : pooled;
   };
+  // —— 合并版（自动整理）：主旋律 + 和声/叠加层 + 独立声部 ——
+  const melodyAll = [...melodyIndexes, ...sectionIndexes, ...fragments];
   const groups = [];
   groups.push({
     name: ownParts.length || harmonyIndexes.length ? "主旋律" : tracks[leadIndex].name,
     role: "melody",
-    sourceIndexes: melodyIndexes.map((index) => tracks[index].index),
-    notes: mergeNotes(melodyIndexes, true),
+    sourceIndexes: melodyAll.map((index) => tracks[index].index),
+    notes: mergeNotes(melodyAll, true),
   });
   if (harmonyIndexes.length) {
     groups.push({
@@ -692,17 +686,93 @@ export function analyzeMidiTracks(sourceTracks, division) {
       notes: tracks[index].notes.slice(),
     });
   });
+  // —— 分声部版（阿卡贝拉分谱）：重复轨合并，但八度叠唱/和声层/分段补轨各自成声部 ——
+  const voiceGroups = [];
+  voiceGroups.push({
+    name: "主旋律",
+    role: "melody",
+    sourceIndexes: [...melodyIndexes, ...fragments].map((index) => tracks[index].index),
+    notes: mergeNotes([...melodyIndexes, ...fragments], true),
+  });
+  // 和声/叠唱：同一个固定音程的多条轨，如果彼此是同度重复就合并；否则各自一条谱表
+  const harmonyParts = [];
+  for (const index of harmonyIndexes) {
+    const rel = relation.get(`${index}:${leadIndex}`);
+    const shift = rel.shift;   // lead - track：>0 表示这条轨比主旋律低
+    let target = null;
+    for (const part of harmonyParts) {
+      if (part.shift !== shift) continue;
+      const pair = relation.get(`${index}:${part.indexes[0]}`);
+      if (pair && pair.shift === 0 && pair.ratio >= UNISON_MIN_RATIO) { target = part; break; }
+    }
+    if (target) { target.indexes.push(index); continue; }
+    const abs = Math.abs(shift);
+    const direction = shift > 0 ? "低" : "高";
+    const isOctave = abs % 12 === 0;
+    harmonyParts.push({
+      shift,
+      role: isOctave ? "octave" : "harmony",
+      name: isOctave
+        ? (abs === 12 ? `${direction}八度叠唱` : `${direction} ${abs / 12} 个八度叠唱`)
+        : `和声（${direction} ${abs} 半音）`,
+      indexes: [index],
+    });
+  }
+  // 同一名字（同音程多轨但彼此不是重复）时加序号
+  const harmonyNames = uniquePartNames(harmonyParts.map((part) => part.name));
+  harmonyParts.forEach((part, order) => { part.name = harmonyNames[order]; });
+  // 先八度叠唱（低→高），再和声层（音程从小到大）
+  harmonyParts.sort((left, right) => {
+    const leftOctave = left.role === "octave" ? 0 : 1;
+    const rightOctave = right.role === "octave" ? 0 : 1;
+    if (leftOctave !== rightOctave) return leftOctave - rightOctave;
+    if (left.role === "octave") return right.shift - left.shift;
+    return Math.abs(left.shift) - Math.abs(right.shift);
+  });
+  for (const part of harmonyParts) {
+    voiceGroups.push({
+      name: part.name,
+      role: part.role,
+      sourceIndexes: part.indexes.map((index) => tracks[index].index),
+      notes: mergeNotes(part.indexes, true),
+    });
+  }
+  // 分段补轨：主旋律没唱的段落，单独成声部并标出拍段，方便编曲时决定给谁唱
+  for (const index of sectionIndexes) {
+    const notes = tracks[index].notes;
+    const firstBeat = Math.floor(Math.min(...notes.map((note) => note.startTick)) / division) + 1;
+    const lastBeat = Math.ceil(Math.max(...notes.map((note) => note.endTick)) / division);
+    voiceGroups.push({
+      name: `分段补轨（第 ${firstBeat}–${lastBeat} 拍）`,
+      role: "section",
+      sourceIndexes: [tracks[index].index],
+      notes: notes.slice(),
+    });
+  }
+  ownParts.forEach((index, order) => {
+    voiceGroups.push({
+      name: singleNames[order],
+      role: "part",
+      sourceIndexes: [tracks[index].index],
+      notes: tracks[index].notes.slice(),
+    });
+  });
   return {
     appliedMode: "auto",
     groups,
+    voiceGroups,
     stats: {
       analyzedTracks: tracks.length,
       leadTrack: tracks[leadIndex].index,
       leadName: tracks[leadIndex].name,
       melodyTracks: melodyIndexes.length,
+      unisonTracks: unisonIndexes.length,
       harmonyTracks: harmonyIndexes.length,
+      sectionTracks: sectionIndexes.length,
       separateTracks: ownParts.length,
       fragmentTracks: fragments.length,
+      autoParts: groups.length,
+      voiceParts: voiceGroups.length,
     },
   };
 }
@@ -881,7 +951,7 @@ function renderPartLines(part, partIndex, context, lines) {
 export function midiToMusicXml(input, options = {}) {
   const midi = parseMidiFile(input);
   const title = String(options.title || "").trim() || "MIDI 导入的乐谱";
-  const grouping = options.grouping === "tracks" || options.grouping === "melody" ? options.grouping : "auto";
+  const grouping = ["tracks", "melody", "voices"].includes(options.grouping) ? options.grouping : "auto";
   const division = midi.division;
   const grid = Math.max(1, Math.round(division / QUANTIZE_STEPS_PER_BEAT));
   const quantize = (tick) => Math.round(tick / grid) * grid;
@@ -908,22 +978,22 @@ export function midiToMusicXml(input, options = {}) {
   }
   if (!sourceTracks.length) throw new Error("MIDI 文件里没有可记谱的音符（可能只有打击乐或控制事件）。");
   // 按需截断（maxParts 只限制「独立声部」的数量，归并后的主旋律/和声层不受影响）
-  let analysis = analyzeMidiTracks(sourceTracks, division);
+  const analysis = analyzeMidiTracks(sourceTracks, division);
+  const trackParts = () => {
+    const names = uniquePartNames(sourceTracks.map((item) => item.name));
+    return sourceTracks.map((item, order) => ({
+      name: names[order], role: "part", sourceIndexes: [item.index], notes: item.notes,
+    }));
+  };
   let groups;
-  if (grouping === "tracks") {
-    const names = uniquePartNames(sourceTracks.map((item) => item.name));
-    groups = sourceTracks.map((item, order) => ({
-      name: names[order], role: "part", sourceIndexes: [item.index], notes: item.notes,
-    }));
-  } else if (analysis.appliedMode === "tracks") {
-    const names = uniquePartNames(sourceTracks.map((item) => item.name));
-    groups = sourceTracks.map((item, order) => ({
-      name: names[order], role: "part", sourceIndexes: [item.index], notes: item.notes,
-    }));
+  if (grouping === "tracks" || analysis.appliedMode === "tracks") {
+    groups = trackParts();
   } else if (grouping === "melody") {
     groups = analysis.groups.filter((group) => group.role === "melody");
+  } else if (grouping === "voices") {
+    groups = analysis.voiceGroups.slice();   // 分声部版（阿卡贝拉分谱）
   } else {
-    groups = analysis.groups.slice();
+    groups = analysis.groups.slice();        // 合并版（自动整理）
   }
   if (options.maxParts && groups.length > options.maxParts) groups = groups.slice(0, options.maxParts);
   // 估计整曲调号：让谱面少满屏临时记号（调号猜错不影响音高，用户可在制谱软件里改调号）
@@ -987,12 +1057,17 @@ export function midiToMusicXml(input, options = {}) {
         requested: grouping,
         applied: grouping === "tracks" || analysis.appliedMode === "tracks" ? "tracks" : grouping,
         consolidated: grouping !== "tracks" && analysis.appliedMode === "auto" && groups.length < sourceTracks.length,
-        groups: groups.map((group) => ({
-          name: group.name,
-          role: group.role,
-          tracks: group.sourceIndexes.map((index) => trackNames[index] || `轨道 ${index + 1}`),
-          notes: group.notes.length,
-        })),
+        groups: groups.map((group) => {
+          const pitches = group.notes.map((note) => note.midi);
+          return {
+            name: group.name,
+            role: group.role,
+            tracks: group.sourceIndexes.map((index) => trackNames[index] || `轨道 ${index + 1}`),
+            notes: group.notes.length,
+            // 音域（MIDI 音高）：阿卡贝拉编曲时要按音域分人，界面上直接标出来
+            range: pitches.length ? [Math.min(...pitches), Math.max(...pitches)] : null,
+          };
+        }),
       },
     },
   };

@@ -190,7 +190,7 @@ try {
   assert.match(pdfDownload.suggestedFilename(), /\.pdf$/, "导出文件名应以 .pdf 结尾");
 
 
-  // 6) 声部整理方式切换：只保留主旋律（1 个声部）→ 每条轨道一个声部（10 个）→ 再切回自动（2 个）
+  // 6) 声部整理方式切换：分声部（7 个）→ 只保留主旋律（1 个）→ 原始逐轨（10 个）→ 再切回合并版（2 个）
   async function switchGrouping(value, expectedParts) {
     await page.selectOption("#midiGroupingSelect", value);
     await page.waitForFunction(
@@ -203,8 +203,26 @@ try {
       names: window.__pujian.state.scoreInfo.partNames,
       pages: window.__pujian.state.pageCount,
       value: document.querySelector("#midiGroupingSelect")?.value,
+      hint: document.querySelector("#midiGroupingHint")?.textContent || "",
     }));
   }
+  // 分声部版（阿卡贝拉分谱）：重复轨合并、明显不同的旋律/和声层各自成声部，名字带角色标注
+  const voicesMode = await switchGrouping("voices", 7);
+  console.log("分声部版：", JSON.stringify(voicesMode));
+  assert.equal(voicesMode.parts, 7, "分声部版应为 7 个声部");
+  for (const name of ["主旋律", "低八度叠唱", "高八度叠唱", "和声（高 3 半音）", "和声（低 4 半音）"]) {
+    assert.ok(voicesMode.names.includes(name), `分声部版应包含「${name}」，实际：${voicesMode.names.join("、")}`);
+  }
+  assert.ok(voicesMode.names.some((name) => name.startsWith("分段补轨")), "分段补轨应单独成声部并标注拍段");
+  assert.match(voicesMode.hint, /分声部版/, "说明文字应写明当前是分声部版");
+  assert.match(voicesMode.hint, /音域/, "分声部版说明应标出每个声部的音域（阿卡贝拉分人要用）");
+  // 当前整理方式决定导出内容/文件名：分声部版导出的 MusicXML 文件名应带「分声部」
+  const voicesDownloadPromise = page.waitForEvent("download", { timeout: 60000 });
+  await page.click("#exportMusicXmlButton");
+  const voicesDownload = await voicesDownloadPromise;
+  console.log("分声部版导出文件名：", voicesDownload.suggestedFilename());
+  assert.match(voicesDownload.suggestedFilename(), /分声部.*\.musicxml$/, "导出的应是当前（分声部）这一份");
+
   const melodyMode = await switchGrouping("melody", 1);
   console.log("只保留主旋律：", JSON.stringify(melodyMode));
   assert.equal(melodyMode.parts, 1, "只保留主旋律时应只有 1 个声部");
