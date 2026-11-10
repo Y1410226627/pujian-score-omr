@@ -99,6 +99,8 @@ try {
       groupingGroups: (app.midiInfo?.meta?.grouping?.groups || []).map((group) => ({
         name: group.name, role: group.role, tracks: group.tracks.length, notes: group.notes,
       })),
+      silenceGaps: (app.midiInfo?.silenceGaps || []).map((gap) => ({ from: gap.from, to: gap.to })),
+      warnings: document.querySelector("#scoreWarnings")?.textContent || "",
     };
   });
   console.log("MIDI 导入耗时：", elapsed.toFixed(1), "秒");
@@ -139,6 +141,13 @@ try {
   assert.equal(state.bpm, 148, "速度应从 MIDI 的 tempo 事件读出 ♩=148");
   assert.match(state.keySummary || "", /minor|major|[A-G]/, "应估出调号并展示");
   assert.match(state.fileInfo, /10 条轨道 → 2 个声部/, "文件信息应写明轨迹归并结果");
+  // 这份 MIDI 是「只有人声」的分轨：间奏处原本就没有音符，播放会正常静音。
+  // 界面必须提前说清楚，否则用户会以为音频中断是播放器坏了（用户反馈的「音频短暂中断」根因）。
+  assert.match(state.hint, /空白/, "预览提示应说明原文件有大段空白（试听会静音）");
+  assert.match(state.warnings, /没有音符的空白/, "乐谱警告应写明原 MIDI 的空白段");
+  assert.match(state.warnings, /不是播放故障/, "警告应说明静音不是播放故障");
+  assert.ok(state.silenceGaps.length >= 8, `应识别出多段空白，实际 ${state.silenceGaps.length} 段`);
+  assert.ok(state.silenceGaps.some((gap) => gap.to - gap.from >= 12), "应识别出约 13 拍（5.5 秒）的长间奏空白");
 
   // 3) 乐谱预览：MuseScore 排版的五线谱 PDF
   assert.ok(state.pdfLoaded, "五线谱 PDF 应已载入预览");

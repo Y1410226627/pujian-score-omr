@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-10·MIDI 分声部";
+const APP_BUILD = "2026-11-10·播放静音修复";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -737,6 +737,33 @@ async function loadFile(file) {
   }
 }
 /**
+ * 找出「整段没有音符」的空档（阈值按速度换算成拍数，由调用方传入）。
+ *
+ * 用在哪：MIDI 导入后提前说明——「只有人声」的 MIDI 里，间奏/伴奏段落本来就没有音符，
+ * 播放到那里是**正常静音**（原文件里就没有声音），不是音频故障。不提前说清楚，
+ * 用户听到间奏静音会以为播放器坏了（这正是《人是猫》反馈的「音频短暂中断」根因）。
+ *
+ * @returns {Array<{from:number, to:number}>} 拍位置的空档
+ */
+function findScoreSilenceGaps(notes, totalBeats, minBeats) {
+  const spans = (notes || [])
+    .map((note) => {
+      const start = Math.max(0, Number(note.startBeat) || 0);
+      const duration = Math.max(0.05, Number(note.durationBeats) || 0);
+      return [start, start + duration];
+    })
+    .sort((left, right) => left[0] - right[0]);
+  const gaps = [];
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    if (start - cursor >= minBeats) gaps.push({ from: cursor, to: start });
+    cursor = Math.max(cursor, end);
+  }
+  const total = Math.max(Number(totalBeats) || 0, cursor);
+  if (total - cursor >= minBeats) gaps.push({ from: cursor, to: total });
+  return gaps;
+}
+/**
  * MIDI 导入：解析 .mid → 生成 MusicXML → 同一份数据驱动三处：
  *   · 乐谱预览：把 MusicXML 交给本机 MuseScore 排版成五线谱 PDF，用和扫描 PDF 一样的分页预览；
  *   · 旋律工作台：MusicXML 再解析回音符/声部（音高、时值、速度、拍号、调号与导出谱完全一致），可试听/校对；
@@ -756,8 +783,20 @@ async function loadMidi(file, token) {
   const xmlFile = new File([musicxml], title + ".musicxml", { type: "application/xml" });
   const scoreInfo = await readMusicXmlFile(xmlFile);
   if (token !== state.loadToken) return;
+  // 原 MIDI 可能有「整段没有音符」的空白（只有人声的 MIDI 里，间奏/伴奏段落本来就没有音符）：
+  // 提前写进警告，试听时听到静音就不会误以为是播放故障。
+  const tempoForGaps = Math.max(20, Math.min(320, Number(meta.tempo) || 120));
+  const minGapBeats = Math.max(1.5, (1.2 * tempoForGaps) / 60);   // 超过约 1.2 秒才算「一段空白」
+  const silenceGaps = findScoreSilenceGaps(scoreInfo.notes, scoreInfo.totalBeats, minGapBeats);
+  if (silenceGaps.length) {
+    const describeGap = (gap) => `${Math.round(gap.from)}–${Math.round(gap.to)} 拍（约 ${((gap.to - gap.from) * 60 / tempoForGaps).toFixed(1)} 秒）`;
+    const longest = silenceGaps.slice().sort((left, right) => (right.to - right.from) - (left.to - left.from))
+      .slice(0, 3).map(describeGap).join("、");
+    scoreInfo.warnings = [...scoreInfo.warnings,
+      `原 MIDI 有 ${silenceGaps.length} 段没有音符的空白，例如 ${longest}——这些段落原文件里没有人声/伴奏（比如间奏），试听时是正常静音，不是播放故障。`];
+  }
   // bytes 留着：用户切换「MIDI 声部整理」方式时要重新转一次谱，不必再读文件。
-  state.midiInfo = { meta, musicxml, title, pdfBytes: null, bytes, grouping };
+  state.midiInfo = { meta, musicxml, title, pdfBytes: null, bytes, grouping, silenceGaps };
   // 显示「解析回乐谱后的音符数」：MIDI 原始音符与谱面音符会因连音线合并/和弦差异略有出入，
   // 界面统一用与横幅/旋律工作台一致的数字，避免同一个文件出现两个音符数。
   const noteCount = scoreInfo.notes.length;
@@ -816,9 +855,11 @@ async function loadMidi(file, token) {
   const timeText = meta.timeSummary ? `，${meta.timeSummary}` : "";
   const groupingText = meta.grouping && meta.grouping.consolidated
     ? `（${trackCount} 条轨道自动整理成 ${meta.parts} 个声部）` : "";
+  // 原 MIDI 里的空白段（间奏/伴奏没有人声）——提前说清楚，别让用户以为播放断了。
+  const gapText = silenceGaps.length ? ` · 原文件 ${silenceGaps.length} 段空白（试听会静音，非故障）` : "";
   els.scoreHint.textContent = pdfReady
-    ? `${modeLabel}：已排版成 ${state.pageCount} 页五线谱 · ${meta.parts} 个声部 ${noteCount} 个音符${groupingText} · ♩=${meta.tempo}${timeText}${keyText}。MIDI 不含力度/表情细节，谱面请校对后使用`
-    : `${meta.parts} 个声部 ${noteCount} 个音符已可试听、可导出 MusicXML；${previewError}，所以暂时不能显示五线谱`;
+    ? `${modeLabel}：已排版成 ${state.pageCount} 页五线谱 · ${meta.parts} 个声部 ${noteCount} 个音符${groupingText}${gapText} · ♩=${meta.tempo}${timeText}${keyText}。MIDI 不含力度/表情细节，谱面请校对后使用`
+    : `${meta.parts} 个声部 ${noteCount} 个音符已可试听、可导出 MusicXML；${previewError}，所以暂时不能显示五线谱${gapText}`;
   showToast(pdfReady
     ? `已导入 MIDI（${modeLabel}）：${trackCount} 条轨道 → ${meta.parts} 个声部、${noteCount} 个音符，已排版成 ${state.pageCount} 页五线谱。`
     : `已导入 MIDI（${modeLabel}）：${trackCount} 条轨道 → ${meta.parts} 个声部、${noteCount} 个音符。${previewError ? previewError + "。" : ""}可先试听或导出 MusicXML。`);
@@ -7240,6 +7281,7 @@ function stopPlaybackWatch(reason) {
     durationSeconds: Math.round((performance.now() - watch.startedAt) / 1000),
     maxTickGapMs: Math.round(watch.maxTickGap),
     starved: watch.starved,
+    rested: watch.rested || 0,
     suspended: watch.suspended,
     audioState: state.audio ? state.audio.state : null,
     sampleRate: state.audio ? state.audio.sampleRate : null,
@@ -7407,9 +7449,13 @@ async function playMelody() {
   //      滚动调度掉队，之后没有新音符被排进去。
   // 这里每 700 毫秒自检一次：上下文没在跑就 resume；音频图里一个活跃源都没有就补一轮调度。
   // 同时把掉队/挂起的次数记进本机性能日志（event=playback），用户下次反馈就有证据。
+  //
+  // 重要（2026-11-10 修）：谱面本身可能有很长的休止/空白（例如「只有人声」的 MIDI，间奏的伴奏
+  // 不在文件里，那几段本来就是静音）。这种「当前没有活跃源、但下一个音还在调度提前量之外」
+  // 是正常静音，不能算掉队、更不能弹「音频短暂中断」的提示——否则用户会以为播放坏了。
   const watch = {
     startedAt: performance.now(), lastTickAt: performance.now(),
-    maxTickGap: 0, starved: 0, suspended: 0,
+    maxTickGap: 0, starved: 0, suspended: 0, rested: 0,
   };
   state.playbackWatch = watch;
   if (state.playbackWatchTimer) clearInterval(state.playbackWatchTimer);
@@ -7419,11 +7465,21 @@ async function playMelody() {
       watch.suspended += 1;
       state.audio.resume().catch(() => {});
     }
-    // 还在播、但音频图里一个活跃源都没有：说明调度掉队了，立刻补一轮（听感上能救回来）。
+    // 还在播、但音频图里一个活跃源都没有：先判断这是「谱面休止」还是「调度掉队」。
+    //   · 下一个音已经「该排进来了」（提前量减掉一个调度间隔的余量）却还没有源 → 真掉队，补一轮并记一次；
+    //   · 否则只是谱面休止（下一个音还远）→ 正常静音，不打扰用户。
+    // 注意不能只比「提前量」：调度器每 200ms 才跑一次，休止快结束时会在边界上来回判断，
+    // 必须留出调度间隔的余量，否则正常休止结束前会被误算成掉队（实测 65.9 秒处就这样误报过一次）。
     if (state.sources.size === 0 && cursor < events.length) {
-      watch.starved += 1;
-      try { scheduleWindow(); } catch (error) { console.info("播放调度补轮失败", error); }
-      if (watch.starved === 2) showToast("检测到音频短暂中断，已自动恢复。");
+      const nextEventAt = headStart + events[cursor].atSeconds;
+      const remaining = nextEventAt - state.audio.currentTime;
+      if (remaining <= aheadSeconds - 0.3) {
+        watch.starved += 1;
+        try { scheduleWindow(); } catch (error) { console.info("播放调度补轮失败", error); }
+        if (watch.starved === 2) showToast("检测到音频播放掉队，已自动补齐。");
+      } else {
+        watch.rested += 1;
+      }
     }
   }, 700);
 
