@@ -178,8 +178,13 @@
                   <label class="field-label" for="midiGroupingSelect">MIDI 声部整理</label>
                   <div class="select-wrap midi-grouping-select">
                     <select id="midiGroupingSelect" aria-label="MIDI 声部整理方式">
-                      <option value="auto" selected>合并版：主旋律 + 和声层</option>
-                      <option value="voices">分声部：阿卡贝拉分谱（明显不同旋律各自成声部）</option>
+                      <option value="auto" selected>自动：按内容判断（推荐）</option>
+                      <option value="voices">分声部：按重复 / 和声关系合并</option>
+                      <optgroup label="阿卡贝拉分谱（自动识别主唱/低音/和声/叠层）">
+                        <option value="acappella6">核心版：排练主谱</option>
+                        <option value="acappella10">完整版：含结尾叠层</option>
+                        <option value="acappella12">全部轨道：参考核对</option>
+                      </optgroup>
                       <option value="melody">只保留主旋律（1 个声部）</option>
                       <option value="tracks">原始逐轨（每条 MIDI 轨道一个声部）</option>
                     </select>
@@ -274,7 +279,7 @@
           </div>
         </section>
       </main>
-      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-11-10·播放静音修复</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
+      <footer class="footer"><span>谱见 <span class="footer-dot">·</span> 让每张乐谱都能被听见 <span class="app-version" id="appVersion" title="页面版本：如果这里不是最新版本，说明浏览器还在用旧缓存的代码，请按 Ctrl+F5 强制刷新">版本 2026-11-11·阿卡贝拉分谱</span></span><span>识别结果仅供辅助，<a href="符号支持清单.md">查看符号支持范围</a></span></footer>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="app.js"></script>

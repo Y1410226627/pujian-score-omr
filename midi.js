@@ -777,6 +777,157 @@ export function analyzeMidiTracks(sourceTracks, division) {
   };
 }
 
+// —— 阿卡贝拉编配识别（2026-11-11）——
+// 像《喵卡贝拉》这类「人声分轨」MIDI：一条轨道不是「一个声部」，而是编曲里的一条人声线，
+// 里面会同时存在主唱 1/2（交替唱）、低音、2–3 条和声声部、结尾叠层、加花小轨。
+// 这里按「音符数 / 活动范围 / 时值长短 / 在第几段出现」启发式识别角色，然后给三种谱：
+//   · core：核心版（主唱 + 低音 + 和声）——排练主谱
+//   · full：完整版（核心 + 结尾/间奏出现的叠层声部）——正式演出谱
+//   · reference：全部轨道（再含加花小轨）——核对原编曲用
+// 识别不可靠时返回 available:false，上层退回「一条轨道一个声部」并如实说明。
+const ACAPPELLA_WINDOW_BEATS = 8;            // 「活动窗口」宽度：8 拍 = 约 2 小节
+const ACAPPELLA_LATE_BEAT_RATIO = 0.85;      // 最后 15% 算「结尾段」
+const ACAPPELLA_PAD_LATE_RATIO = 0.6;        // 六成以上的音出现在结尾段 → 结尾叠层
+const ACAPPELLA_MIN_NOTES = 4;               // 少于 4 个音不参与角色判定
+const ACAPPELLA_LEAD_MIN_NOTES = 20;
+const ACAPPELLA_LEAD_MIN_COVERAGE = 0.25;
+const ACAPPELLA_LEAD_MAX_MEDIAN_BEATS = 0.45; // 主唱常有 16 分/8 分混排，中位时值短（要和一拍长音的和声区分开）
+const ACAPPELLA_BASS_MIN_NOTES = 20;
+const ACAPPELLA_BASS_MIN_COVERAGE = 0.5;
+const ACAPPELLA_HARMONY_MIN_NOTES = 12;
+const ACAPPELLA_HARMONY_MIN_COVERAGE = 0.3;
+const ACAPPELLA_HARMONY_MIN_MEDIAN_BEATS = 0.42;  // 和声多为一拍/半拍的长音或均匀节奏（实测 0.5，主唱约 0.33–0.36）
+
+function acappellaGroup(name, role, features) {
+  const sourceIndexes = features.map((feature) => feature.track.index);
+  const notes = [];
+  for (const feature of features) for (const note of feature.track.notes) notes.push({ ...note });
+  return { name, role, sourceIndexes, notes };
+}
+
+/**
+ * 识别阿卡贝拉编配的角色，并生成三种分谱版本。
+ * @returns {{available:boolean, reason:string, core:Array, full:Array, reference:Array, roles:Array, stats:object}}
+ */
+export function analyzeAcappellaTracks(sourceTracks, division) {
+  const tracks = sourceTracks.filter((item) => item.notes.length);
+  const empty = (reason, stats) => ({
+    available: false, reason, core: [], full: [], reference: [], roles: [], stats: stats || {},
+  });
+  if (tracks.length < 5) return empty("too-few-tracks", { tracks: tracks.length });
+  let totalBeats = 1;
+  for (const track of tracks) {
+    for (const note of track.notes) totalBeats = Math.max(totalBeats, note.endTick / division);
+  }
+  const windowCount = Math.max(1, Math.ceil(totalBeats / ACAPPELLA_WINDOW_BEATS));
+  const lateBeat = totalBeats * ACAPPELLA_LATE_BEAT_RATIO;
+  const features = tracks.map((track) => {
+    const notes = track.notes;
+    const pitches = notes.map((note) => note.midi).sort((left, right) => left - right);
+    const durations = notes.map((note) => (note.endTick - note.startTick) / division).sort((left, right) => left - right);
+    const windows = new Set();
+    let lateNotes = 0;
+    for (const note of notes) {
+      windows.add(Math.floor(note.startTick / division / ACAPPELLA_WINDOW_BEATS));
+      if (note.startTick / division >= lateBeat) lateNotes += 1;
+    }
+    return {
+      track,
+      noteCount: notes.length,
+      meanPitch: pitches.reduce((sum, pitch) => sum + pitch, 0) / pitches.length,
+      medianDuration: durations[Math.floor(durations.length / 2)] || 0,
+      coverage: windows.size / windowCount,
+      lateRatio: lateNotes / notes.length,
+      firstBeat: Math.min(...notes.map((note) => note.startTick)) / division,
+    };
+  });
+  const substantial = features.filter((feature) => feature.noteCount >= ACAPPELLA_MIN_NOTES);
+  // 1) 低音：常驻且音高最低（要明显低于全体平均，避免把普通内声部当低音）
+  const bassCandidates = features
+    .filter((feature) => feature.noteCount >= ACAPPELLA_BASS_MIN_NOTES && feature.coverage >= ACAPPELLA_BASS_MIN_COVERAGE)
+    .sort((left, right) => left.meanPitch - right.meanPitch);
+  const overallMean = features.reduce((sum, feature) => sum + feature.meanPitch, 0) / features.length;
+  const bass = bassCandidates.length && bassCandidates[0].meanPitch <= overallMean - 4 ? bassCandidates[0] : null;
+  // 2) 和声：常驻、节奏偏均匀（中位时值 >= 0.35 拍）、音高在低音之上；最多取 3 条
+  const harmonyCandidates = features
+    .filter((feature) => feature !== bass
+      && feature.noteCount >= ACAPPELLA_HARMONY_MIN_NOTES
+      && feature.coverage >= ACAPPELLA_HARMONY_MIN_COVERAGE
+      && feature.medianDuration >= ACAPPELLA_HARMONY_MIN_MEDIAN_BEATS
+      && (!bass || feature.meanPitch > bass.meanPitch + 3))
+    .sort((left, right) => left.meanPitch - right.meanPitch);
+  const harmonyFeatures = harmonyCandidates.slice(0, 3);
+  const extraHarmony = harmonyCandidates.slice(3);
+  // 3) 主唱：中位时值短（有旋律感）、覆盖率不太低、不属于低音/和声；按进场先后取前 2 条
+  const used = new Set();
+  if (bass) used.add(bass);
+  for (const feature of harmonyFeatures) used.add(feature);
+  for (const feature of extraHarmony) used.add(feature);
+  const leadCandidates = features
+    .filter((feature) => !used.has(feature)
+      && feature.noteCount >= ACAPPELLA_LEAD_MIN_NOTES
+      && feature.coverage >= ACAPPELLA_LEAD_MIN_COVERAGE
+      && feature.medianDuration <= ACAPPELLA_LEAD_MAX_MEDIAN_BEATS)
+    .sort((left, right) => left.firstBeat - right.firstBeat);
+  const leadFeatures = leadCandidates.slice(0, 2);
+  for (const feature of leadFeatures) used.add(feature);
+  // 4) 其余轨：六成以上在结尾段 → 结尾叠层；否则算加花/点缀
+  const rest = substantial.filter((feature) => !used.has(feature));
+  const padFeatures = rest.filter((feature) => feature.lateRatio >= ACAPPELLA_PAD_LATE_RATIO)
+    .sort((left, right) => right.meanPitch - left.meanPitch);
+  const fillFeatures = rest.filter((feature) => feature.lateRatio < ACAPPELLA_PAD_LATE_RATIO)
+    .sort((left, right) => right.meanPitch - left.meanPitch);
+  if (!bass || harmonyFeatures.length < 2 || leadFeatures.length < 1) {
+    return empty(
+      !bass ? "no-bass" : harmonyFeatures.length < 2 ? "no-harmony" : "no-lead",
+      { tracks: tracks.length, bass: Boolean(bass), harmony: harmonyFeatures.length, leads: leadFeatures.length },
+    );
+  }
+  // 名称：主唱 1/2；和声从高到低；低音；叠层从高到低；加花（高/低）
+  const harmonyOrdered = harmonyFeatures.slice().reverse();   // 高 → 低
+  const harmonyLabels = harmonyOrdered.length === 3 ? ["和声 · 高", "和声 · 中", "和声 · 低"]
+    : harmonyOrdered.length === 2 ? ["和声 · 高", "和声 · 低"]
+      : harmonyOrdered.map((feature, index) => `和声 ${index + 1}`);
+  const leadGroups = leadFeatures.map((feature, index) => acappellaGroup(`主唱 ${index + 1}`, index === 0 ? "lead1" : "lead2", [feature]));
+  const harmonyGroups = harmonyOrdered.map((feature, index) => acappellaGroup(harmonyLabels[index], "harmony", [feature]));
+  const bassGroup = acappellaGroup("低音", "bass", [bass]);
+  const padGroups = padFeatures.map((feature, index) => acappellaGroup(`叠层 ${index + 1}`, "pad", [feature]));
+  const fillGroups = fillFeatures.map((feature, index) => {
+    const label = fillFeatures.length === 1 ? "加花"
+      : fillFeatures.length === 2 ? (index === 0 ? "加花（高）" : "加花（低）")
+        : `加花 ${index + 1}`;
+    return acappellaGroup(label, "fill", [feature]);
+  });
+  const otherGroups = extraHarmony.map((feature, index) => acappellaGroup(`附加声部 ${index + 1}`, "other", [feature]));
+  const core = [...leadGroups, ...harmonyGroups, bassGroup];
+  const full = [...core, ...padGroups, ...otherGroups];
+  const reference = [...full, ...fillGroups];
+  const roles = [
+    ...leadFeatures.map((feature, index) => ({ track: feature.track.index, role: index === 0 ? "lead1" : "lead2", name: leadGroups[index].name })),
+    ...harmonyOrdered.map((feature, index) => ({ track: feature.track.index, role: "harmony", name: harmonyLabels[index] })),
+    { track: bass.track.index, role: "bass", name: "低音" },
+    ...padFeatures.map((feature, index) => ({ track: feature.track.index, role: "pad", name: padGroups[index].name })),
+    ...fillFeatures.map((feature, index) => ({ track: feature.track.index, role: "fill", name: fillGroups[index].name })),
+    ...extraHarmony.map((feature, index) => ({ track: feature.track.index, role: "other", name: otherGroups[index].name })),
+  ];
+  return {
+    available: true,
+    reason: "",
+    core,
+    full,
+    reference,
+    roles,
+    stats: {
+      tracks: tracks.length,
+      leads: leadFeatures.length,
+      harmony: harmonyFeatures.length,
+      pads: padFeatures.length,
+      fills: fillFeatures.length,
+      others: extraHarmony.length,
+    },
+  };
+}
+
 /** 同度重复去重：同音高、起拍差在容差内的音合并成一个（时值取最长）。 */
 function mergeDuplicateNotes(notes, tolerance) {
   const sorted = notes.slice().sort((left, right) => left.midi - right.midi
@@ -951,7 +1102,9 @@ function renderPartLines(part, partIndex, context, lines) {
 export function midiToMusicXml(input, options = {}) {
   const midi = parseMidiFile(input);
   const title = String(options.title || "").trim() || "MIDI 导入的乐谱";
-  const grouping = ["tracks", "melody", "voices"].includes(options.grouping) ? options.grouping : "auto";
+  const grouping = ["tracks", "melody", "voices", "acappella6", "acappella10", "acappella12"].includes(options.grouping)
+    ? options.grouping
+    : "auto";
   const division = midi.division;
   const grid = Math.max(1, Math.round(division / QUANTIZE_STEPS_PER_BEAT));
   const quantize = (tick) => Math.round(tick / grid) * grid;
@@ -979,6 +1132,16 @@ export function midiToMusicXml(input, options = {}) {
   if (!sourceTracks.length) throw new Error("MIDI 文件里没有可记谱的音符（可能只有打击乐或控制事件）。");
   // 按需截断（maxParts 只限制「独立声部」的数量，归并后的主旋律/和声层不受影响）
   const analysis = analyzeMidiTracks(sourceTracks, division);
+  const acappella = analyzeAcappellaTracks(sourceTracks, division);
+  // 关系分析已经证明「这些轨是同一条旋律的重复/八度/和声叠录」时，阿卡贝拉角色识别没有意义：
+  // 那是「一条旋律的多层叠录」，不是「多条不同的人声线」，别硬按主唱/和声去拆。
+  if (acappella.available && analysis.appliedMode === "auto" && analysis.groups.length < sourceTracks.length - 1) {
+    acappella.available = false;
+    acappella.reason = "duplicate-layers";
+  }
+  const acappellaByMode = {
+    acappella6: acappella.core, acappella10: acappella.full, acappella12: acappella.reference,
+  };
   const trackParts = () => {
     const names = uniquePartNames(sourceTracks.map((item) => item.name));
     return sourceTracks.map((item, order) => ({
@@ -986,14 +1149,55 @@ export function midiToMusicXml(input, options = {}) {
     }));
   };
   let groups;
-  if (grouping === "tracks" || analysis.appliedMode === "tracks") {
+  let appliedGrouping;
+  if (grouping === "tracks") {
     groups = trackParts();
-  } else if (grouping === "melody") {
-    groups = analysis.groups.filter((group) => group.role === "melody");
+    appliedGrouping = "tracks";
+  } else if (grouping in acappellaByMode) {
+    if (acappella.available && acappellaByMode[grouping].length) {
+      groups = acappellaByMode[grouping].slice();
+      appliedGrouping = grouping;
+    } else {
+      groups = trackParts();
+      appliedGrouping = "tracks";
+    }
   } else if (grouping === "voices") {
-    groups = analysis.voiceGroups.slice();   // 分声部版（阿卡贝拉分谱）
+    if (analysis.appliedMode === "auto") {
+      groups = analysis.voiceGroups.slice();
+      appliedGrouping = "voices";
+    } else {
+      groups = trackParts();
+      appliedGrouping = "tracks";
+    }
+  } else if (grouping === "melody") {
+    if (analysis.appliedMode === "auto") {
+      groups = analysis.groups.filter((group) => group.role === "melody");
+      appliedGrouping = "melody";
+    } else if (acappella.available) {
+      // 「只保留主旋律」：把主唱 1 / 主唱 2 合成一条旋律线（两者基本是交替唱，不冲突）
+      const leadGroups = acappella.core.filter((group) => group.role === "lead1" || group.role === "lead2");
+      const leadNotes = leadGroups.flatMap((group) => group.notes);
+      const tolerance = Math.max(6, Math.round(division / 12));
+      groups = [{
+        name: "主旋律",
+        role: "melody",
+        sourceIndexes: leadGroups.flatMap((group) => group.sourceIndexes),
+        notes: mergeDuplicateNotes(leadNotes, tolerance),
+      }];
+      appliedGrouping = "melody";
+    } else {
+      groups = trackParts();
+      appliedGrouping = "tracks";
+    }
+  } else if (analysis.appliedMode === "auto") {
+    groups = analysis.groups.slice();        // 合并版（自动整理重复/和声叠加）
+    appliedGrouping = "auto";
+  } else if (acappella.available) {
+    groups = acappella.core.slice();         // 自动识别为阿卡贝拉编配 → 默认核心版
+    appliedGrouping = "acappella6";
   } else {
-    groups = analysis.groups.slice();        // 合并版（自动整理）
+    groups = trackParts();
+    appliedGrouping = "tracks";
   }
   if (options.maxParts && groups.length > options.maxParts) groups = groups.slice(0, options.maxParts);
   // 估计整曲调号：让谱面少满屏临时记号（调号猜错不影响音高，用户可在制谱软件里改调号）
@@ -1055,8 +1259,18 @@ export function midiToMusicXml(input, options = {}) {
       // 声部整理结果：界面用它在「乐谱信息」里如实说明「N 条轨道 → M 个声部」。
       grouping: {
         requested: grouping,
-        applied: grouping === "tracks" || analysis.appliedMode === "tracks" ? "tracks" : grouping,
-        consolidated: grouping !== "tracks" && analysis.appliedMode === "auto" && groups.length < sourceTracks.length,
+        applied: appliedGrouping,
+        // 阿卡贝拉识别结果（是否识别出编配角色、每轨角色、三种版本各几个声部）
+        acappellaAvailable: acappella.available,
+        acappellaReason: acappella.reason || "",
+        acappellaRoles: acappella.roles,
+        acappellaStats: acappella.stats,
+        acappellaVersions: acappella.available ? {
+          core: acappella.core.length,
+          full: acappella.full.length,
+          reference: acappella.reference.length,
+        } : null,
+        consolidated: appliedGrouping !== "tracks" && groups.length < sourceTracks.length,
         groups: groups.map((group) => {
           const pitches = group.notes.map((note) => note.midi);
           return {

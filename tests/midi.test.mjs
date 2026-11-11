@@ -333,3 +333,88 @@ test("自动整理：真正独立的声部不会被硬合并（退回一条轨�
   assert.equal(auto.meta.grouping.consolidated, false);
   assert.deepEqual(parseMusicXmlText(auto.musicxml).partNames, ["旋律", "低音", "高音"]);
 });
+
+// —— 阿卡贝拉编配识别（2026-11-11）——
+
+test("阿卡贝拉识别：自动区分主唱/低音/和声/叠层/加花，并给出三种版本", () => {
+  const beatTicks = 480;
+  const quarterTicks = 120;
+  const steadyTrack = (name, pitchForBeat, offsetTicks, fromBeat, toBeat) => {
+    let tick = 0;
+    const events = [nameEvent(0, name)];
+    for (let beat = fromBeat; beat <= toBeat; beat += 1) {
+      const start = beat * beatTicks + offsetTicks;
+      events.push(onEvent(start - tick, pitchForBeat(beat)));
+      tick = start;
+      events.push(offEvent(beatTicks, pitchForBeat(beat)));
+      tick = start + beatTicks;
+    }
+    return trackChunk(events);
+  };
+  const sixteenthTrack = (name, pitchForIndex, fromBeat, count) => {
+    let tick = 0;
+    const events = [nameEvent(0, name)];
+    for (let index = 0; index < count; index += 1) {
+      const start = fromBeat * beatTicks + index * quarterTicks;
+      events.push(onEvent(start - tick, pitchForIndex(index)));
+      tick = start;
+      events.push(offEvent(quarterTicks, pitchForIndex(index)));
+      tick = start + quarterTicks;
+    }
+    return trackChunk(events);
+  };
+  const bassPattern = [40, 43, 36, 38];
+  const tracks = [
+    trackChunk([tempoEvent(0, 120), timeEvent(0, 4, 4)]),
+    sixteenthTrack("主唱1", (index) => 60 + ((index * 5) % 13), 0, 128),
+    sixteenthTrack("主唱2", (index) => 60 + ((index * 7) % 13), 32, 128),
+    steadyTrack("bass", (beat) => bassPattern[beat % 4], 0, 0, 60),
+    steadyTrack("和声低", () => 52, 0, 0, 60),
+    steadyTrack("和声中", () => 55, 240, 0, 60),
+    steadyTrack("和声高", () => 59, 360, 0, 60),
+    steadyTrack("叠层1", () => 72, 0, 56, 60),
+    steadyTrack("叠层2", () => 76, 0, 56, 60),
+    steadyTrack("加花", () => 64, 0, 20, 27),
+  ];
+  const bytes = midiFile({ tracks });
+
+  const auto = midiToMusicXml(bytes, { grouping: "auto" });
+  assert.equal(auto.meta.grouping.acappellaAvailable, true, "应识别出阿卡贝拉编配");
+  assert.equal(auto.meta.grouping.applied, "acappella6", "自动模式应落到阿卡贝拉核心版");
+  assert.equal(auto.meta.parts, 6);
+  assert.deepEqual(auto.meta.grouping.acappellaRoles.map((role) => role.name),
+    ["主唱 1", "主唱 2", "和声 · 高", "和声 · 中", "和声 · 低", "低音", "叠层 1", "叠层 2", "加花"]);
+  assert.deepEqual(auto.meta.grouping.acappellaStats,
+    { tracks: 9, leads: 2, harmony: 3, pads: 2, fills: 1, others: 0 });
+  assert.deepEqual(auto.meta.grouping.acappellaVersions, { core: 6, full: 8, reference: 9 });
+  assert.deepEqual(parseMusicXmlText(auto.musicxml).partNames,
+    ["主唱 1", "主唱 2", "和声 · 高", "和声 · 中", "和声 · 低", "低音"]);
+
+  const full = midiToMusicXml(bytes, { grouping: "acappella10" });
+  assert.equal(full.meta.grouping.applied, "acappella10");
+  assert.equal(full.meta.parts, 8, "完整版 = 核心 6 + 2 个叠层");
+  const reference = midiToMusicXml(bytes, { grouping: "acappella12" });
+  assert.equal(reference.meta.parts, 9, "全部轨道 = 完整版 + 加花");
+  assert.deepEqual(parseMusicXmlText(reference.musicxml).partNames.slice(-3), ["叠层 1", "叠层 2", "加花"]);
+
+  const melodyOnly = midiToMusicXml(bytes, { grouping: "melody" });
+  assert.equal(melodyOnly.meta.parts, 1);
+  assert.deepEqual(parseMusicXmlText(melodyOnly.musicxml).partNames, ["主旋律"]);
+  const tracksMode = midiToMusicXml(bytes, { grouping: "tracks" });
+  assert.equal(tracksMode.meta.parts, 9);
+});
+
+test("阿卡贝拉识别不可靠时退回逐轨，不会硬拆声部", () => {
+  const track = (name, noteNumber) => trackChunk([
+    nameEvent(0, name),
+    onEvent(0, noteNumber),
+    offEvent(480, noteNumber),
+  ]);
+  const bytes = midiFile({ tracks: [track("甲", 60), track("乙", 62), track("丙", 64)] });
+  const auto = midiToMusicXml(bytes, { grouping: "auto" });
+  assert.equal(auto.meta.grouping.acappellaAvailable, false);
+  assert.equal(auto.meta.parts, 3);
+  const requested = midiToMusicXml(bytes, { grouping: "acappella10" });
+  assert.equal(requested.meta.grouping.applied, "tracks", "识别失败时 acappella 模式应如实退回逐轨");
+  assert.equal(requested.meta.parts, 3);
+});

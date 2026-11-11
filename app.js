@@ -20,7 +20,7 @@ import {
 
 // 页面代码版本（与页脚「版本」一致）。服务端 /api/version 会读同一个字符串并比对：
 // 如果浏览器里跑的是旧缓存代码，界面会明确提示「按 Ctrl+F5 刷新」，避免用旧版本识别后误判结果。
-const APP_BUILD = "2026-11-10·播放静音修复";
+const APP_BUILD = "2026-11-11·阿卡贝拉分谱";
 
 const byId = (id) => document.getElementById(id);
 const els = {
@@ -843,7 +843,7 @@ async function loadMidi(file, token) {
   if (token !== state.loadToken) return;
   updateMidiGroupingUi(meta);
   els.midiExportGroup.hidden = false;
-  const modeLabel = midiGroupingLabel(meta.grouping?.requested || grouping);
+  const modeLabel = midiGroupingLabel(meta.grouping?.requested || grouping, meta.grouping?.applied);
   els.exportMusicXmlButton.title = `导出当前整理方式（${modeLabel}）的 MusicXML；切换「MIDI 声部整理」后可再导出另一份`;
   els.exportStaffPdfButton.title = pdfReady
     ? `把当前整理方式（${modeLabel}）的五线谱下载为 PDF；切换下拉后可再导出另一份`
@@ -865,10 +865,22 @@ async function loadMidi(file, token) {
     : `已导入 MIDI（${modeLabel}）：${trackCount} 条轨道 → ${meta.parts} 个声部、${noteCount} 个音符。${previewError ? previewError + "。" : ""}可先试听或导出 MusicXML。`);
 }
 /** MIDI 声部整理方式的显示名（导出文件名里也会带上，方便区分导出的哪一份）。 */
-function midiGroupingLabel(mode) {
-  return { auto: "合并版", voices: "分声部", melody: "主旋律", tracks: "原始逐轨" }[mode] || "合并版";
+function midiGroupingLabel(mode, applied) {
+  // 「自动」时按实际落到的模式命名（例如自动识别成阿卡贝拉核心版 → 文件名带「阿卡贝拉6声部」）
+  const effective = mode === "auto" ? (applied || "auto") : (mode || "auto");
+  return {
+    auto: "合并版",
+    voices: "分声部",
+    melody: "主旋律",
+    tracks: "原始逐轨",
+    acappella6: "阿卡贝拉6声部",
+    acappella10: "阿卡贝拉10声部",
+    acappella12: "阿卡贝拉全部轨道",
+  }[effective] || "自动整理";
 }
-const MIDI_GROUPING_MODES = new Set(["auto", "voices", "melody", "tracks"]);
+const MIDI_GROUPING_MODES = new Set([
+  "auto", "voices", "melody", "tracks", "acappella6", "acappella10", "acappella12",
+]);
 function normalizeMidiGrouping(mode) {
   return MIDI_GROUPING_MODES.has(mode) ? mode : "auto";
 }
@@ -885,7 +897,9 @@ function midiRangeText(range) {
  * 用户会看到「10 个声部」这种明显不对的谱面。这里如实说明「几条轨道 → 几个声部、为什么」，
  * 并把选择权交给用户：
  *   · 合并版：主旋律 + 和声层（精简，适合自己练/看总谱）
- *   · 分声部（阿卡贝拉）：合并重复轨后，明显不同的旋律/和声层各自成声部（适合排练分谱）
+ *   · 分声部：合并重复轨后，明显不同的旋律/和声层各自成声部
+ *   · 阿卡贝拉分谱：自动识别主唱 1/2、低音、和声高/中/低、结尾叠层、加花，
+ *     提供「核心版（排练）」「完整版（含叠层）」「全部轨道（参考）」三种
  *   · 只保留主旋律 / 原始逐轨（逐轨核对）
  */
 function updateMidiGroupingUi(meta) {
@@ -896,6 +910,8 @@ function updateMidiGroupingUi(meta) {
   const grouping = meta.grouping || {};
   const groups = grouping.groups || [];
   const trackCount = meta.pitchedTracks ?? meta.tracks;
+  const stats = grouping.acappellaStats || {};
+  const versions = grouping.acappellaVersions || null;
   const describe = (group) => {
     const range = midiRangeText(group.range);
     const rangeText = range ? `，音域 ${range}` : "";
@@ -908,9 +924,29 @@ function updateMidiGroupingUi(meta) {
   } else if (requested === "melody") {
     text = `只保留主旋律：${meta.parts} 个声部（其余轨道是这条旋律的重复/八度/和声叠加，已省略）。`;
   } else if (requested === "voices") {
-    text = `分声部版（阿卡贝拉分谱）：同度重复轨已合并，明显不同的旋律/和声层各自成声部，共 ${meta.parts} 个 —— `
+    text = `分声部版：同度重复轨已合并，明显不同的旋律/和声层各自成声部，共 ${meta.parts} 个 —— `
       + groups.map(describe).join("；")
       + "。「分段补轨」标注了它在全曲的拍段；导出按钮导出的是当前这一份，切换下拉后可再导出另一份。";
+  } else if (requested === "acappella6" || requested === "acappella10" || requested === "acappella12") {
+    if (!grouping.acappellaAvailable) {
+      text = `没有识别出阿卡贝拉编配结构（至少需要 1 条主唱 + 2 条和声 + 1 条低音：本次 ${trackCount} 条轨道里没凑齐），`
+        + `已按 ${meta.parts} 条轨道逐轨显示；可以用「原始逐轨」模式核对后再决定怎么分声部。`;
+    } else if (requested === "acappella6") {
+      text = `阿卡贝拉 · 核心版（排练主谱）：识别到 ${stats.leads ?? "—"} 条主唱、${stats.harmony ?? "—"} 条和声、1 条低音，`
+        + `共 ${meta.parts} 个声部 —— ${groups.map(describe).join("；")}。`
+        + `结尾叠层 ${stats.pads ?? 0} 条、加花 ${stats.fills ?? 0} 条不在这版里，可在「完整版 / 全部轨道」查看。`;
+    } else if (requested === "acappella10") {
+      text = `阿卡贝拉 · 完整演出版：核心 ${versions?.core ?? "—"} 个声部 + 结尾叠层 ${stats.pads ?? 0} 条 = 共 ${meta.parts} 个声部 —— `
+        + groups.map(describe).join("；")
+        + "。叠层声部主要出现在结尾段（如第 74–82 小节），人数够时按这版排。";
+    } else {
+      text = `阿卡贝拉 · 全部轨道参考：${meta.parts} 个声部（核心 + 叠层 + 加花小轨）—— `
+        + groups.map(describe).join("；")
+        + "。这一版用于核对原编曲的所有轨，排练请用核心版或完整版。";
+    }
+  } else if (grouping.applied === "acappella6") {
+    text = `自动识别为「阿卡贝拉编配」：${trackCount} 条人声轨 → 核心 ${meta.parts} 个声部（主唱 1/2 + 和声高/中/低 + 低音）。`
+      + `另有 ${stats.pads ?? 0} 条结尾叠层、${stats.fills ?? 0} 条加花未列入；在下拉里可切「完整版 / 全部轨道」，导出按钮导出当前这一份。`;
   } else if (grouping.consolidated) {
     text = `合并版：检测到 ${trackCount} 条轨道其实是同一条旋律的分层/叠录，已自动整理成 ${meta.parts} 个声部：`
       + groups.map((group) => `${group.name}（合并 ${group.tracks.length} 条轨道）`).join("、") + "。";
@@ -970,7 +1006,7 @@ function downloadBlob(blob, fileName) {
 /** 导出 MusicXML：客户端直接下载生成的文本，不需要服务端。导出的是「当前整理方式」这一份。 */
 function exportMidiMusicXml() {
   if (!state.midiInfo) return showToast("当前乐谱不是从 MIDI 导入的，没有可导出的 MusicXML。");
-  const modeLabel = midiGroupingLabel(state.midiGrouping);
+  const modeLabel = midiGroupingLabel(state.midiGrouping, state.midiInfo?.meta?.grouping?.applied);
   const blob = new Blob([state.midiInfo.musicxml], { type: "application/vnd.recordare.musicxml+xml;charset=utf-8" });
   downloadBlob(blob, `${midiExportBaseName()}-${modeLabel}.musicxml`);
   showToast(`已导出 MusicXML（${modeLabel}）：可在 MuseScore 等制谱软件里继续修改、打印；切换「MIDI 声部整理」后可再导出另一份。`);
@@ -1000,7 +1036,7 @@ async function exportMidiStaffPdf() {
       pdfBytes = await response.arrayBuffer();
       info.pdfBytes = pdfBytes;   // 缓存：再次导出不再排版
     }
-    const modeLabel = midiGroupingLabel(state.midiGrouping);
+    const modeLabel = midiGroupingLabel(state.midiGrouping, state.midiInfo?.meta?.grouping?.applied);
     downloadBlob(new Blob([pdfBytes], { type: "application/pdf" }), `${midiExportBaseName()}-${modeLabel}.pdf`);
     showToast(`已导出五线谱 PDF（${modeLabel}）。`);
   } catch (error) {
